@@ -1,0 +1,55 @@
+# Sophia
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+db.sqlite3
+*.egg-info/
+dist/
+build/
+.env
+media/
+staticfiles/
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# Rust
+target/
+
+# E2E テスト成果物
+tests/e2e/screenshots/
+tests/e2e/smart_test_report.json
+
+# Python venv
+.venv/
+venv/
+node_modules/
+backups/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+mac-planning-standards
+.env.production
+
+# 機密情報・一時生成物（2026-07-12 git追跡解除。P1-1）
+credentials/
+cookies.txt
+data_exports/
+tmp/
+report_test.md
+.env.local
+.env.staging
+.env.dr
+
+# 誤って作成されたネストクローン・生成物（2026-07-31）
+code/
+uploads/
+
+# Tauriデスクトップアプリ（自動生成物・ローカルツールキャッシュ）
+frontend/src-tauri/gen/
+frontend/src-tauri/target/
+landing/.wrangler/
+scripts/pdf/company_seal.png
