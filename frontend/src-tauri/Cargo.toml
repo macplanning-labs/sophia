@@ -1,0 +1,20 @@
+[package]
+name = "sophia"
+version = "0.0.0"
+description = "Sophia - SES受発注・稼働管理・給与統合システム"
+authors = ["Yutaka Yoshikawa"]
+edition = "2021"
+rust-version = "1.60"
+exclude = ["../.git"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2", features = [] }
+
+[profile.release]
+opt-level = "z"
+lto = true

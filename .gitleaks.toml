@@ -1,0 +1,7 @@
+title = "Sophia OSS extract"
+
+[allowlist]
+description = "OSS extract allowlist (paths / false-positive patterns only; no secret values)"
+paths = [
+  '''scripts/oss_sanitize/.*''',
+]

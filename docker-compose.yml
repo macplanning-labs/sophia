@@ -1,0 +1,51 @@
+# ============================================================
+# docker-compose.yml — Sophia OSS ローカル一発起動
+# ============================================================
+# 使い方:
+#   cp .env.example .env
+#   docker compose up --build
+#
+# 入口: http://localhost:8111
+# 秘密は .env のみ（本ファイルに平文で埋め込まない）
+# ============================================================
+
+name: sophia-oss
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: sophia-oss-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sophia
+      POSTGRES_USER: sophia
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - sophia_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sophia -d sophia"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sophia-oss-web
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8111}:8111"
+    environment:
+      DATABASE_URL: postgres://sophia:${POSTGRES_PASSWORD}@db:5432/sophia
+      PORT: "8111"
+      BASE_URL: ${BASE_URL:-http://localhost:8111}
+      SECRET_KEY: ${SECRET_KEY}
+      ENV_NAME: ${ENV_NAME:-development}
+      ENABLE_SWAGGER_UI: ${ENABLE_SWAGGER_UI:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  sophia_pgdata:

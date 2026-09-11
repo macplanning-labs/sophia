@@ -1,0 +1,557 @@
+{
+  "components": {
+    "schemas": {
+      "InvoiceResponse": {
+        "properties": {
+          "client_accepted_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "client_name": {
+            "type": "string"
+          },
+          "due_date": {
+            "format": "date",
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "invoice_id": {
+            "type": "string"
+          },
+          "issue_date": {
+            "format": "date",
+            "type": "string"
+          },
+          "item_count": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "project_name": {
+            "nullable": true,
+            "type": "string"
+          },
+          "received_order_id": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "target_month": {
+            "format": "date",
+            "nullable": true,
+            "type": "string"
+          },
+          "total_amount": {
+            "format": "int64",
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "invoice_id",
+          "client_name",
+          "subject",
+          "issue_date",
+          "item_count",
+          "status"
+        ],
+        "type": "object"
+      },
+      "NoticeResponse": {
+        "properties": {
+          "confirmed": {
+            "type": "boolean"
+          },
+          "notice_date": {
+            "format": "date",
+            "type": "string"
+          },
+          "notice_id": {
+            "type": "string"
+          },
+          "partner_name": {
+            "type": "string"
+          },
+          "purchase_order_id": {
+            "type": "string"
+          },
+          "target_month": {
+            "format": "date",
+            "type": "string"
+          },
+          "total": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "notice_id",
+          "partner_name",
+          "target_month",
+          "total",
+          "confirmed",
+          "notice_date",
+          "purchase_order_id"
+        ],
+        "type": "object"
+      },
+      "TimesheetListResponse": {
+        "properties": {
+          "summary": {
+            "$ref": "#/components/schemas/TimesheetSummaryResponse"
+          },
+          "timesheets": {
+            "items": {
+              "$ref": "#/components/schemas/TimesheetRowResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "timesheets",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "TimesheetRowResponse": {
+        "properties": {
+          "contract_info": {
+            "type": "string"
+          },
+          "engineer_name": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "original_filename": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "target_month": {
+            "format": "date",
+            "type": "string"
+          },
+          "total_hours": {
+            "type": "number"
+          },
+          "work_days": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "target_month",
+          "status",
+          "total_hours",
+          "work_days",
+          "contract_info",
+          "engineer_name",
+          "original_filename"
+        ],
+        "type": "object"
+      },
+      "TimesheetSummaryResponse": {
+        "properties": {
+          "approved": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "pending": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "uploaded": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "pending",
+          "uploaded",
+          "approved"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "CookieAuth": {
+        "description": "Admin 向け JWT（HttpOnly Cookie）。実トークンは記載しない。",
+        "in": "cookie",
+        "name": "sophia_jwt",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "社内向け REST API（開発・運用用）。取引先向けの /v1 API とは別。第1波 api-keys、第2波 notices/invoices/timesheets。",
+    "title": "Sophia /api/v1 Internal API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.0.0",
+  "paths": {
+    "/invoices": {
+      "get": {
+        "operationId": "list_invoices_internal",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InvoiceResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "請求書一覧"
+          },
+          "401": {
+            "description": "認証失敗"
+          },
+          "500": {
+            "description": "サーバーエラー"
+          }
+        },
+        "security": [
+          {
+            "CookieAuth": []
+          }
+        ],
+        "summary": "請求書一覧",
+        "tags": [
+          "invoices"
+        ]
+      }
+    },
+    "/notices": {
+      "get": {
+        "operationId": "list_notices",
+        "parameters": [
+          {
+            "description": "パートナーID（オプション）",
+            "in": "query",
+            "name": "partner",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/NoticeResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "支払通知書一覧"
+          },
+          "401": {
+            "description": "認証失敗"
+          },
+          "500": {
+            "description": "サーバーエラー"
+          }
+        },
+        "security": [
+          {
+            "CookieAuth": []
+          }
+        ],
+        "summary": "支払通知書一覧",
+        "tags": [
+          "notices"
+        ]
+      }
+    },
+    "/settings/api-keys": {
+      "get": {
+        "operationId": "list_api_keys",
+        "parameters": [
+          {
+            "description": "クライアント（取引先）ID",
+            "in": "query",
+            "name": "client_id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "properties": {
+                      "created_at": {
+                        "format": "date-time",
+                        "type": "string"
+                      },
+                      "id": {
+                        "format": "uuid",
+                        "type": "string"
+                      },
+                      "is_active": {
+                        "type": "boolean"
+                      },
+                      "key_prefix": {
+                        "description": "sk_live_ または sk_test_ で始まる接頭辞",
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "revoked_at": {
+                        "format": "date-time",
+                        "nullable": true,
+                        "type": "string"
+                      },
+                      "scope": {
+                        "enum": [
+                          "READ",
+                          "READ_WRITE"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "API キー一覧"
+          },
+          "400": {
+            "description": "client_id 未指定など"
+          },
+          "401": {
+            "description": "認証失敗"
+          },
+          "403": {
+            "description": "権限不足（Admin 以外）"
+          }
+        },
+        "security": [
+          {
+            "CookieAuth": []
+          }
+        ],
+        "summary": "API キー一覧",
+        "tags": [
+          "settings"
+        ]
+      },
+      "post": {
+        "operationId": "generate_api_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "client_id": {
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "environment": {
+                    "enum": [
+                      "test",
+                      "live"
+                    ],
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "キー名（管理用）",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "enum": [
+                      "READ",
+                      "READ_WRITE"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "client_id",
+                  "name",
+                  "scope",
+                  "environment"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "api_key": {
+                      "description": "生キー（この時のみ）",
+                      "type": "string"
+                    },
+                    "id": {
+                      "format": "uuid",
+                      "type": "string"
+                    },
+                    "key_prefix": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "API キー作成完了（生キーはこの応答でのみ返る）"
+          },
+          "400": {
+            "description": "パラメータ不正"
+          },
+          "401": {
+            "description": "認証失敗"
+          },
+          "403": {
+            "description": "権限不足"
+          }
+        },
+        "security": [
+          {
+            "CookieAuth": []
+          }
+        ],
+        "summary": "API キー発行",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/settings/api-keys/{id}/revoke": {
+      "post": {
+        "operationId": "revoke_api_key",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "キー失効完了"
+          },
+          "401": {
+            "description": "認証失敗"
+          },
+          "403": {
+            "description": "権限不足"
+          },
+          "404": {
+            "description": "キーが見つからないか既に失効済み"
+          }
+        },
+        "security": [
+          {
+            "CookieAuth": []
+          }
+        ],
+        "summary": "API キー失効",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/timesheets": {
+      "get": {
+        "operationId": "list_timesheets",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimesheetListResponse"
+                }
+              }
+            },
+            "description": "稼働報告一覧"
+          },
+          "401": {
+            "description": "認証失敗"
+          },
+          "500": {
+            "description": "サーバーエラー"
+          }
+        },
+        "security": [
+          {
+            "CookieAuth": []
+          }
+        ],
+        "summary": "稼働報告一覧",
+        "tags": [
+          "timesheets"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "社内向け REST API",
+      "url": "/api/v1"
+    }
+  ],
+  "tags": [
+    {
+      "description": "支払通知書管理 API",
+      "name": "notices"
+    },
+    {
+      "description": "請求書管理 API",
+      "name": "invoices"
+    },
+    {
+      "description": "稼働報告管理 API",
+      "name": "timesheets"
+    },
+    {
+      "description": "設定・管理 API",
+      "name": "settings"
+    }
+  ]
+}

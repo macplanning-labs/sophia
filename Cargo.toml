@@ -1,0 +1,120 @@
+[workspace]
+members = [".", "crates/auth-core", "crates/drive-core"]
+resolver = "2"
+
+[package]
+name = "sophia"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "SES受発注管理システム — 発注・受注・稼働報告・給与計算を一元管理（OSS ドンガラ）"
+repository = "https://github.com/macplanning-labs/sophia"
+
+[dependencies]
+# 認証共通ライブラリ（公開ビルド用に crates/ へ同梱）
+auth-core = { path = "crates/auth-core" }
+# auth_core::domain::jwt::TokenBlacklist トレイト実装に必要（auth-core側と同じ0.1系）
+async-trait = "0.1"
+
+# Web フレームワーク
+axum = { version = "0.8", features = ["macros", "multipart"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+
+# OpenAPI スキーマ生成（utoipa）
+utoipa = { version = "4", features = ["axum_extras", "chrono", "uuid"] }
+
+
+# データベース
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "chrono", "uuid", "rust_decimal", "migrate"] }
+
+# メール送信
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+# PDF生成
+
+
+# シリアライズ
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 日時
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# 精密な10進数計算（精算・給与）
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+
+# パスワードハッシュ
+bcrypt = "0.17"
+
+# HMAC認証（Webhook検証）
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# メールテンプレートレンダリング（DB保存テンプレート用）
+tera = "1"
+
+# ログ
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 環境変数
+dotenvy = "0.15"
+
+# Cookie のmax_age に必要
+time = "0.3"
+
+# エラーハンドリング
+anyhow = "1"
+thiserror = "2"
+
+# MFA: TOTP（ワンタイムパスワード）
+totp-rs = { version = "5", features = ["qr", "gen_secret"] }
+
+# MFA: WebAuthn（パスキー）
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs-proto = "0.5"
+url = "2"
+
+# MFA: TOTP秘密鍵の暗号化保存
+aes-gcm = "0.10"
+rand = "0.8"
+
+# Google Drive API用
+openssl = { version = "0.10", features = ["vendored"] }
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+jsonwebtoken = "9"
+# Google Drive連携共通クレート（複数プロジェクトで共通化）
+drive-core = { path = "crates/drive-core" }
+
+# Excel解析（稼働報告書自動読取り — EDI_MP excel_parser.py 移植）
+calamine = "0.36"
+
+# 正規表現
+regex = "1"
+
+# IMAP メール取得（受信メール自動取込 — EDI_MP email_receiver.py 移植）
+imap = "2"
+native-tls = "0.2"
+
+# メール解析（MIMEヘッダーデコード・添付ファイル名抽出）
+mailparse = "0.15"
+
+# 定期実行スケジューラ（メール取得ジョブ）
+tokio-cron-scheduler = "0.13"
+
+# PDFテキスト抽出（注文書/支払通知書PDF自動パース — EDI_MP order_pdf_parser.py 等の移植元）
+pdf-extract = "0.12"
+jpholiday = "0.2.0"
+
