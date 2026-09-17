@@ -23,9 +23,11 @@ docker compose down -v   # ローカル DB ボリュームも削除
 docker compose up --build
 ```
 
-## デスクトップアプリ（β版）
+## デスクトップアプリ（準備中）
 
-Tauri製のデスクトップアプリ（macOS / Windows）を [Releases](https://github.com/macplanning-labs/sophia/releases) から配布しています。ダウンロード・インストールしてすぐに使える形を優先したβ版です。ソースからビルドする場合は `frontend/src-tauri/` と `.github/workflows/desktop-build.yml` を参照してください。
+Tauri 製デスクトップ（macOS / Windows）のソースは `frontend/src-tauri/` にあります。ビルド手順は `.github/workflows/desktop-build.yml` を参照してください。
+
+**現時点では Releases に一般向け .dmg / .exe を置いていません。** 一般利用の正本は上記 **Docker 一発起動** です。Desktop 配布物が揃い次第、Release assets として公開します。
 
 ## アーキテクチャ（要約）
 
