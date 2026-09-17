@@ -31,7 +31,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY src ./src
 COPY migrations ./migrations
-COPY templates ./templates
 COPY static ./static
 COPY fonts ./fonts
 COPY scripts/pdf ./scripts/pdf
@@ -54,7 +53,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=rust-builder /app/sophia /usr/local/bin/sophia
 COPY --from=rust-builder /app/migrations /app/migrations
-COPY --from=rust-builder /app/templates /app/templates
 COPY --from=rust-builder /app/static /app/static
 COPY --from=rust-builder /app/fonts /app/fonts
 COPY --from=rust-builder /app/scripts/pdf /app/scripts/pdf
