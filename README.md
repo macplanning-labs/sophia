@@ -8,6 +8,8 @@ SES（システムエンジニアリングサービス）事業向けの受発�
 
 ホストに Rust / Node / PostgreSQL の個別インストールは不要です。
 
+**必要なメモリ:** 初回のビルド(Rust のリリースビルド)は多くのメモリを使います。Docker に **4GB 以上（推奨 6GB 以上）** のメモリを割り当ててください。不足すると、ビルドが `cannot allocate memory` で失敗します（Docker Desktop の Settings → Resources、colima の場合は `colima start --memory 6`）。
+
 ```bash
 cp .env.example .env
 # .env の POSTGRES_PASSWORD と SECRET_KEY をローカル用の値に書き換える（初回起動前に）
