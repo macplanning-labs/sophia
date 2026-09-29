@@ -36,6 +36,8 @@ services:
     restart: unless-stopped
     ports:
       - "${PORT:-8111}:8111"
+    env_file:
+      - .env
     environment:
       DATABASE_URL: postgres://sophia:${POSTGRES_PASSWORD}@db:5432/sophia
       PORT: "8111"
@@ -43,6 +45,9 @@ services:
       SECRET_KEY: ${SECRET_KEY}
       ENV_NAME: ${ENV_NAME:-development}
       ENABLE_SWAGGER_UI: ${ENABLE_SWAGGER_UI:-true}
+    # volumes:
+    #   # Uncomment and adjust path if using Google Drive integration
+    #   # - ./credentials:/app/credentials:ro
     depends_on:
       db:
         condition: service_healthy
