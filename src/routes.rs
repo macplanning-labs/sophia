@@ -1423,11 +1423,6 @@ pub fn create_router(state: AppState) -> Router {
             crate::presentation::middleware::origin_check::sophia_origin_check_middleware(
                 std::sync::Arc::new(vec![
                     std::env::var("BASE_URL").unwrap_or_default(),
-                    // ドメイン移行中の一時許可（sophia.example.com →
-                    // sophia-app.example.com）。移行完了後、BASE_URL切替と
-                    // 旧ドメイン退役が済んだら、この行と下のtauriエントリの並び順も
-                    // 含めて整理を検討する。
-                    "https://sophia-app.example.com".to_string(),
                     "tauri://localhost".to_string(),
                     "http://tauri.localhost".to_string(),
                 ]),

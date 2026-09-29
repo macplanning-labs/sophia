@@ -23,6 +23,20 @@ docker compose down -v   # ローカル DB ボリュームも削除
 docker compose up --build
 ```
 
+## 任意機能（既定は無効）
+
+連携機能は既定では無効です。`.env` の該当行のコメントを外して設定すると有効になります（`docker compose up` は `.env` を読み込みます）。SMTP による送信は本番以外の環境では誤送信防止のためテスト宛先へ転送されます。
+
+| 機能 | 既定 | 有効にするには | 設定の場所 |
+|---|---|---|---|
+| メール送信（SMTP） | 無効（本番以外ではテスト宛先へ転送） | `ENV_NAME=production`、送信先ドメインは `EMAIL_INTERNAL_DOMAINS` | 画面「自社情報」（SMTP）+ 環境変数 |
+| メール自動取込（IMAP） | 無効 | `MAIL_PIPELINE_ENABLED=true`、`IMAP_HOST`、画面「自社情報」の SMTP ユーザー/パスワード | 画面 + 環境変数 |
+| Google Drive 保存 | 無効（鍵が無ければスキップ） | `GOOGLE_DRIVE_CREDENTIALS_FILE`（コンテナ内パス。volumes で鍵ファイルを渡す）、`GOOGLE_DRIVE_ROOT_FOLDER_ID` 他 | 環境変数 |
+| EDI-OASIS 連携 | 無効（未設定なら「未設定」エラー） | `EDI_OASIS_BASE_URL` `EDI_OASIS_USER` `EDI_OASIS_PASSWORD` `EDI_OASIS_COMPANY_NAME` | 環境変数 |
+| Peppol | 無効（同上） | `PEPPOL_API_BASE_URL` `PEPPOL_API_KEY` `PEPPOL_OWN_PARTICIPANT_ID` `PEPPOL_WEBHOOK_SECRET` | 環境変数 |
+| Google Chat 通知 | 無効 | `GOOGLE_CHAT_WEBHOOK_URL` | 環境変数 |
+| Ollama（ローカル AI） | 無効 | `OLLAMA_HOST` `OLLAMA_MODEL` | 環境変数 |
+
 ## デスクトップアプリ（準備中）
 
 Tauri 製デスクトップ（macOS / Windows）のソースは `frontend/src-tauri/` にあります。ビルド手順は `.github/workflows/desktop-build.yml` を参照してください。
