@@ -134,7 +134,9 @@ pub async fn edi_list_orders(
                 let mut v = serde_json::to_value(o).unwrap_or_default();
                 if let Some(order_no) = v.get("order_no").and_then(|n| n.as_str()) {
                     let is_imported = imported_orders.iter().any(|imp| imp == order_no);
-                    v.as_object_mut().unwrap().insert("is_imported".to_string(), serde_json::json!(is_imported));
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("is_imported".to_string(), serde_json::json!(is_imported));
+                    }
                 }
                 enriched.push(v);
             }

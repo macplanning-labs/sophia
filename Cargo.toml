@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/auth-core", "crates/drive-core"]
+members = [".", "crates/auth-core", "crates/google-auth", "crates/drive-core"]
 resolver = "2"
 
 [package]
@@ -9,10 +9,15 @@ edition = "2021"
 license = "MIT"
 description = "SES受発注管理システム — 発注・受注・稼働報告・給与計算を一元管理（OSS ドンガラ）"
 repository = "https://github.com/macplanning-labs/sophia"
+# export_openapi 等の補助バイナリがあるため、`cargo run` の既定をアプリ本体に固定する
+default-run = "sophia"
 
 [dependencies]
 # 認証共通ライブラリ（公開ビルド用に crates/ へ同梱）
 auth-core = { path = "crates/auth-core" }
+# Google Workspace（サービスアカウント + ドメイン全体委任）認証共通ライブラリ
+# （メール送信Gmail API移行(DEMO-000068)で実装したgoogle_auth.rsを切り出し）
+google-auth = { path = "crates/google-auth" }
 # auth_core::domain::jwt::TokenBlacklist トレイト実装に必要（auth-core側と同じ0.1系）
 async-trait = "0.1"
 
@@ -94,7 +99,6 @@ rand = "0.8"
 openssl = { version = "0.10", features = ["vendored"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
-jsonwebtoken = "9"
 # Google Drive連携共通クレート（複数プロジェクトで共通化）
 drive-core = { path = "crates/drive-core" }
 

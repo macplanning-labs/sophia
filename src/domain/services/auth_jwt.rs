@@ -75,7 +75,7 @@ pub fn issue_sophia_access_claims(
     user_id: i64,
     role: &str,
     mfa_verified: bool,
-) -> (Claims, String) {
+) -> Result<(Claims, String), AuthError> {
     let jti = uuid::Uuid::new_v4().to_string();
     let extra = SophiaExtraClaims {
         role: role.to_string(),
@@ -87,15 +87,15 @@ pub fn issue_sophia_access_claims(
         access_ttl: access_ttl(),
         refresh_ttl: refresh_ttl(),
     };
-    let extra_value =
-        serde_json::to_value(&extra).expect("SophiaExtraClaims serialization cannot fail");
+    let extra_value = serde_json::to_value(&extra)
+        .map_err(|e| AuthError::Internal(format!("claims のシリアライズに失敗: {e}")))?;
     let claims = auth_issue_access_claims(&user_id.to_string(), &[], JWT_ISS, policy, extra_value);
-    (claims, jti)
+    Ok((claims, jti))
 }
 
 /// リフレッシュトークン（7日）のClaimsを組み立てる。
 /// token_type は TOKEN_TYPE_REFRESH。mfa_verified は常に true（本ログイン後のみ）。
-pub fn issue_sophia_refresh_claims(user_id: i64, role: &str) -> (Claims, String) {
+pub fn issue_sophia_refresh_claims(user_id: i64, role: &str) -> Result<(Claims, String), AuthError> {
     let jti = uuid::Uuid::new_v4().to_string();
     let extra = SophiaExtraClaims {
         role: role.to_string(),
@@ -107,14 +107,14 @@ pub fn issue_sophia_refresh_claims(user_id: i64, role: &str) -> (Claims, String)
         access_ttl: refresh_ttl(),
         refresh_ttl: refresh_ttl(),
     };
-    let extra_value =
-        serde_json::to_value(&extra).expect("SophiaExtraClaims serialization cannot fail");
+    let extra_value = serde_json::to_value(&extra)
+        .map_err(|e| AuthError::Internal(format!("claims のシリアライズに失敗: {e}")))?;
     let claims = auth_issue_access_claims(&user_id.to_string(), &[], JWT_ISS, policy, extra_value);
-    (claims, jti)
+    Ok((claims, jti))
 }
 
 /// MFA未検証状態を表す短命（5分）トークンのClaimsを組み立てる。
-pub fn issue_mfa_pending_claims(user_id: i64, role: &str) -> Claims {
+pub fn issue_mfa_pending_claims(user_id: i64, role: &str) -> Result<Claims, AuthError> {
     let jti = uuid::Uuid::new_v4().to_string();
     let extra = SophiaExtraClaims {
         role: role.to_string(),
@@ -126,9 +126,9 @@ pub fn issue_mfa_pending_claims(user_id: i64, role: &str) -> Claims {
         access_ttl: mfa_pending_ttl(),
         refresh_ttl: mfa_pending_ttl(),
     };
-    let extra_value =
-        serde_json::to_value(&extra).expect("SophiaExtraClaims serialization cannot fail");
-    auth_issue_access_claims(&user_id.to_string(), &[], JWT_ISS, policy, extra_value)
+    let extra_value = serde_json::to_value(&extra)
+        .map_err(|e| AuthError::Internal(format!("claims のシリアライズに失敗: {e}")))?;
+    Ok(auth_issue_access_claims(&user_id.to_string(), &[], JWT_ISS, policy, extra_value))
 }
 
 // ── ペア発行 ──
@@ -139,10 +139,10 @@ pub fn issue_and_encode_token_pair(
     role: &str,
     secret: &str,
 ) -> Result<StaffTokenPair, AuthError> {
-    let (access_claims, access_jti) = issue_sophia_access_claims(user_id, role, true);
+    let (access_claims, access_jti) = issue_sophia_access_claims(user_id, role, true)?;
     let access = encode_sophia_claims(&access_claims, secret)?;
 
-    let (refresh_claims, refresh_jti) = issue_sophia_refresh_claims(user_id, role);
+    let (refresh_claims, refresh_jti) = issue_sophia_refresh_claims(user_id, role)?;
     let refresh = encode_sophia_claims(&refresh_claims, secret)?;
 
     Ok(StaffTokenPair {
@@ -161,7 +161,7 @@ pub fn issue_and_encode_access(
     mfa_verified: bool,
     secret: &str,
 ) -> Result<String, AuthError> {
-    let (claims, _) = issue_sophia_access_claims(user_id, role, mfa_verified);
+    let (claims, _) = issue_sophia_access_claims(user_id, role, mfa_verified)?;
     encode_sophia_claims(&claims, secret)
 }
 
@@ -197,7 +197,7 @@ mod tests {
         let role = "ADMIN";
         let mfa_verified = true;
 
-        let (claims, jti) = issue_sophia_access_claims(user_id, role, mfa_verified);
+        let (claims, jti) = issue_sophia_access_claims(user_id, role, mfa_verified).unwrap();
         let token = encode_sophia_claims(&claims, TEST_SECRET).unwrap();
         let (decoded_claims, decoded_extra) = decode_sophia_claims(&token, TEST_SECRET).unwrap();
 
@@ -217,7 +217,7 @@ mod tests {
         let user_id = 42i64;
         let role = "ADMIN";
 
-        let (claims, jti) = issue_sophia_refresh_claims(user_id, role);
+        let (claims, jti) = issue_sophia_refresh_claims(user_id, role).unwrap();
         let token = encode_sophia_claims(&claims, TEST_SECRET).unwrap();
         let (decoded_claims, decoded_extra) = decode_sophia_claims(&token, TEST_SECRET).unwrap();
 
@@ -242,7 +242,7 @@ mod tests {
         let user_id = 42i64;
         let role = "ADMIN";
 
-        let claims = issue_mfa_pending_claims(user_id, role);
+        let claims = issue_mfa_pending_claims(user_id, role).unwrap();
         let token = encode_sophia_claims(&claims, TEST_SECRET).unwrap();
         let (decoded_claims, decoded_extra) = decode_sophia_claims(&token, TEST_SECRET).unwrap();
 

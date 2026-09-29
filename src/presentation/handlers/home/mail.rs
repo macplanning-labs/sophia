@@ -50,7 +50,7 @@ impl MailRow {
 pub(super) async fn build_mail_logs(pool: &PgPool) -> Vec<MailRow> {
     crate::infrastructure::repositories::mail_repo::list_unreflected_mails(pool)
         .await
-        .unwrap_or_else(|e| { tracing::warn!("home: list_unreflected_mails failed: {:?}", e); vec![] })
+        .unwrap_or_else(|e| { tracing::error!("home: list_unreflected_mails failed: {:?}", e); vec![] })
 }
 
 pub(super) async fn count_confirmed_mails(pool: &PgPool) -> i64 {
@@ -252,8 +252,10 @@ fn verify_webhook_signature(headers: &HeaderMap, body: &[u8]) -> bool {
         return false;
     }
 
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
     mac.update(body);
     let expected = hex::encode(mac.finalize().into_bytes());
 

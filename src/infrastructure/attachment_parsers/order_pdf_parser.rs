@@ -18,6 +18,7 @@ use chrono::NaiveDate;
 use regex::Regex;
 use serde::Serialize;
 use std::sync::LazyLock;
+use crate::domain::services::static_regex::compile_static;
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ParsedOrder {
@@ -58,7 +59,7 @@ pub fn parse(text: &str) -> ParsedOrder {
 }
 
 fn is_ebusiness_format(text: &str) -> bool {
-    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"EB\d{6}[A-Z]\d+").unwrap());
+    static RE: LazyLock<Regex> = LazyLock::new(|| compile_static(r"EB\d{6}[A-Z]\d+"));
     text.contains("イー・ビジネス") || RE.is_match(text)
 }
 
@@ -82,22 +83,22 @@ fn ymd(y: &str, m: &str, d: &str) -> Option<NaiveDate> {
 
 fn parse_ebusiness(text: &str, result: &mut ParsedOrder) {
     static ORDER_NO_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?:注[⽂文]番号[：:]?\s*)([A-Z]{2}\d{6}[A-Z]\d+)").unwrap());
+        LazyLock::new(|| compile_static(r"(?:注[⽂文]番号[：:]?\s*)([A-Z]{2}\d{6}[A-Z]\d+)"));
     if let Some(c) = ORDER_NO_RE.captures(text) {
         result.client_order_number = c.get(1).map(|m| m.as_str().to_string());
     }
 
     static ORDER_DATE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(\d{4})年(\d{1,2})[⽉月](\d{1,2})日").unwrap());
+        LazyLock::new(|| compile_static(r"(\d{4})年(\d{1,2})[⽉月](\d{1,2})日"));
     if let Some(c) = ORDER_DATE_RE.captures(text) {
         result.order_date = ymd(&c[1], &c[2], &c[3]);
     }
 
     // 業務名称: pdfminerは「業務名称\n作業期間\n<業務名>\n<日付>」の順で抽出することが多い
     static PROJECT_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"業務名称\s*\n+\s*作業期間\s*\n+\s*(.+?)\s*\n").unwrap()
+        compile_static(r"業務名称\s*\n+\s*作業期間\s*\n+\s*(.+?)\s*\n")
     });
-    static DATE_START_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}年").unwrap());
+    static DATE_START_RE: LazyLock<Regex> = LazyLock::new(|| compile_static(r"^\d{4}年"));
     if let Some(c) = PROJECT_NAME_RE.captures(text) {
         let name = c[1].trim();
         if !DATE_START_RE.is_match(name) {
@@ -107,7 +108,7 @@ fn parse_ebusiness(text: &str, result: &mut ParsedOrder) {
     // フォールバック: 従来のパターン
     if result.project_name.is_none() {
         static FALLBACK_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"(?s)(?:業務名称|件名)\s*\n?\s*(.+?)(?:\n|作業期間)").unwrap()
+            compile_static(r"(?s)(?:業務名称|件名)\s*\n?\s*(.+?)(?:\n|作業期間)")
         });
         if let Some(c) = FALLBACK_RE.captures(text) {
             let name = c[1].trim();
@@ -118,10 +119,9 @@ fn parse_ebusiness(text: &str, result: &mut ParsedOrder) {
     }
 
     static WORK_PERIOD_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
+        compile_static(
             r"(\d{4})年(\d{1,2})[⽉月](\d{1,2})日\s*[〜～~]\s*(\d{4})年(\d{1,2})[⽉月](\d{1,2})日",
         )
-        .unwrap()
     });
     if let Some(c) = WORK_PERIOD_RE.captures(text) {
         result.work_start = ymd(&c[1], &c[2], &c[3]);
@@ -129,14 +129,14 @@ fn parse_ebusiness(text: &str, result: &mut ParsedOrder) {
     }
 
     static UNIT_PRICE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"[⽉月]額基本料[⾦金][：:]?\s*[￥¥]?([\d,]+)").unwrap()
+        compile_static(r"[⽉月]額基本料[⾦金][：:]?\s*[￥¥]?([\d,]+)")
     });
     if let Some(c) = UNIT_PRICE_RE.captures(text) {
         result.unit_price = parse_amount(&c[1]);
     }
 
     static TIME_RANGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"基準時間[：:]?\s*([\d.]+)\s*h?\s*[〜～~]\s*([\d.]+)\s*h?").unwrap()
+        compile_static(r"基準時間[：:]?\s*([\d.]+)\s*h?\s*[〜～~]\s*([\d.]+)\s*h?")
     });
     if let Some(c) = TIME_RANGE_RE.captures(text) {
         result.time_lower = c[1].parse().ok();
@@ -144,22 +144,22 @@ fn parse_ebusiness(text: &str, result: &mut ParsedOrder) {
     }
 
     static EXCESS_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"超過単価[：:]?\s*[￥¥]?([\d,]+)").unwrap());
+        LazyLock::new(|| compile_static(r"超過単価[：:]?\s*[￥¥]?([\d,]+)"));
     if let Some(c) = EXCESS_RE.captures(text) {
         result.excess_rate = parse_amount(&c[1]);
     }
 
     static SHORTAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?:不[⾜足]|控除)単価[：:]?\s*[￥¥]?([\d,]+)").unwrap()
+        compile_static(r"(?:不[⾜足]|控除)単価[：:]?\s*[￥¥]?([\d,]+)")
     });
     if let Some(c) = SHORTAGE_RE.captures(text) {
         result.shortage_rate = parse_amount(&c[1]);
     }
 
     static PERSON_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"作業責任者\s*\n+\s*(.+?)(?:\s*\n)").unwrap());
+        LazyLock::new(|| compile_static(r"作業責任者\s*\n+\s*(.+?)(?:\s*\n)"));
     static PERSON_EXCLUDE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^(連絡|委託|業務|￥|\d{4}年)").unwrap());
+        LazyLock::new(|| compile_static(r"^(連絡|委託|業務|￥|\d{4}年)"));
     if let Some(c) = PERSON_RE.captures(text) {
         let name = c[1].trim();
         if !name.is_empty() && !PERSON_EXCLUDE_RE.is_match(name) {
@@ -168,7 +168,7 @@ fn parse_ebusiness(text: &str, result: &mut ParsedOrder) {
     }
 
     static PAYMENT_TERMS_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?s)(?:⽀払|支払)条件\s*\n?\s*(.+?)(?:\n|①)").unwrap()
+        compile_static(r"(?s)(?:⽀払|支払)条件\s*\n?\s*(.+?)(?:\n|①)")
     });
     if let Some(c) = PAYMENT_TERMS_RE.captures(text) {
         result.payment_terms = Some(truncate_chars(c[1].trim(), 255));
@@ -176,13 +176,13 @@ fn parse_ebusiness(text: &str, result: &mut ParsedOrder) {
 }
 
 fn parse_ntp(text: &str, result: &mut ParsedOrder) {
-    static ORDER_NO_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(PO-\d+)").unwrap());
+    static ORDER_NO_RE: LazyLock<Regex> = LazyLock::new(|| compile_static(r"(PO-\d+)"));
     if let Some(c) = ORDER_NO_RE.captures(text) {
         result.client_order_number = Some(c[1].to_string());
     }
 
     static ISO_DATE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(\d{4}-\d{2}-\d{2})").unwrap());
+        LazyLock::new(|| compile_static(r"(\d{4}-\d{2}-\d{2})"));
     if let Some(c) = ISO_DATE_RE.captures(text) {
         result.order_date = NaiveDate::parse_from_str(&c[1], "%Y-%m-%d").ok();
     }
@@ -201,25 +201,25 @@ fn parse_ntp(text: &str, result: &mut ParsedOrder) {
     }
     if result.project_name.is_none() {
         static PJ_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"([^\n]*(?:PJ|プロジェクト|案件)[^\n]*)").unwrap());
+            LazyLock::new(|| compile_static(r"([^\n]*(?:PJ|プロジェクト|案件)[^\n]*)"));
         if let Some(c) = PJ_RE.captures(text) {
             result.project_name = Some(truncate_chars(c[1].trim(), 255));
         }
     }
 
     static UNIT_PRICE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"基本[⽉月]?額?単価[：:]?\s*[￥¥]?([\d,]+)").unwrap());
+        LazyLock::new(|| compile_static(r"基本[⽉月]?額?単価[：:]?\s*[￥¥]?([\d,]+)"));
     if let Some(c) = UNIT_PRICE_RE.captures(text) {
         result.unit_price = parse_amount(&c[1]);
     } else {
-        static AMOUNT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"([\d,]{5,})円").unwrap());
+        static AMOUNT_RE: LazyLock<Regex> = LazyLock::new(|| compile_static(r"([\d,]{5,})円"));
         if let Some(c) = AMOUNT_RE.captures(text) {
             result.unit_price = parse_amount(&c[1]);
         }
     }
 
     static TIME_RANGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"精算条件[：:]?\s*([\d.]+)\s*h?\s*[〜～~ー]\s*([\d.]+)\s*h?").unwrap()
+        compile_static(r"精算条件[：:]?\s*([\d.]+)\s*h?\s*[〜～~ー]\s*([\d.]+)\s*h?")
     });
     if let Some(c) = TIME_RANGE_RE.captures(text) {
         result.time_lower = c[1].parse().ok();
@@ -227,7 +227,7 @@ fn parse_ntp(text: &str, result: &mut ParsedOrder) {
     }
 
     static EXCESS_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"超過控除単価[：:]?\s*[￥¥]?([\d,]+)").unwrap());
+        LazyLock::new(|| compile_static(r"超過控除単価[：:]?\s*[￥¥]?([\d,]+)"));
     if let Some(c) = EXCESS_RE.captures(text) {
         let rate = parse_amount(&c[1]);
         result.excess_rate = rate;
@@ -236,7 +236,7 @@ fn parse_ntp(text: &str, result: &mut ParsedOrder) {
 
     // 納品期限: 全ISO日付のうち最後のものを作業終了日、その年月初日を作業開始日とする
     static ALL_ISO_DATES_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(\d{4}-\d{2}-\d{2})").unwrap());
+        LazyLock::new(|| compile_static(r"(\d{4}-\d{2}-\d{2})"));
     let dates: Vec<&str> = ALL_ISO_DATES_RE
         .captures_iter(text)
         .filter_map(|c| c.get(1).map(|m| m.as_str()))
@@ -256,20 +256,20 @@ fn parse_ntp(text: &str, result: &mut ParsedOrder) {
 fn parse_cross(text: &str, result: &mut ParsedOrder) {
     // No.2668 / No．2668
     static ORDER_NO_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"No[.．]\s*([0-9A-Za-z\-]+)").unwrap());
+        LazyLock::new(|| compile_static(r"No[.．]\s*([0-9A-Za-z\-]+)"));
     if let Some(c) = ORDER_NO_RE.captures(text) {
         result.client_order_number = Some(c[1].to_string());
     }
 
     static ORDER_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"発注日[：:\s]*(\d{4})年(\d{1,2})[⽉月](\d{1,2})日").unwrap()
+        compile_static(r"発注日[：:\s]*(\d{4})年(\d{1,2})[⽉月](\d{1,2})日")
     });
     if let Some(c) = ORDER_DATE_RE.captures(text) {
         result.order_date = ymd(&c[1], &c[2], &c[3]);
     }
 
     static PROJECT_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"件名[：:\s]*([^\n]+)").unwrap());
+        LazyLock::new(|| compile_static(r"件名[：:\s]*([^\n]+)"));
     if let Some(c) = PROJECT_RE.captures(text) {
         let name = collapse_ws(c[1].trim());
         if !name.is_empty() {
@@ -278,7 +278,7 @@ fn parse_cross(text: &str, result: &mut ParsedOrder) {
     }
     if result.project_name.is_none() {
         static ABSTRACT_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"摘要[：:\s]*([^\n]+)").unwrap());
+            LazyLock::new(|| compile_static(r"摘要[：:\s]*([^\n]+)"));
         if let Some(c) = ABSTRACT_RE.captures(text) {
             let name = collapse_ws(c[1].trim());
             if !name.is_empty() {
@@ -288,10 +288,9 @@ fn parse_cross(text: &str, result: &mut ParsedOrder) {
     }
 
     static WORK_PERIOD_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
+        compile_static(
             r"契約期間[：:\s]*(\d{4})年(\d{1,2})[⽉月](\d{1,2})日\s*[〜～~]\s*(\d{4})年(\d{1,2})[⽉月](\d{1,2})日",
         )
-        .unwrap()
     });
     if let Some(c) = WORK_PERIOD_RE.captures(text) {
         result.work_start = ymd(&c[1], &c[2], &c[3]);
@@ -300,14 +299,14 @@ fn parse_cross(text: &str, result: &mut ParsedOrder) {
 
     // 明細の単価列（数量×単価）を優先。なければ月額表記
     static UNIT_PRICE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"単価[^\d]{0,20}([\d,]+)").unwrap()
+        compile_static(r"単価[^\d]{0,20}([\d,]+)")
     });
     if let Some(c) = UNIT_PRICE_RE.captures(text) {
         result.unit_price = parse_amount(&c[1]);
     }
     if result.unit_price.is_none() {
         static MONTHLY_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"[⽉月]額[：:\s]*[￥¥]?([\d,]+)").unwrap()
+            compile_static(r"[⽉月]額[：:\s]*[￥¥]?([\d,]+)")
         });
         if let Some(c) = MONTHLY_RE.captures(text) {
             result.unit_price = parse_amount(&c[1]);
@@ -315,7 +314,7 @@ fn parse_cross(text: &str, result: &mut ParsedOrder) {
     }
 
     static TIME_RANGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"精算条件[：:\s]*([\d.]+)\s*時間?\s*[〜～~]\s*([\d.]+)\s*時間?").unwrap()
+        compile_static(r"精算条件[：:\s]*([\d.]+)\s*時間?\s*[〜～~]\s*([\d.]+)\s*時間?")
     });
     if let Some(c) = TIME_RANGE_RE.captures(text) {
         result.time_lower = c[1].parse().ok();
@@ -323,19 +322,19 @@ fn parse_cross(text: &str, result: &mut ParsedOrder) {
     }
 
     static EXCESS_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"超過[：:\s]*([\d,]+)\s*円").unwrap());
+        LazyLock::new(|| compile_static(r"超過[：:\s]*([\d,]+)\s*円"));
     if let Some(c) = EXCESS_RE.captures(text) {
         result.excess_rate = parse_amount(&c[1]);
     }
 
     static SHORTAGE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"控除[：:\s]*([\d,]+)\s*円").unwrap());
+        LazyLock::new(|| compile_static(r"控除[：:\s]*([\d,]+)\s*円"));
     if let Some(c) = SHORTAGE_RE.captures(text) {
         result.shortage_rate = parse_amount(&c[1]);
     }
 
     static PAYMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"支払条件[：:\s]*([^\n]+)").unwrap()
+        compile_static(r"支払条件[：:\s]*([^\n]+)")
     });
     if let Some(c) = PAYMENT_RE.captures(text) {
         result.payment_terms = Some(truncate_chars(c[1].trim(), 255));
@@ -344,26 +343,26 @@ fn parse_cross(text: &str, result: &mut ParsedOrder) {
 
 fn parse_generic(text: &str, result: &mut ParsedOrder) {
     static ORDER_NO_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?:注文番号|発注番号|PO番号)[：:\s]*([A-Za-z0-9\-]+)").unwrap()
+        compile_static(r"(?:注文番号|発注番号|PO番号)[：:\s]*([A-Za-z0-9\-]+)")
     });
     if let Some(c) = ORDER_NO_RE.captures(text) {
         result.client_order_number = Some(c[1].to_string());
     }
 
     static DATE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(\d{4})[/\-年](\d{1,2})[/\-月](\d{1,2})").unwrap());
+        LazyLock::new(|| compile_static(r"(\d{4})[/\-年](\d{1,2})[/\-月](\d{1,2})"));
     if let Some(c) = DATE_RE.captures(text) {
         result.order_date = ymd(&c[1], &c[2], &c[3]);
     }
 
     static UNIT_PRICE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?:単価|月額)[：:\s]*[￥¥]?([\d,]+)").unwrap());
+        LazyLock::new(|| compile_static(r"(?:単価|月額)[：:\s]*[￥¥]?([\d,]+)"));
     if let Some(c) = UNIT_PRICE_RE.captures(text) {
         result.unit_price = parse_amount(&c[1]);
     }
 
     static TIME_RANGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"([\d.]+)\s*h?\s*[〜～~ー]\s*([\d.]+)\s*h?").unwrap()
+        compile_static(r"([\d.]+)\s*h?\s*[〜～~ー]\s*([\d.]+)\s*h?")
     });
     if let Some(c) = TIME_RANGE_RE.captures(text) {
         result.time_lower = c[1].parse().ok();
@@ -371,20 +370,20 @@ fn parse_generic(text: &str, result: &mut ParsedOrder) {
     }
 
     static EXCESS_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"超過[^\d]*[￥¥]?([\d,]+)").unwrap());
+        LazyLock::new(|| compile_static(r"超過[^\d]*[￥¥]?([\d,]+)"));
     if let Some(c) = EXCESS_RE.captures(text) {
         result.excess_rate = parse_amount(&c[1]);
     }
 
     static SHORTAGE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?:控除|不足)[^\d]*[￥¥]?([\d,]+)").unwrap());
+        LazyLock::new(|| compile_static(r"(?:控除|不足)[^\d]*[￥¥]?([\d,]+)"));
     if let Some(c) = SHORTAGE_RE.captures(text) {
         result.shortage_rate = parse_amount(&c[1]);
     }
 }
 
 fn collapse_ws(s: &str) -> String {
-    static WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+    static WS_RE: LazyLock<Regex> = LazyLock::new(|| compile_static(r"\s+"));
     truncate_chars(&WS_RE.replace_all(s, " "), 255)
 }
 
@@ -395,6 +394,13 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_static_regexes_compile() {
+        // 起動時にすべての静的正規表現がコンパイル可能か検証
+        // parse() 関数を呼び出すことで LazyLock が評価される
+        let _ = parse("");
+    }
 
     #[test]
     fn detects_ebusiness_format_by_order_number() {

@@ -236,7 +236,7 @@ mod tests {
         use crate::infrastructure::repositories::test_support;
 
         test_support::with_rollback(|pool| async move {
-            let (claims, _jti) = auth_jwt::issue_sophia_access_claims(1, "ADMIN", true);
+            let (claims, _jti) = auth_jwt::issue_sophia_access_claims(1, "ADMIN", true).unwrap();
             let token = auth_jwt::encode_sophia_claims(&claims, "test-secret-key").unwrap();
 
             let result = super::verify_staff_jwt(&pool, "test-secret-key", &token).await;
@@ -255,7 +255,7 @@ mod tests {
 
         test_support::with_rollback(|pool| async move {
             // mfa_pending トークン（token_type="mfa_pending"）は access として受理されない
-            let claims = auth_jwt::issue_mfa_pending_claims(1, "ADMIN");
+            let claims = auth_jwt::issue_mfa_pending_claims(1, "ADMIN").unwrap();
             let token = auth_jwt::encode_sophia_claims(&claims, "test-secret-key").unwrap();
 
             let result = super::verify_staff_jwt(&pool, "test-secret-key", &token).await;
@@ -275,7 +275,7 @@ mod tests {
         use chrono::Utc;
 
         test_support::with_rollback(|pool| async move {
-            let (claims, jti) = auth_jwt::issue_sophia_access_claims(1, "ADMIN", true);
+            let (claims, jti) = auth_jwt::issue_sophia_access_claims(1, "ADMIN", true).unwrap();
             let token = auth_jwt::encode_sophia_claims(&claims, "test-secret-key").unwrap();
 
             // Blacklist the jti
@@ -339,7 +339,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (claims, _jti) = auth_jwt::issue_sophia_access_claims(5, "EMPLOYEE", true);
+            let (claims, _jti) = auth_jwt::issue_sophia_access_claims(5, "EMPLOYEE", true).unwrap();
             let token = auth_jwt::encode_sophia_claims(&claims, "test-secret-key").unwrap();
 
             let result = super::verify_staff_jwt(&pool, "test-secret-key", &token).await;

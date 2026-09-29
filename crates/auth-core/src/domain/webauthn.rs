@@ -163,6 +163,37 @@ pub fn finish_authentication(
         .map_err(|e| AuthError::WebAuthn(format!("パスキー認証完了に失敗: {e}")))
 }
 
+// ── 認証（既知クレデンシャルリスト方式）──
+//
+// discoverable方式（上記）とは別に、呼び出し側が事前にどのユーザーのPasskeyを
+// 検証対象にするか特定できている場合向けの、webauthn-rs標準の
+// start_passkey_authentication/finish_passkey_authentication をそのまま薄く
+// ラップしたもの。Sophia（本人確認済みユーザーのMFA用パスキー、または
+// 全ユーザーのPasskeyを事前に読み込んだ上でのパスワードレスログイン）が使用する。
+// discoverable方式と異なり、未認証の呼び出し元にcredential一覧(allowCredentials)
+// が開示される点に注意（用途に応じて使い分けること）。
+
+/// 既知のPasskey一覧を対象にパスキー認証を開始する。
+pub fn start_authentication_with_credentials(
+    webauthn: &Webauthn,
+    credentials: &[Passkey],
+) -> Result<(RequestChallengeResponse, PasskeyAuthentication), AuthError> {
+    webauthn
+        .start_passkey_authentication(credentials)
+        .map_err(|e| AuthError::WebAuthn(format!("パスキー認証開始に失敗: {e}")))
+}
+
+/// 既知のPasskey一覧に対するパスキー認証を完了する。
+pub fn finish_authentication_with_credentials(
+    webauthn: &Webauthn,
+    auth_state: &PasskeyAuthentication,
+    credential: &PublicKeyCredential,
+) -> Result<AuthenticationResult, AuthError> {
+    webauthn
+        .finish_passkey_authentication(credential, auth_state)
+        .map_err(|e| AuthError::WebAuthn(format!("パスキー認証完了に失敗: {e}")))
+}
+
 // ── ユーティリティ（状態のJSONシリアライズ、echo-backパターン用）──
 
 pub fn credential_id_from_passkey(passkey: &Passkey) -> Vec<u8> {

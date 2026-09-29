@@ -24,7 +24,7 @@ pub async fn api_index(
     });
     let target_month = NaiveDate::parse_from_str(&target_month_str, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(&format!("{}-01", target_month_str), "%Y-%m-%d"))
-        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap());
+        .unwrap_or_else(|_| today.with_day(1).unwrap_or(today));
 
     let sfilter = SettlementFilter {
         target_month: Some(target_month_str),

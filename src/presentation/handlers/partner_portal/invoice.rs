@@ -114,24 +114,31 @@ pub async fn api_invoice_pdf(
     use axum::response::Response;
     use axum::body::Body;
     use axum::http::{header, StatusCode};
+    use crate::presentation::http_util;
 
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
     let notice = order_repo::find_payment_notice_for_partner(&pool, &notice_id, partner_id).await.ok().flatten();
 
     let notice = match notice {
         Some(n) => n,
-        None => return Response::builder().status(StatusCode::NOT_FOUND)
-            .body(Body::from("請求書が見つかりません")).expect("Response builder"),
+        None => return http_util::build_response(
+            Response::builder().status(StatusCode::NOT_FOUND),
+            Body::from("請求書が見つかりません")
+        ),
     };
 
     match crate::presentation::handlers::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await {
-        Ok(pdf_bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/pdf")
-            .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"invoice_{}.pdf\"", notice_id))
-            .body(Body::from(pdf_bytes)).expect("Response builder"),
-        Err(e) => Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(e)).expect("Response builder"),
+        Ok(pdf_bytes) => http_util::build_response(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"invoice_{}.pdf\"", notice_id)),
+            Body::from(pdf_bytes)
+        ),
+        Err(e) => http_util::build_response(
+            Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR),
+            Body::from(e)
+        ),
     }
 }
 
@@ -144,24 +151,31 @@ pub async fn api_payment_notice_pdf(
     use axum::response::Response;
     use axum::body::Body;
     use axum::http::{header, StatusCode};
+    use crate::presentation::http_util;
 
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
     let notice = order_repo::find_payment_notice_for_partner(&pool, &notice_id, partner_id).await.ok().flatten();
 
     let notice = match notice {
         Some(n) => n,
-        None => return Response::builder().status(StatusCode::NOT_FOUND)
-            .body(Body::from("支払通知書が見つかりません")).expect("Response builder"),
+        None => return http_util::build_response(
+            Response::builder().status(StatusCode::NOT_FOUND),
+            Body::from("支払通知書が見つかりません")
+        ),
     };
 
     match crate::presentation::handlers::notices::generate_payment_notice_pdf_bytes(&pool, &notice).await {
-        Ok(pdf_bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/pdf")
-            .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"notice_{}.pdf\"", notice_id))
-            .body(Body::from(pdf_bytes)).expect("Response builder"),
-        Err(e) => Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(e)).expect("Response builder"),
+        Ok(pdf_bytes) => http_util::build_response(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"notice_{}.pdf\"", notice_id)),
+            Body::from(pdf_bytes)
+        ),
+        Err(e) => http_util::build_response(
+            Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR),
+            Body::from(e)
+        ),
     }
 }
 

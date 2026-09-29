@@ -130,15 +130,11 @@ impl EmailService {
         body: &str,
         attachments: Vec<EmailAttachment>,
     ) -> Result<()> {
-        // SMTP設定取得（CompanyInfo優先、.envフォールバック）
-        let smtp_host = self.get_smtp_setting("email_host", "EMAIL_HOST").await;
-        let smtp_port = self.get_smtp_setting("email_port", "EMAIL_PORT").await;
-        let smtp_user = self.get_smtp_setting("email_host_user", "EMAIL_HOST_USER").await;
-        let smtp_pass = self.get_smtp_setting("email_host_password", "EMAIL_HOST_PASSWORD").await;
+        // 送信元メールアドレス取得（CompanyInfo優先、.envフォールバック）
         let from_email = self.get_smtp_setting("default_from_email", "DEFAULT_FROM_EMAIL").await;
 
-        if smtp_host.is_empty() {
-            info!("[Email] SMTP未設定のためスキップ: to={}, subject={}", to, subject);
+        if from_email.trim().is_empty() {
+            info!("[Email] 送信元メールアドレス未設定のためスキップ: to={}, subject={}", to, subject);
             return Ok(());
         }
 
@@ -151,7 +147,7 @@ impl EmailService {
 
         // 誤送信防止ガード（2026-07-12追加。請求書テストメールが実在取引先へ誤送信された
         // 事故を受けて導入。本番(ENV_NAME=production)以外では、社内ドメイン
-        // (example.com) 以外の外部宛先への送信を実際には行わず、テスト用アドレス
+        // (EMAIL_INTERNAL_DOMAINS) 以外の外部宛先への送信を実際には行わず、テスト用アドレス
         // （EMAIL_TEST_REDIRECT_TO、未設定時は差出人自身）へ強制的にリダイレクトする。
         // ENV_NAME が未設定・不明な値の場合も「本番ではない」扱いとし、fail-safeにする。
         let is_production = std::env::var("ENV_NAME").unwrap_or_default() == "production";
@@ -192,9 +188,8 @@ impl EmailService {
         let cc = cc.as_deref();
         let body = body.as_str();
 
-        use lettre::{Message, SmtpTransport, Transport};
-        use lettre::transport::smtp::authentication::Credentials;
-        use lettre::message::{header::ContentType, MultiPart, SinglePart, Attachment};
+        use lettre::message::{header::ContentType, MultiPart, SinglePart, Attachment, Message};
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
         let from_addr = from_email.parse()
             .map_err(|e| EmailError::AddressParse(format!("From解析エラー: {}", e)))?;
@@ -236,7 +231,7 @@ impl EmailService {
 
             for att in &attachments {
                 let ct: ContentType = att.content_type.parse()
-                    .unwrap_or(ContentType::parse("application/octet-stream").unwrap());
+                    .unwrap_or_else(|_| ContentType::TEXT_PLAIN);
                 let attachment = Attachment::new(att.filename.clone())
                     .body(att.content.clone(), ct);
                 multipart = multipart.singlepart(attachment);
@@ -247,21 +242,42 @@ impl EmailService {
                 .map_err(|e| EmailError::MessageBuild(format!("{}", e)))?
         };
 
-        let port: u16 = smtp_port.parse().unwrap_or(587);
-        let creds = Credentials::new(smtp_user.clone(), smtp_pass.clone());
+        // Gmail APIで送信（base64url エンコード）
+        let raw_message = URL_SAFE_NO_PAD.encode(email.formatted());
 
-        let mailer = SmtpTransport::starttls_relay(&smtp_host)
-            .map_err(|e| EmailError::SmtpConnect(format!("{}", e)))?
-            .port(port)
-            .credentials(creds)
-            .build();
+        let send_result: std::result::Result<(), String> = async {
+            let token = google_auth::get_access_token_from_file(
+                "GOOGLE_MAIL_CREDENTIALS_FILE",
+                Some(from_email.as_str()),
+                "https://www.googleapis.com/auth/gmail.send",
+            )
+            .await
+            .map_err(|e| format!("Gmail API認証エラー: {}", e))?
+            .ok_or_else(|| "GOOGLE_MAIL_CREDENTIALS_FILE 未設定".to_string())?;
 
-        let send_result = mailer.send(&email);
+            let client = reqwest::Client::new();
+            let resp = client
+                .post("https://gmail.googleapis.com/gmail/v1/users/me/messages/send")
+                .bearer_auth(token)
+                .json(&serde_json::json!({ "raw": raw_message }))
+                .send()
+                .await
+                .map_err(|e| format!("{}", e))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(format!("Gmail API送信失敗 status={} body={}", status, body));
+            }
+            Ok(())
+        }
+        .await;
+
         if let Err(e) = &send_result {
             use crate::infrastructure::mail_pipeline::ops_message;
             ops_message::log_error(ops_message::fail(
                 "メール送信",
-                "SMTP",
+                "Gmail API",
                 "メール送信",
                 "宛先へのメール未達（呼び出し元の業務処理は呼び出し側次第）",
                 format!("to={} | {}", to, e),
@@ -296,20 +312,75 @@ impl EmailService {
     }
 }
 
+/// 社内ドメイン一覧をパースする（環境変数から）
+///
+/// explicit_csv: EMAIL_INTERNAL_DOMAINS (カンマ区切り、例 "example.com,example.co.jp")
+/// default_from_email: DEFAULT_FROM_EMAIL (例 "user@example.com")
+///
+/// 処理:
+/// 1. explicit_csv をカンマ分割 → trim → 小文字化 → 先頭の '@' を除去 → 空要素を除外
+/// 2. 重複を除去
+/// 3. 結果が空 → default_from_email の '@' 以降を 1 件だけ返す（trim・小文字化。'@' が無い/後ろが空なら無し）
+/// 4. 両方空 → 空の Vec
+fn parse_internal_domains(explicit_csv: &str, default_from_email: &str) -> Vec<String> {
+    let mut domains = explicit_csv
+        .split(',')
+        .map(|s| {
+            let trimmed = s.trim().to_lowercase();
+            if trimmed.starts_with('@') {
+                trimmed[1..].to_string()
+            } else {
+                trimmed
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+
+    // 重複を除去
+    domains.sort();
+    domains.dedup();
+
+    if domains.is_empty() {
+        // default_from_email の '@' 以降を抽出
+        if let Some(at_idx) = default_from_email.find('@') {
+            let domain_part = default_from_email[at_idx + 1..]
+                .trim()
+                .trim_end_matches('>')
+                .trim()
+                .to_lowercase();
+            if !domain_part.is_empty() {
+                return vec![domain_part];
+            }
+        }
+    }
+
+    domains
+}
+
 /// 非本番環境で実送信してよい宛先かどうかを判定する（誤送信防止ガード）。
 ///
-/// 社内ドメイン（example.com）宛、または `EMAIL_TEST_ALLOWED_RECIPIENTS`
+/// 社内ドメイン（EMAIL_INTERNAL_DOMAINS）宛、または `EMAIL_TEST_ALLOWED_RECIPIENTS`
 /// （カンマ区切り）に明示的に列挙されたアドレス宛のみ許可する。
 fn is_safe_test_recipient(addr: &str) -> bool {
-    is_recipient_allowed(addr, &std::env::var("EMAIL_TEST_ALLOWED_RECIPIENTS").unwrap_or_default())
+    let explicit_domains = std::env::var("EMAIL_INTERNAL_DOMAINS").unwrap_or_default();
+    let default_from_email = std::env::var("DEFAULT_FROM_EMAIL").unwrap_or_default();
+    let internal_domains = parse_internal_domains(&explicit_domains, &default_from_email);
+    let allowlist = std::env::var("EMAIL_TEST_ALLOWED_RECIPIENTS").unwrap_or_default();
+    is_recipient_allowed(addr, &allowlist, &internal_domains)
 }
 
 /// `is_safe_test_recipient` の判定ロジック本体（env非依存・テスト容易化のため分離）
-fn is_recipient_allowed(addr: &str, allowlist_csv: &str) -> bool {
+fn is_recipient_allowed(addr: &str, allowlist_csv: &str, internal_domains: &[String]) -> bool {
     let addr_lower = addr.trim().to_lowercase();
-    if addr_lower.ends_with("@example.com") {
-        return true;
+
+    // 社内ドメインをチェック
+    for domain in internal_domains {
+        if addr_lower.ends_with(&format!("@{}", domain)) {
+            return true;
+        }
     }
+
+    // allowlist をチェック（完全一致）
     allowlist_csv
         .split(',')
         .map(|s| s.trim().to_lowercase())
@@ -744,30 +815,118 @@ pub fn compose_order_republish_email(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_recipient_allowed, month_short};
+    use super::{is_recipient_allowed, parse_internal_domains, month_short};
 
     #[test]
     fn internal_domain_is_always_allowed() {
-        assert!(is_recipient_allowed("y.yoshikawa@example.com", ""));
-        assert!(is_recipient_allowed("Admin@Example.COM", ""));
+        let internal = vec!["example.com".to_string()];
+        assert!(is_recipient_allowed("user@example.com", "", &internal));
+        assert!(is_recipient_allowed("User@Example.COM", "", &internal));
     }
 
     #[test]
     fn external_domain_is_blocked_by_default() {
-        assert!(!is_recipient_allowed("client@ntp.example.com", ""));
+        let internal = vec![];
+        assert!(!is_recipient_allowed("client@ntp.example.com", "", &internal));
     }
 
     #[test]
     fn external_domain_allowed_when_explicitly_listed() {
         let allowlist = "client@ntp.example.com, partner@example.co.jp";
-        assert!(is_recipient_allowed("client@ntp.example.com", allowlist));
-        assert!(is_recipient_allowed(" partner@example.co.jp ", allowlist));
-        assert!(!is_recipient_allowed("other@example.org", allowlist));
+        let internal = vec![];
+        assert!(is_recipient_allowed("client@ntp.example.com", allowlist, &internal));
+        assert!(is_recipient_allowed(" partner@example.co.jp ", allowlist, &internal));
+        assert!(!is_recipient_allowed("other@example.com", allowlist, &internal));
     }
 
     #[test]
     fn empty_allowlist_entries_are_ignored() {
-        assert!(!is_recipient_allowed("", ",,  ,"));
+        let internal = vec![];
+        assert!(!is_recipient_allowed("", ",,  ,", &internal));
+    }
+
+    #[test]
+    fn parse_internal_domains_fallback_handles_display_name_form() {
+        let domains = parse_internal_domains("", "Sophia <noreply@example.com>");
+        assert_eq!(domains, vec!["example.com"]);
+    }
+
+    #[test]
+    fn parse_internal_domains_with_explicit_csv() {
+        let domains = parse_internal_domains("example.com,example.co.jp", "");
+        assert_eq!(domains, vec!["example.co.jp", "example.com"]);
+    }
+
+    #[test]
+    fn parse_internal_domains_with_multiple_domains_case_insensitive() {
+        let domains = parse_internal_domains("Example.COM,Example.CO.JP", "");
+        assert_eq!(domains, vec!["example.co.jp", "example.com"]);
+    }
+
+    #[test]
+    fn parse_internal_domains_with_leading_at_sign() {
+        let domains = parse_internal_domains("@example.com,@example.co.jp", "");
+        assert_eq!(domains, vec!["example.co.jp", "example.com"]);
+    }
+
+    #[test]
+    fn parse_internal_domains_fallback_to_default_from_email() {
+        let domains = parse_internal_domains("", "user@example.com");
+        assert_eq!(domains, vec!["example.com"]);
+    }
+
+    #[test]
+    fn parse_internal_domains_fallback_case_insensitive() {
+        let domains = parse_internal_domains("", "user@Example.COM");
+        assert_eq!(domains, vec!["example.com"]);
+    }
+
+    #[test]
+    fn parse_internal_domains_both_empty() {
+        let domains = parse_internal_domains("", "");
+        assert_eq!(domains, Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_internal_domains_removes_duplicates() {
+        let domains = parse_internal_domains("example.com,example.com,example.co.jp", "");
+        assert_eq!(domains, vec!["example.co.jp", "example.com"]);
+    }
+
+    #[test]
+    fn parse_internal_domains_trims_whitespace() {
+        let domains = parse_internal_domains("  example.com  , example.co.jp  ", "");
+        assert_eq!(domains, vec!["example.co.jp", "example.com"]);
+    }
+
+    #[test]
+    fn parse_internal_domains_ignores_empty_entries() {
+        let domains = parse_internal_domains("example.com,,  ,example.co.jp", "");
+        assert_eq!(domains, vec!["example.co.jp", "example.com"]);
+    }
+
+    #[test]
+    fn multiple_domains_are_allowed_case_insensitive() {
+        let internal = vec!["example.com".to_string(), "example.co.jp".to_string()];
+        assert!(is_recipient_allowed("user@example.com", "", &internal));
+        assert!(is_recipient_allowed("user@Example.CO.JP", "", &internal));
+        assert!(is_recipient_allowed("User@EXAMPLE.COM", "", &internal));
+    }
+
+    #[test]
+    fn similar_domains_are_blocked() {
+        let internal = vec!["example.com".to_string()];
+        assert!(!is_recipient_allowed("user@evil-example.com", "", &internal));
+        assert!(!is_recipient_allowed("user@example.com.evil.net", "", &internal));
+    }
+
+    #[test]
+    fn allowlist_works_independently_of_internal_domains() {
+        let allowlist = "special@other.com";
+        let internal = vec!["example.com".to_string()];
+        assert!(is_recipient_allowed("user@example.com", allowlist, &internal));
+        assert!(is_recipient_allowed("special@other.com", allowlist, &internal));
+        assert!(!is_recipient_allowed("other@other.com", allowlist, &internal));
     }
 
     #[test]

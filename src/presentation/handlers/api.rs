@@ -42,8 +42,15 @@ pub async fn index(
 
         if !signature.is_empty() {
             // HMAC-SHA256 検証
-            let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-                .expect("HMAC can take key of any size");
+            let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+                Ok(m) => m,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(WebhookResponse {
+                        status: "error".to_string(),
+                        message: format!("HMAC key error: {}", e),
+                    }));
+                }
+            };
             mac.update(&body);
             let expected = hex::encode(mac.finalize().into_bytes());
 

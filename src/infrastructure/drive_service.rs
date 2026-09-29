@@ -16,8 +16,8 @@
 ///             ├── 稼働報告書/
 ///             └── 請求書/
 
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use serde::Deserialize;
 use tracing::info;
 
 // ── ドキュメント種別ラベル ──
@@ -33,82 +33,13 @@ fn doc_type_label(doc_type: &str) -> &str {
     }
 }
 
-// ============================================================
-// Google Service Account JWT 認証
-// ============================================================
-
-#[derive(Debug, Deserialize)]
-struct ServiceAccountKey {
-    client_email: String,
-    private_key: String,
-    token_uri: String,
-}
-
-#[derive(Debug, Serialize)]
-struct JwtClaims {
-    iss: String,
-    scope: String,
-    aud: String,
-    exp: i64,
-    iat: i64,
-    sub: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: String,
-}
-
-/// サービスアカウントキーからアクセストークンを取得する
-async fn get_access_token(key: &ServiceAccountKey, impersonate: Option<&str>, scope: &str) -> Result<String> {
-    let now = chrono::Utc::now().timestamp();
-    let claims = JwtClaims {
-        iss: key.client_email.clone(),
-        scope: scope.to_string(),
-        aud: key.token_uri.clone(),
-        exp: now + 3600,
-        iat: now,
-        sub: impersonate.map(|s| s.to_string()),
-    };
-
-    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-    let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(key.private_key.as_bytes())
-        .context("RSA秘密鍵の解析に失敗")?;
-    let jwt = jsonwebtoken::encode(&header, &claims, &encoding_key)
-        .context("JWT生成に失敗")?;
-
-    let client = reqwest::Client::new();
-    let resp = client.post(&key.token_uri)
-        .form(&[
-            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
-            ("assertion", &jwt),
-        ])
-        .send()
-        .await
-        .context("トークンリクエストに失敗")?;
-
-    let token: TokenResponse = resp.json().await.context("トークンレスポンスの解析に失敗")?;
-    Ok(token.access_token)
-}
-
 /// サービスアカウント設定（`GOOGLE_DRIVE_CREDENTIALS_FILE`）から指定スコープのアクセストークンを取得する。
 /// 未設定ならNone（呼び出し元は機能をスキップする）。`sheets_service.rs`など他のGoogle API連携でも
 /// 同じサービスアカウントを使い回すための共通ヘルパー。
 pub(crate) async fn get_scoped_access_token(scope: &str) -> Result<Option<String>> {
-    let credentials_file = std::env::var("GOOGLE_DRIVE_CREDENTIALS_FILE").unwrap_or_default();
-    if credentials_file.is_empty() || !std::path::Path::new(&credentials_file).exists() {
-        info!("[Google API] サービスアカウントキーが未設定のためスキップ");
-        return Ok(None);
-    }
-
-    let key_json = std::fs::read_to_string(&credentials_file)
-        .context("サービスアカウントキーの読み込みに失敗")?;
-    let key: ServiceAccountKey = serde_json::from_str(&key_json)
-        .context("サービスアカウントキーの解析に失敗")?;
-
     let impersonate = std::env::var("GOOGLE_DRIVE_IMPERSONATE_EMAIL").ok();
-    let token = get_access_token(&key, impersonate.as_deref(), scope).await?;
-    Ok(Some(token))
+    google_auth::get_access_token_from_file("GOOGLE_DRIVE_CREDENTIALS_FILE", impersonate.as_deref(), scope).await
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 // ============================================================
@@ -297,19 +228,10 @@ pub async fn upload_document(
         return Ok((String::new(), String::new()));
     }
 
-    let credentials_file = std::env::var("GOOGLE_DRIVE_CREDENTIALS_FILE").unwrap_or_default();
-    if credentials_file.is_empty() || !std::path::Path::new(&credentials_file).exists() {
+    let Some(token) = get_scoped_access_token("https://www.googleapis.com/auth/drive").await? else {
         info!("[Google Drive] サービスアカウントキーが未設定のためスキップ");
         return Ok((String::new(), String::new()));
-    }
-
-    let key_json = std::fs::read_to_string(&credentials_file)
-        .context("サービスアカウントキーの読み込みに失敗")?;
-    let key: ServiceAccountKey = serde_json::from_str(&key_json)
-        .context("サービスアカウントキーの解析に失敗")?;
-
-    let impersonate = std::env::var("GOOGLE_DRIVE_IMPERSONATE_EMAIL").ok();
-    let token = get_access_token(&key, impersonate.as_deref(), "https://www.googleapis.com/auth/drive").await?;
+    };
     let client = reqwest::Client::new();
 
     // フォルダ階層を構築

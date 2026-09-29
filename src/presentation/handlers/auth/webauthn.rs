@@ -4,7 +4,8 @@ use crate::domain::services::webauthn_service;
 use crate::infrastructure::repositories::auth_repo;
 use crate::infrastructure::repositories::security_repo;
 use crate::presentation::cookie_util;
-use crate::presentation::login_guard::{self, GuardStatus};
+use crate::presentation::auth_messages::{client_ip, LOCKED_MSG};
+use auth_core::domain::attempt_lock::{build_lock_key, AttemptLockConfig};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use axum_extra::extract::cookie::CookieJar;
 use sqlx::PgPool;
@@ -26,8 +27,9 @@ pub async fn mfa_verify_form() -> impl IntoResponse {
 ///
 /// Step3: `sophia_session`（DBセッション）経由から`sophia_mfa_pending`（短命JWT）経由に変更。
 /// 検証成功時は`sophia_jwt`アクセストークン(24h)を発行し`sophia_mfa_pending`を削除する。
-/// ログイン試行制限（`login_guard::mfa_key`）は設計方針どおり今回は移行対象外のため現状維持
-/// （`login_key`のみauth-coreのattempt_lock_middlewareへ置き換え済み。Phase3-1参照）。
+/// ログイン試行制限（旧`login_guard::mfa_key`相当）は`AppState.mfa_attempt_store`
+/// （auth-coreの`AttemptStore`トレイト、`InMemoryAttemptStore`実装）経由で行う。
+/// `login_key`（社員/管理者ログイン）は`routes.rs`の`attempt_lock_middleware`が別途担当する。
 pub async fn mfa_verify(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -87,22 +89,27 @@ pub async fn mfa_verify(
         }
     };
 
-    let ip = login_guard::client_ip(&headers);
-    let guard_key = login_guard::mfa_key(&ip, user_id);
-    if let GuardStatus::Locked { retry_after_secs } = login_guard::check(&guard_key) {
-        return (
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            [(
-                axum::http::header::RETRY_AFTER,
-                retry_after_secs.to_string(),
-            )],
-            axum::Json(serde_json::json!({
-                "success": false,
-                "error": login_guard::LOCKED_MSG,
-                "retry_after_secs": retry_after_secs
-            })),
-        )
-            .into_response();
+    let ip = client_ip(&headers);
+    let guard_key = build_lock_key(&ip, &user_id.to_string());
+    let attempt_cfg = AttemptLockConfig::default();
+    match state.mfa_attempt_store.locked_retry_after_seconds(&guard_key).await {
+        Ok(Some(retry_after_secs)) => {
+            return (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                [(
+                    axum::http::header::RETRY_AFTER,
+                    retry_after_secs.to_string(),
+                )],
+                axum::Json(serde_json::json!({
+                    "success": false,
+                    "error": LOCKED_MSG,
+                    "retry_after_secs": retry_after_secs
+                })),
+            )
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(e) => tracing::error!("試行回数ロックの確認に失敗: {:?}", e),
     }
 
     // 暗号化されたTOTP secretを取得
@@ -139,7 +146,9 @@ pub async fn mfa_verify(
     // TOTP 検証
     match crate::domain::services::totp_service::verify_code(&secret_bytes, &email, code) {
         Ok(true) => {
-            login_guard::record_success(&guard_key);
+            if let Err(e) = state.mfa_attempt_store.reset(&guard_key).await {
+                tracing::error!("試行回数のリセットに失敗: {:?}", e);
+            }
             auth_repo::insert_auth_event(
                 pool,
                 "mfa_success",
@@ -172,35 +181,40 @@ pub async fn mfa_verify(
             )
                 .into_response()
         }
-        _ => match login_guard::record_failure(&guard_key) {
-            GuardStatus::Locked { retry_after_secs } => (
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                [(
-                    axum::http::header::RETRY_AFTER,
-                    retry_after_secs.to_string(),
-                )],
-                axum::Json(serde_json::json!({
-                    "success": false,
-                    "error": login_guard::LOCKED_MSG,
-                    "retry_after_secs": retry_after_secs
-                })),
-            )
-                .into_response(),
-            GuardStatus::Allowed => {
-                auth_repo::insert_auth_event(
-                    pool,
-                    "mfa_fail",
-                    Some(user_id),
-                    Some(&email),
-                    Some(&ip),
-                    "totp",
+        _ => {
+            if let Err(e) = state.mfa_attempt_store.record_failure(&guard_key, &attempt_cfg).await {
+                tracing::error!("試行回数の記録に失敗: {:?}", e);
+            }
+            match state.mfa_attempt_store.locked_retry_after_seconds(&guard_key).await {
+                Ok(Some(retry_after_secs)) => (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    [(
+                        axum::http::header::RETRY_AFTER,
+                        retry_after_secs.to_string(),
+                    )],
+                    axum::Json(serde_json::json!({
+                        "success": false,
+                        "error": LOCKED_MSG,
+                        "retry_after_secs": retry_after_secs
+                    })),
                 )
-                .await;
-                axum::Json(serde_json::json!({
-                    "success": false,
-                    "error": "認証コードが正しくありません"
-                }))
-                .into_response()
+                    .into_response(),
+                _ => {
+                    auth_repo::insert_auth_event(
+                        pool,
+                        "mfa_fail",
+                        Some(user_id),
+                        Some(&email),
+                        Some(&ip),
+                        "totp",
+                    )
+                    .await;
+                    axum::Json(serde_json::json!({
+                        "success": false,
+                        "error": "認証コードが正しくありません"
+                    }))
+                    .into_response()
+                }
             }
         },
     }
@@ -318,7 +332,7 @@ pub async fn passkey_auth_complete(
         None => return (StatusCode::BAD_REQUEST, "認証セッションが見つかりません").into_response(),
     };
 
-    let ip = login_guard::client_ip(&headers);
+    let ip = client_ip(&headers);
     let email = auth_repo::find_email_by_user_id(pool, user_id)
         .await
         .ok()

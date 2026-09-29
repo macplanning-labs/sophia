@@ -17,7 +17,33 @@ pub mod phase2_fetch;
 pub mod phase3_parse_register;
 pub mod phase4_store_notify;
 
+use std::time::Duration;
+
 use sqlx::PgPool;
+
+/// Phase1 IMAP 一時障害の最大試行回数（環境変数 `MAIL_PIPELINE_IMAP_RETRY_MAX`、既定 3）。
+fn imap_retry_max_attempts() -> u32 {
+    parse_imap_retry_max(std::env::var("MAIL_PIPELINE_IMAP_RETRY_MAX").ok().as_deref())
+}
+
+/// Phase1 IMAP 一時障害の再試行間隔（環境変数 `MAIL_PIPELINE_IMAP_RETRY_INTERVAL_SECS`、既定 300秒＝5分）。
+fn imap_retry_interval() -> Duration {
+    Duration::from_secs(parse_imap_retry_interval_secs(
+        std::env::var("MAIL_PIPELINE_IMAP_RETRY_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    ))
+}
+
+fn parse_imap_retry_max(raw: Option<&str>) -> u32 {
+    raw.and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(3)
+}
+
+fn parse_imap_retry_interval_secs(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse().ok()).unwrap_or(300)
+}
 
 /// パイプライン全体の実行結果（ログ・手動トリガーAPIのレスポンス用）
 #[derive(Debug, Default)]
@@ -108,6 +134,9 @@ enum Phase1Outcome {
 ///   （ロック中に再接続を試みること自体がGoogle再ブロックのリスクになるため）。
 /// - AUTHENTICATIONFAILEDがLOCK_THRESHOLD回連続したら自動ロックする。
 /// - 認証失敗以外のエラー（ネットワーク瞬断等）ではブレイカーを作動させない。
+/// - IMAP接続系の一時障害（`ImapNetwork`）は環境変数で指定した回数・間隔で再試行する
+///   （`MAIL_PIPELINE_IMAP_RETRY_MAX` / `MAIL_PIPELINE_IMAP_RETRY_INTERVAL_SECS`）。
+///   全試行失敗後にのみ致命アラート対象の Error を返す。
 async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
     let mailbox = match imap_util::ImapConfig::load(pool).await {
         Ok(c) => c.mailbox_id().to_string(),
@@ -147,42 +176,88 @@ async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
         ));
     }
 
-    match phase1_watch::run(pool).await {
-        Ok(p1) => {
-            circuit_breaker::record_success(pool, &mailbox).await;
-            Phase1Outcome::Success(p1)
-        }
-        Err(e) if circuit_breaker::is_auth_failure(&e) => {
-            let failures = circuit_breaker::record_failure(pool, &mailbox).await;
-            if failures >= circuit_breaker::LOCK_THRESHOLD {
-                circuit_breaker::lock(pool, &mailbox, &e).await;
-                let msg = format!(
-                    "連続{failures}回認証失敗のためIMAPロック。解除まで新着走査は停止"
-                );
-                Phase1Outcome::Error(ops_message::fail(
-                    "メール取込",
-                    "Phase1",
-                    "IMAP読取(認証)",
-                    &msg,
-                    e,
-                ))
-            } else {
-                Phase1Outcome::Error(ops_message::fail(
+    let max_attempts = imap_retry_max_attempts();
+    let retry_interval = imap_retry_interval();
+    let mut attempt: u32 = 0;
+
+    loop {
+        attempt += 1;
+        match phase1_watch::run(pool).await {
+            Ok(p1) => {
+                circuit_breaker::record_success(pool, &mailbox).await;
+                if attempt > 1 {
+                    tracing::info!(
+                        "[Phase1] IMAP一時障害から復帰: 試行={attempt}/{max_attempts}"
+                    );
+                }
+                return Phase1Outcome::Success(p1);
+            }
+            Err(e) if circuit_breaker::is_auth_failure(&e) => {
+                let failures = circuit_breaker::record_failure(pool, &mailbox).await;
+                if failures >= circuit_breaker::LOCK_THRESHOLD {
+                    circuit_breaker::lock(pool, &mailbox, &e).await;
+                    let msg = format!(
+                        "連続{failures}回認証失敗のためIMAPロック。解除まで新着走査は停止"
+                    );
+                    return Phase1Outcome::Error(ops_message::fail(
+                        "メール取込",
+                        "Phase1",
+                        "IMAP読取(認証)",
+                        &msg,
+                        e,
+                    ));
+                }
+                return Phase1Outcome::Error(ops_message::fail(
                     "メール取込",
                     "Phase1",
                     "IMAP読取(認証)",
                     "今回の新着メール走査不可（認証失敗）",
                     e,
-                ))
+                ));
+            }
+            Err(e)
+                if ops_message::is_retryable_phase1_imap_error(&e) && attempt < max_attempts =>
+            {
+                tracing::warn!(
+                    "[Phase1] IMAP一時障害のため再試行待ち: 試行={attempt}/{max_attempts} 間隔={}秒 | {e}",
+                    retry_interval.as_secs()
+                );
+                tokio::time::sleep(retry_interval).await;
+            }
+            Err(e) => {
+                let detail = if attempt > 1 {
+                    format!("{e}（{attempt}/{max_attempts}回試行後も失敗）")
+                } else {
+                    e
+                };
+                return Phase1Outcome::Error(ops_message::fail(
+                    "メール取込",
+                    "Phase1",
+                    "IMAP読取",
+                    "今回の新着メール走査不可",
+                    detail,
+                ));
             }
         }
-        Err(e) => Phase1Outcome::Error(ops_message::fail(
-            "メール取込",
-            "Phase1",
-            "IMAP読取",
-            "今回の新着メール走査不可",
-            e,
-        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_imap_retry_policy_defaults_and_overrides() {
+        assert_eq!(parse_imap_retry_max(None), 3);
+        assert_eq!(parse_imap_retry_max(Some("")), 3);
+        assert_eq!(parse_imap_retry_max(Some("0")), 3); // 無効値は既定へ
+        assert_eq!(parse_imap_retry_max(Some("3")), 3);
+        assert_eq!(parse_imap_retry_max(Some("5")), 5);
+
+        assert_eq!(parse_imap_retry_interval_secs(None), 300);
+        assert_eq!(parse_imap_retry_interval_secs(Some("")), 300);
+        assert_eq!(parse_imap_retry_interval_secs(Some("60")), 60);
+        assert_eq!(parse_imap_retry_interval_secs(Some("300")), 300);
     }
 }
 

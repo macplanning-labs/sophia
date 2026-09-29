@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 use sqlx::PgPool;
 
 use crate::domain::models::payroll::PaidLeaveGrant;
+use crate::domain::services::month_range::first_of_next_month;
 
 /// 正社員（週5日／週30時間以上）の標準付与テーブル。
 /// index 0=6ヶ月, 1=1年6ヶ月, 2=2年6ヶ月, ... 6以降=6年6ヶ月以降（20日で頭打ち）
@@ -34,31 +35,39 @@ fn grant_days_for(weekly_prescribed_days: Option<i16>, anniversary_index: usize)
 }
 
 /// hire_date を起点に、6ヶ月後・1年6ヶ月後・2年6ヶ月後...と続く付与基準日を列挙する
-fn anniversary_dates(hire_date: NaiveDate, up_to: NaiveDate, max_count: usize) -> Vec<(NaiveDate, usize)> {
+fn anniversary_dates(hire_date: NaiveDate, up_to: NaiveDate, max_count: usize) -> Result<Vec<(NaiveDate, usize)>> {
     let mut result = Vec::new();
-    let first = add_months(hire_date, 6);
+    let first = add_months(hire_date, 6)?;
     for i in 0..max_count {
-        let d = add_months(first, (i as u32) * 12);
+        let d = add_months(first, (i as u32) * 12)?;
         if d > up_to {
             break;
         }
         result.push((d, i));
     }
-    result
+    Ok(result)
 }
 
-fn add_months(date: NaiveDate, months: u32) -> NaiveDate {
+fn add_months(date: NaiveDate, months: u32) -> Result<NaiveDate> {
     let total = date.year() as u32 * 12 + (date.month() - 1) + months;
     let year = (total / 12) as i32;
     let month = total % 12 + 1;
     // 月末日が存在しない場合（うるう年の2/29など）はその月の末日に丸める
-    NaiveDate::from_ymd_opt(year, month, date.day())
-        .unwrap_or_else(|| last_day_of_month(year, month))
+    match NaiveDate::from_ymd_opt(year, month, date.day()) {
+        Some(d) => Ok(d),
+        None => last_day_of_month(year, month),
+    }
 }
 
-fn last_day_of_month(year: i32, month: u32) -> NaiveDate {
-    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
-    NaiveDate::from_ymd_opt(ny, nm, 1).unwrap().pred_opt().unwrap()
+fn last_day_of_month(year: i32, month: u32) -> Result<NaiveDate> {
+    // 月初から翌月初を取得し、その前日が当月末
+    let month_start = NaiveDate::from_ymd_opt(year, month, 1)
+        .ok_or_else(|| anyhow::anyhow!("invalid year/month: {}/{}", year, month))?;
+    let next_month_start = first_of_next_month(month_start)
+        .ok_or_else(|| anyhow::anyhow!("年月計算がオーバーフローしました"))?;
+    let last_day = next_month_start.pred_opt()
+        .ok_or_else(|| anyhow::anyhow!("月末日の計算に失敗しました"))?;
+    Ok(last_day)
 }
 
 /// 対象月末時点で未付与の基準日があれば t_paid_leave_grant に追加する
@@ -69,9 +78,10 @@ async fn grant_if_due(
     weekly_prescribed_days: Option<i16>,
     month_end: NaiveDate,
 ) -> Result<()> {
-    for (grant_date, idx) in anniversary_dates(hire_date, month_end, 30) {
+    let dates = anniversary_dates(hire_date, month_end, 30)?;
+    for (grant_date, idx) in dates {
         let days = grant_days_for(weekly_prescribed_days, idx);
-        let expire_date = add_months(grant_date, 24);
+        let expire_date = add_months(grant_date, 24)?;
         sqlx::query(
             r#"
             INSERT INTO t_paid_leave_grant (employee_id, grant_date, granted_days, expire_date, remaining_days)
@@ -176,7 +186,7 @@ pub async fn process_month_end(
         return Ok((Decimal::ZERO, Decimal::ZERO));
     };
 
-    let month_end = last_day_of_month(year_month.year(), year_month.month());
+    let month_end = last_day_of_month(year_month.year(), year_month.month())?;
 
     grant_if_due(pool, employee_id, hire_date, weekly_prescribed_days, month_end).await?;
     expire_due_grants(pool, employee_id, month_end).await?;

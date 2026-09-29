@@ -383,7 +383,9 @@ fn sub_months(year: i32, month: u32, sub: u32) -> (i32, u32) {
 /// 指定日を month の日数でクリップして NaiveDate を作る（例: 2月31日→2月28日）
 fn nth_day_of_month_clip(year: i32, month: u32, day: i32) -> NaiveDate {
     let clipped = (day.max(1) as u32).min(last_day_of_month(year, month));
-    NaiveDate::from_ymd_opt(year, month, clipped).unwrap_or_else(|| NaiveDate::from_ymd_opt(year, month, 1).unwrap())
+    NaiveDate::from_ymd_opt(year, month, clipped)
+        .or_else(|| NaiveDate::from_ymd_opt(year, month, 1))
+        .unwrap_or_default()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -608,7 +610,7 @@ pub async fn api_project_dashboard(
     let month_str = q.month.unwrap_or_else(|| format!("{}-{:02}-01", today.year(), today.month()));
     let target_month = NaiveDate::parse_from_str(&month_str, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(&format!("{}-01", month_str), "%Y-%m-%d"))
-        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap());
+        .unwrap_or_else(|_| today.with_day(1).unwrap_or(today));
 
     let summaries = crate::domain::services::project_dashboard::list_project_summaries(&pool, target_month).await?;
     Ok(Json(summaries))

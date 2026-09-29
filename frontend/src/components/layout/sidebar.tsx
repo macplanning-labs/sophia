@@ -7,7 +7,7 @@ import {
   Gauge, CalendarCheck, FileText, FileCheck,
   Clock, CalendarClock,
   Calculator, UserCircle, ReceiptText, Users, ShieldCheck, KeyRound,
-  Database, Moon, Sun, LogOut, Mail, Menu, X, Briefcase, Globe,
+  Database, Moon, Sun, LogOut, Mail, Menu, X, Briefcase, Globe, Receipt,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useCurrentUser } from "@/lib/useCurrentUser";
@@ -25,7 +25,7 @@ interface NavGroup {
   items: NavItem[];
 }
 
-function buildNavGroups(isAdmin: boolean): NavGroup[] {
+export function buildNavGroups(isAdmin: boolean): NavGroup[] {
   return [
     {
       title: "",
@@ -33,6 +33,7 @@ function buildNavGroups(isAdmin: boolean): NavGroup[] {
         { label: "ダッシュボード", href: "/", icon: Gauge },
         { label: "案件", href: "/projects", icon: Briefcase },
         { label: "月次確定", href: "/settlement", icon: CalendarCheck },
+        { label: "請求書", href: "/invoices", icon: Receipt },
       ],
     },
     {

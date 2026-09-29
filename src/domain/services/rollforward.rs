@@ -7,6 +7,7 @@ use anyhow::{Result, bail};
 use chrono::{NaiveDate, Datelike};
 use sqlx::PgPool;
 use tracing::info;
+use crate::domain::services::month_range::first_of_next_month;
 
 /// 受注を翌月にロールフォワード（コピー）する
 pub async fn rollforward_order(pool: &PgPool, source_order_id: i64) -> Result<i64> {
@@ -27,7 +28,8 @@ pub async fn rollforward_order(pool: &PgPool, source_order_id: i64) -> Result<i6
     let next_target = NaiveDate::from_ymd_opt(next_year, next_month, 1)
         .ok_or_else(|| anyhow::anyhow!("Invalid date"))?;
 
-    let last_day = last_day_of_month(next_year, next_month);
+    let last_day = last_day_of_month(next_year, next_month)
+        .ok_or_else(|| anyhow::anyhow!("Cannot calculate last day of month: {}/{}", next_year, next_month))?;
     let next_work_end = NaiveDate::from_ymd_opt(next_year, next_month, last_day)
         .ok_or_else(|| anyhow::anyhow!("Invalid date"))?;
 
@@ -133,12 +135,9 @@ pub async fn rollforward_all_recurring(pool: &PgPool) -> Result<Vec<(i64, i64)>>
 
 // ── ヘルパー ──
 
-fn last_day_of_month(year: i32, month: u32) -> u32 {
-    let next = if month == 12 {
-        NaiveDate::from_ymd_opt(year + 1, 1, 1)
-    } else {
-        NaiveDate::from_ymd_opt(year, month + 1, 1)
-    };
-    next.unwrap().pred_opt().unwrap().day()
+fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
+    let date = NaiveDate::from_ymd_opt(year, month, 1)?;
+    let next = first_of_next_month(date)?;
+    next.pred_opt().map(|d| d.day())
 }
 

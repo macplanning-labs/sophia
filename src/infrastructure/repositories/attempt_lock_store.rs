@@ -1,7 +1,9 @@
-/// infrastructure/repositories/attempt_lock_store.rs — auth_core::domain::attempt_lock::AttemptStore のインメモリ実装（社員/管理者ログイン試行制限）
+/// infrastructure/repositories/attempt_lock_store.rs — auth_core::domain::attempt_lock::AttemptStore のインメモリ実装
 ///
-/// このファイルは src/presentation/login_guard.rs の login_key 名前空間ロジックを新しいトレイト形状にポートしたものです。
-/// login_guard.rs 自身は変更していません（まだ portal_key・mfa_key を提供しています）。
+/// 旧 src/presentation/login_guard.rs（login_key/portal_key/mfa_key の独自実装）から
+/// このトレイト形状へ移行済み。login_guard.rs は完全に不要になったため削除した。
+/// 社員/管理者ログイン(`routes.rs`)・ポータルログイン(`portal.rs`)・MFA検証(`webauthn.rs`)の
+/// 3箇所がそれぞれ独立した `InMemoryAttemptStore` インスタンスを使う（名前空間の混線防止）。
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;

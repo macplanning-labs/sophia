@@ -23,3 +23,6 @@ pub mod legacy_hash;
 pub mod auth_jwt;
 pub mod chat_notifier;
 pub mod mail_thread_brief;
+pub mod month_range;
+pub mod static_regex;
+pub mod pdf_text;

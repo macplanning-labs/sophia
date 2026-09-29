@@ -9,7 +9,10 @@
  * STAFF画面・ポータル画面の両方で共通利用。
  */
 
+import { useMemo } from "react";
+import { read, utils } from "xlsx";
 import { cn } from "@/lib/utils";
+import { sanitizeTableHtml } from "@/lib/sanitize-html";
 import { CheckCircle, AlertTriangle, Loader2 } from "lucide-react";
 
 // ── 型定義 ──
@@ -81,9 +84,28 @@ function isNoWork(entry: DailyEntry): boolean {
 // ── コンポーネント ──
 
 export function TimesheetPreview({ preview, excelBuffer, pdfUrl, onConfirm, onCancel, isConfirming = false }: TimesheetPreviewProps) {
-  // Excel の生シート HTML プレビューは廃止（脆弱な xlsx 依存を除去）。
-  // 解析結果（右ペイン）で確認する。excelBuffer は後方互換のため受け取るのみ。
-  void excelBuffer;
+  // Excel生データをHTMLテーブルに変換（XSS対策: sanitizeTableHtml で無害化）
+  const excelHtml = useMemo(() => {
+    if (!excelBuffer) return null;
+    try {
+      const wb = read(excelBuffer, { type: "array" });
+      // 解析対象シートを探す（sheet_nameが一致するもの、なければ最初のシート）
+      const sheetName = preview.sheet_name && wb.SheetNames.includes(preview.sheet_name)
+        ? preview.sheet_name
+        : wb.SheetNames[0];
+      const ws = wb.Sheets[sheetName];
+      const rawHtml = utils.sheet_to_html(ws, { id: "excel-preview", header: "", footer: "" });
+      // Sanitize HTML to remove XSS vectors (script, iframe, event handlers, etc.)
+      const sanitizedHtml = sanitizeTableHtml(rawHtml);
+      return {
+        html: sanitizedHtml,
+        sheetName,
+        sheetNames: wb.SheetNames,
+      };
+    } catch {
+      return { html: "<p>Excelファイルの表示に失敗しました</p>", sheetName: "", sheetNames: [] };
+    }
+  }, [excelBuffer, preview.sheet_name]);
 
   // サマリーデータ
   const totalHours = parseFloat(preview.total_hours) || 0;
@@ -107,17 +129,18 @@ export function TimesheetPreview({ preview, excelBuffer, pdfUrl, onConfirm, onCa
         <div className="bg-card border border-border rounded-lg overflow-hidden flex flex-col">
           <div className="px-3 py-2 border-b border-border bg-muted/30 flex items-center justify-between">
             <span className="text-xs font-medium text-muted-foreground">{sourceLabel}</span>
-            {preview.sheet_name && (
-              <span className="text-[10px] text-muted-foreground/70 truncate max-w-[140px]">{preview.sheet_name}</span>
+            {excelHtml?.sheetName && (
+              <span className="text-[10px] text-muted-foreground/70 truncate max-w-[140px]">{excelHtml.sheetName}</span>
             )}
           </div>
           <div className="flex-1 overflow-auto p-2">
             {pdfUrl ? (
               <iframe title="勤務表PDF" src={pdfUrl} className="h-full min-h-[460px] w-full rounded border border-border bg-white" />
-            ) : excelBuffer ? (
-              <p className="text-xs text-muted-foreground p-3">
-                Excel の生シートプレビューは提供しません。右側の解析結果を確認してください。
-              </p>
+            ) : excelHtml ? (
+              <div
+                className="excel-preview-table text-[10px] leading-tight [&_table]:w-full [&_td]:border [&_td]:border-border/40 [&_td]:px-1 [&_td]:py-0.5 [&_th]:border [&_th]:border-border/40 [&_th]:px-1 [&_th]:py-0.5"
+                dangerouslySetInnerHTML={{ __html: excelHtml.html }}
+              />
             ) : (
               <p className="text-xs text-muted-foreground p-3">元ファイルのプレビューはありません</p>
             )}

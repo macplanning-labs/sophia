@@ -687,6 +687,7 @@ pub async fn download_pdf(
     use axum::body::Body;
     use axum::http::{header, StatusCode};
     use crate::domain::services::pdf_generator::PdfGenerator;
+    use crate::presentation::http_util;
 
     let uuid_parsed = match uuid::Uuid::parse_str(&uuid) {
         Ok(u) => u,
@@ -700,10 +701,12 @@ pub async fn download_pdf(
             }
             match super::orders::build_purchase_order_pdf_data(&pool, &o).await {
                 Ok(pdf_data) => match PdfGenerator::new().generate_purchase_order_pdf(&pdf_data) {
-                    Ok(bytes) => return Response::builder()
-                        .header(header::CONTENT_TYPE, "application/pdf")
-                        .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"order_{}.pdf\"", o.order_id))
-                        .body(Body::from(bytes)).expect("PDF response").into_response(),
+                    Ok(bytes) => return http_util::build_response(
+                        Response::builder()
+                            .header(header::CONTENT_TYPE, "application/pdf")
+                            .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"order_{}.pdf\"", o.order_id)),
+                        Body::from(bytes)
+                    ).into_response(),
                     Err(e) => { tracing::error!("PDF生成エラー: {}", e); return StatusCode::INTERNAL_SERVER_ERROR.into_response(); }
                 },
                 Err(e) => { tracing::error!("PDFデータ構築エラー: {}", e); return StatusCode::INTERNAL_SERVER_ERROR.into_response(); }
@@ -719,10 +722,12 @@ pub async fn download_pdf(
     match order_repo::find_payment_notice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(n)) => {
             match super::notices::generate_payment_notice_pdf_bytes(&pool, &n).await {
-                Ok(bytes) => return Response::builder()
-                    .header(header::CONTENT_TYPE, "application/pdf")
-                    .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"notice_{}.pdf\"", n.notice_id))
-                    .body(Body::from(bytes)).expect("PDF response").into_response(),
+                Ok(bytes) => return http_util::build_response(
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "application/pdf")
+                        .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"notice_{}.pdf\"", n.notice_id)),
+                    Body::from(bytes)
+                ).into_response(),
                 Err(e) => { tracing::error!("{}", e); return StatusCode::INTERNAL_SERVER_ERROR.into_response(); }
             }
         }
@@ -742,10 +747,12 @@ pub async fn download_pdf(
             let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.unwrap_or_default();
             let pdf_data = super::invoices::build_client_invoice_pdf_data(&pool, &invoice, &client_name).await;
             return match PdfGenerator::new().generate_invoice_pdf(&pdf_data) {
-                Ok(bytes) => Response::builder()
-                    .header(header::CONTENT_TYPE, "application/pdf")
-                    .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"invoice_{}.pdf\"", invoice.invoice_no))
-                    .body(Body::from(bytes)).expect("PDF response").into_response(),
+                Ok(bytes) => http_util::build_response(
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "application/pdf")
+                        .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"invoice_{}.pdf\"", invoice.invoice_no)),
+                    Body::from(bytes)
+                ).into_response(),
                 Err(e) => { tracing::error!("請求書PDF生成エラー: {}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
             };
         }
@@ -767,6 +774,7 @@ pub async fn download_invoice_pdf(
     use axum::response::Response;
     use axum::body::Body;
     use axum::http::{header, StatusCode};
+    use crate::presentation::http_util;
 
     let uuid_parsed = match uuid::Uuid::parse_str(&uuid) {
         Ok(u) => u,
@@ -783,10 +791,12 @@ pub async fn download_invoice_pdf(
     };
 
     match super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await {
-        Ok(bytes) => Response::builder()
-            .header(header::CONTENT_TYPE, "application/pdf")
-            .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"invoice_{}.pdf\"", notice.notice_id))
-            .body(Body::from(bytes)).expect("PDF response").into_response(),
+        Ok(bytes) => http_util::build_response(
+            Response::builder()
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"invoice_{}.pdf\"", notice.notice_id)),
+            Body::from(bytes)
+        ).into_response(),
         Err(e) => {
             tracing::error!("{}", e);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -803,6 +813,7 @@ pub async fn download_acceptance_pdf(
     use axum::body::Body;
     use axum::http::{header, StatusCode};
     use crate::domain::services::pdf_generator::PdfGenerator;
+    use crate::presentation::http_util;
 
     let uuid_parsed = match uuid::Uuid::parse_str(&uuid) {
         Ok(u) => u,
@@ -825,10 +836,12 @@ pub async fn download_acceptance_pdf(
 
     match super::orders::build_purchase_order_pdf_data(&pool, &order).await {
         Ok(pdf_data) => match PdfGenerator::new().generate_acceptance_pdf(&pdf_data) {
-            Ok(bytes) => Response::builder()
-                .header(header::CONTENT_TYPE, "application/pdf")
-                .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"acceptance_{}.pdf\"", order.order_id))
-                .body(Body::from(bytes)).expect("PDF response").into_response(),
+            Ok(bytes) => http_util::build_response(
+                Response::builder()
+                    .header(header::CONTENT_TYPE, "application/pdf")
+                    .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"acceptance_{}.pdf\"", order.order_id)),
+                Body::from(bytes)
+            ).into_response(),
             Err(e) => { tracing::error!("注文請書PDF生成エラー: {}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
         },
         Err(e) => { tracing::error!("PDFデータ構築エラー: {}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }

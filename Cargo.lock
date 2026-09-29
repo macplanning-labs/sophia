@@ -1373,6 +1373,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "google-auth"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "governor"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3469,11 +3483,11 @@ dependencies = [
  "clap",
  "dotenvy",
  "drive-core",
+ "google-auth",
  "hex",
  "hmac",
  "imap",
  "jpholiday",
- "jsonwebtoken",
  "lettre",
  "mailparse",
  "native-tls",
