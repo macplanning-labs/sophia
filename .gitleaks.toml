@@ -1,7 +1,4 @@
-title = "Sophia OSS extract"
+title = "Sophia OSS"
 
-[allowlist]
-description = "OSS extract allowlist (paths / false-positive patterns only; no secret values)"
-paths = [
-  '''scripts/oss_sanitize/.*''',
-]
+[extend]
+useDefault = true

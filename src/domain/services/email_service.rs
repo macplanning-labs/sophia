@@ -749,7 +749,7 @@ mod tests {
     #[test]
     fn internal_domain_is_always_allowed() {
         assert!(is_recipient_allowed("y.yoshikawa@example.com", ""));
-        assert!(is_recipient_allowed("Y.Yoshikawa@MacPlanning.COM", ""));
+        assert!(is_recipient_allowed("Admin@Example.COM", ""));
     }
 
     #[test]
@@ -762,7 +762,7 @@ mod tests {
         let allowlist = "client@ntp.example.com, partner@example.co.jp";
         assert!(is_recipient_allowed("client@ntp.example.com", allowlist));
         assert!(is_recipient_allowed(" partner@example.co.jp ", allowlist));
-        assert!(!is_recipient_allowed("other@example.com", allowlist));
+        assert!(!is_recipient_allowed("other@example.org", allowlist));
     }
 
     #[test]
