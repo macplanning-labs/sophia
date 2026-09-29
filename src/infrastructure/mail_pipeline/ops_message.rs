@@ -77,7 +77,7 @@ pub fn fatal_alert_copy(kind: Phase1FatalKind) -> FatalAlertCopy {
     match kind {
         Phase1FatalKind::Database => FatalAlertCopy {
             title: "メール自動取込が停止（データベース接続）".to_string(),
-            advice: "原因は IMAP ではなく、認証情報を読もうとした PostgreSQL との通信失敗です。MINISFORUM 上の sophia-prod-db の生存・接続数・再起動直後の切断を確認してください。IMAP のパスワード変更は不要です。".to_string(),
+            advice: "原因は IMAP ではなく、認証情報を読もうとした PostgreSQL との通信失敗です。データベースコンテナ(sophia-oss-db)の生存・接続数・再起動直後の切断を確認してください。IMAP のパスワード変更は不要です。".to_string(),
         },
         Phase1FatalKind::ImapAuth => FatalAlertCopy {
             title: "メール自動取込が停止（IMAP認証）".to_string(),

@@ -31,7 +31,6 @@ backups/
 frontend/node_modules/
 frontend/.next/
 frontend/out/
-mac-planning-standards
 .env.production
 
 # 機密情報・一時生成物（2026-07-12 git追跡解除。P1-1）
