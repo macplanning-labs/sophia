@@ -69,15 +69,18 @@ pub async fn api_item_receipt(
     State(pool): State<PgPool>,
     Path(item_id): Path<i64>,
 ) -> Result<Response, AppError> {
+    use crate::presentation::http_util;
+
     let image = expense_repo::find_receipt_image(&pool, item_id).await?;
 
     match image {
-        Some((bytes, mime)) => Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, mime)
-            .header(header::CACHE_CONTROL, "private, max-age=3600")
-            .body(Body::from(bytes))
-            .expect("Response builder should not fail")),
+        Some((bytes, mime)) => Ok(http_util::build_response(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime)
+                .header(header::CACHE_CONTROL, "private, max-age=3600"),
+            Body::from(bytes)
+        )),
         None => Ok((StatusCode::NOT_FOUND, "領収書画像が見つかりません").into_response()),
     }
 }

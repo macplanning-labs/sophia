@@ -136,31 +136,40 @@ pub async fn api_order_pdf(
     use axum::body::Body;
     use axum::http::{header, StatusCode};
     use crate::domain::services::pdf_generator::PdfGenerator;
+    use crate::presentation::http_util;
 
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
     let order = order_repo::find_purchase_order_for_partner(&pool, &order_id, partner_id).await.ok().flatten();
 
     let order = match order {
         Some(o) => o,
-        None => return Response::builder().status(StatusCode::NOT_FOUND)
-            .body(Body::from("注文書が見つかりません")).expect("Response builder"),
+        None => return http_util::build_response(
+            Response::builder().status(StatusCode::NOT_FOUND),
+            Body::from("注文書が見つかりません")
+        ),
     };
 
     let pdf_data = match crate::presentation::handlers::orders::build_purchase_order_pdf_data(&pool, &order).await {
         Ok(d) => d,
-        Err(e) => return Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(format!("PDFデータ構築エラー: {}", e))).expect("Response builder"),
+        Err(e) => return http_util::build_response(
+            Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR),
+            Body::from(format!("PDFデータ構築エラー: {}", e))
+        ),
     };
 
     let gen = PdfGenerator::new();
     match gen.generate_purchase_order_pdf(&pdf_data) {
-        Ok(pdf_bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/pdf")
-            .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"order_{}.pdf\"", order_id))
-            .body(Body::from(pdf_bytes)).expect("Response builder"),
-        Err(e) => Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(format!("PDF生成エラー: {}", e))).expect("Response builder"),
+        Ok(pdf_bytes) => http_util::build_response(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"order_{}.pdf\"", order_id)),
+            Body::from(pdf_bytes)
+        ),
+        Err(e) => http_util::build_response(
+            Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR),
+            Body::from(format!("PDF生成エラー: {}", e))
+        ),
     }
 }
 
@@ -174,31 +183,40 @@ pub async fn api_acceptance_pdf(
     use axum::body::Body;
     use axum::http::{header, StatusCode};
     use crate::domain::services::pdf_generator::PdfGenerator;
+    use crate::presentation::http_util;
 
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
     let order = order_repo::find_purchase_order_for_partner(&pool, &order_id, partner_id).await.ok().flatten();
 
     let order = match order {
         Some(o) => o,
-        None => return Response::builder().status(StatusCode::NOT_FOUND)
-            .body(Body::from("注文書が見つかりません")).expect("Response builder"),
+        None => return http_util::build_response(
+            Response::builder().status(StatusCode::NOT_FOUND),
+            Body::from("注文書が見つかりません")
+        ),
     };
 
     let pdf_data = match crate::presentation::handlers::orders::build_purchase_order_pdf_data(&pool, &order).await {
         Ok(d) => d,
-        Err(e) => return Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(format!("PDFデータ構築エラー: {}", e))).expect("Response builder"),
+        Err(e) => return http_util::build_response(
+            Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR),
+            Body::from(format!("PDFデータ構築エラー: {}", e))
+        ),
     };
 
     let gen = PdfGenerator::new();
     match gen.generate_acceptance_pdf(&pdf_data) {
-        Ok(pdf_bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, "application/pdf")
-            .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"acceptance_{}.pdf\"", order_id))
-            .body(Body::from(pdf_bytes)).expect("Response builder"),
-        Err(e) => Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(format!("注文請書PDF生成エラー: {}", e))).expect("Response builder"),
+        Ok(pdf_bytes) => http_util::build_response(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"acceptance_{}.pdf\"", order_id)),
+            Body::from(pdf_bytes)
+        ),
+        Err(e) => http_util::build_response(
+            Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR),
+            Body::from(format!("注文請書PDF生成エラー: {}", e))
+        ),
     }
 }
 

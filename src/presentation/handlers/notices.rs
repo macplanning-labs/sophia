@@ -210,22 +210,26 @@ fn pdf_response(pdf_bytes: Vec<u8>, filename: &str) -> axum::response::Response 
     use axum::body::Body;
     use axum::http::{header, StatusCode};
     use axum::response::Response;
+    use crate::presentation::http_util;
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/pdf")
-        .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", filename))
-        .body(Body::from(pdf_bytes))
-        .expect("Response builder should not fail")
+    http_util::build_response(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/pdf")
+            .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", filename)),
+        Body::from(pdf_bytes)
+    )
 }
 
 fn pdf_error(status: axum::http::StatusCode, msg: String) -> axum::response::Response {
     use axum::body::Body;
     use axum::response::Response;
-    Response::builder()
-        .status(status)
-        .body(Body::from(msg))
-        .expect("Response builder should not fail")
+    use crate::presentation::http_util;
+
+    http_util::build_response(
+        Response::builder().status(status),
+        Body::from(msg)
+    )
 }
 
 /// GET /api/notices/{id}/pdf — 支払通知書PDF

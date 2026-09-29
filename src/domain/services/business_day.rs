@@ -4,16 +4,19 @@
 /// `tasks/scheduler.py::is_business_day`/`_last_business_day` と同じ考え方。
 
 use chrono::{Datelike, NaiveDate, Weekday};
+use super::month_range::first_of_next_month;
 
-fn to_jpholiday_date(date: NaiveDate) -> jpholiday::Date {
+/// 祝日か。日付変換に失敗した場合は祝日ではないものとして扱う（chrono の有効な日付では発生しない）
+pub fn is_national_holiday(date: NaiveDate) -> bool {
     jpholiday::Date::new(date.year(), date.month(), date.day())
-        .expect("chrono::NaiveDate is always a valid calendar date")
+        .map(jpholiday::is_holiday)
+        .unwrap_or(false)
 }
 
 /// 土日でも祝日でもない日か
 pub fn is_business_day(date: NaiveDate) -> bool {
     !matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
-        && !jpholiday::is_holiday(to_jpholiday_date(date))
+        && !is_national_holiday(date)
 }
 
 /// `date` から遡って `n` 営業日前の日付を返す（`date` 自体は含めない）
@@ -195,13 +198,10 @@ pub fn resolve_report_deadline_settings(
 
 /// 指定日が属する月の最終日を返す
 fn last_day_of_month(month_start: NaiveDate) -> NaiveDate {
-    let next_month_start = if month_start.month() == 12 {
-        NaiveDate::from_ymd_opt(month_start.year() + 1, 1, 1)
-    } else {
-        NaiveDate::from_ymd_opt(month_start.year(), month_start.month() + 1, 1)
-    }
-    .expect("year+1/month+1 は常に有効な日付");
-    next_month_start.pred_opt().expect("月初の前日は常に存在する")
+    // 計算不能（年の上限超え）の場合は入力日をそのまま返す（実運用の年では到達しない）
+    first_of_next_month(month_start)
+        .and_then(|next_month_start| next_month_start.pred_opt())
+        .unwrap_or(month_start)
 }
 
 #[cfg(test)]

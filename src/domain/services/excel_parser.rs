@@ -141,10 +141,9 @@ fn parse_inner(file_bytes: &[u8], original_filename: &str) -> Result<TimesheetPa
 
     // Step 3: 作業時間列検出
     let (hours_col, hours_unit) = detect_hours_column(&sheet_data, date_col, &data_rows);
-    if hours_col.is_none() {
+    let Some(hours_col) = hours_col else {
         bail!("作業時間データの列を検出できませんでした");
-    }
-    let hours_col = hours_col.unwrap();
+    };
 
     // Step 3.5: 開始・終了時刻列検出
     let time_cols = detect_time_columns(&sheet_data, date_col, hours_col, &data_rows);
@@ -386,8 +385,7 @@ fn detect_hours_column(
 
     // 分単位の列を優先
     let minute_candidates: Vec<_> = candidates.iter().filter(|c| c.2 == "minutes").collect();
-    if !minute_candidates.is_empty() {
-        let best = minute_candidates.iter().max_by_key(|c| c.0).unwrap();
+    if let Some(best) = minute_candidates.iter().max_by_key(|c| c.0) {
         return (Some(best.1), "minutes".to_string());
     }
 
@@ -894,8 +892,9 @@ mod tests {
     /// - is_date_valueの`> 1.0`が月初日(値=1)を除外していた
     /// - 日にちのみの値(1〜31)をExcelシリアル値として解釈し1900年扱いになっていた
     #[test]
+    #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
     fn parses_crosssystem_timesheet_format() {
-        let bytes = std::fs::read("document/勤務表_yyyy年mm月_氏名フルネーム.xlsx").unwrap();
+        let bytes = std::fs::read("docs/templates/勤務表_yyyy年mm月_氏名フルネーム.xlsx").unwrap();
         let result = auto_detect_and_parse(&bytes, "勤務表_2026年7月_前野謙.xlsx");
 
         assert!(result.error.is_none(), "解析エラー: {:?}", result.error);
@@ -924,8 +923,9 @@ mod tests {
     /// 拡張子欠落／誤拡張子でも `%PDF` マジックバイトでPDFパーサへ振り分けること。
     /// partner portal で file_name 欠落時に Excel(ZIP) 経路へ落ち EOCD になる回帰を防ぐ。
     #[test]
+    #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
     fn routes_pdf_by_magic_bytes_even_without_pdf_extension() {
-        let bytes = std::fs::read("document/勤務表_クロスシステム_サンプル.pdf").unwrap();
+        let bytes = std::fs::read("docs/templates/勤務表_クロスシステム_サンプル.pdf").unwrap();
         assert!(bytes.starts_with(b"%PDF"));
 
         for name in ["unknown.xlsx", "upload.bin", ""] {

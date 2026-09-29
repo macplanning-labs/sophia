@@ -56,16 +56,17 @@ pub async fn download_pdf(
     use axum::response::Response;
     use axum::body::Body;
     use axum::http::{header, StatusCode};
+    use crate::presentation::http_util;
 
     let invoice = billing_repo::find_invoice(&pool, id).await.ok().flatten();
 
     let invoice = match invoice {
         Some(inv) => inv,
         None => {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::from("請求書が見つかりません"))
-                .expect("Response builder should not fail");
+            return http_util::build_response(
+                Response::builder().status(StatusCode::NOT_FOUND),
+                Body::from("請求書が見つかりません")
+            );
         }
     };
 
@@ -78,22 +79,23 @@ pub async fn download_pdf(
     match gen.generate_invoice_pdf(&pdf_data) {
         Ok(pdf_bytes) => {
             let filename = format!("invoice_{}.pdf", invoice.invoice_no);
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/pdf")
-                .header(
-                    header::CONTENT_DISPOSITION,
-                    format!("inline; filename=\"{}\"", filename),
-                )
-                .body(Body::from(pdf_bytes))
-                .expect("Response builder should not fail")
+            http_util::build_response(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "application/pdf")
+                    .header(
+                        header::CONTENT_DISPOSITION,
+                        format!("inline; filename=\"{}\"", filename),
+                    ),
+                Body::from(pdf_bytes)
+            )
         }
         Err(e) => {
             tracing::error!("PDF生成エラー: {}", e);
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(format!("PDF生成エラー: {}", e)))
-                .expect("Response builder should not fail")
+            http_util::build_response(
+                Response::builder().status(StatusCode::INTERNAL_SERVER_ERROR),
+                Body::from(format!("PDF生成エラー: {}", e))
+            )
         }
     }
 }

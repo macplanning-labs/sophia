@@ -5,7 +5,7 @@ use crate::infrastructure::repositories::auth_repo;
 use crate::infrastructure::repositories::jwt_blacklist_repo::JwtBlacklistRepo;
 use crate::infrastructure::repositories::user_repo;
 use crate::presentation::cookie_util;
-use crate::presentation::login_guard;
+use crate::presentation::auth_messages::{client_ip, LOGIN_FAIL_MSG};
 use crate::presentation::middleware::role::AuthUser;
 use auth_core::domain::jwt::TokenBlacklist;
 use auth_core::domain::password::verify_and_needs_rehash;
@@ -89,8 +89,9 @@ impl auth_core::domain::attempt_lock::LockKey for LoginForm {
 ///
 /// 試行回数制限は`routes.rs`の`login_routes`に配線された
 /// `auth_core::infrastructure::rate_limit::attempt_lock_middleware`が
-/// ハンドラ実行前に判定済み（Step3 Phase5-3）。ハンドラ内では`login_guard`の
-/// `login_key`系呼び出しは行わない（`portal_key`/`mfa_key`は引き続き`login_guard.rs`が担当）。
+/// ハンドラ実行前に判定済み（Step3 Phase5-3）。ハンドラ内でのロック判定は行わない
+/// （`portal_key`/`mfa_key`相当は`portal.rs`/`webauthn.rs`がそれぞれ独自の
+/// `AttemptStore`インスタンス経由で行う。旧`login_guard.rs`は削除済み）。
 pub async fn api_login(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -100,7 +101,7 @@ pub async fn api_login(
     let pool = &state.pool;
     let email = form.email.as_str();
     let password = form.password.as_str();
-    let ip = login_guard::client_ip(&headers);
+    let ip = client_ip(&headers);
 
     let user = auth_repo::find_user_for_login(pool, email)
         .await
@@ -153,7 +154,18 @@ pub async fn api_login(
 
                     if mfa_enabled {
                         // MFA有効: 短命(5分)のmfa_pendingトークンのみ発行。sophia_jwtは発行しない
-                        let claims = auth_jwt::issue_mfa_pending_claims(id, role);
+                        let claims = match auth_jwt::issue_mfa_pending_claims(id, role)
+                        {
+                            Ok(c) => c,
+                            Err(e) => {
+                                tracing::error!(
+                                    "mfa_pendingトークン発行に失敗: user_id={} {:?}",
+                                    id,
+                                    e
+                                );
+                                return internal_error_response();
+                            }
+                        };
                         let token = match auth_jwt::encode_sophia_claims(&claims, &state.secret_key)
                         {
                             Ok(t) => t,
@@ -223,7 +235,7 @@ async fn fail_login(pool: &sqlx::PgPool, ip: &str, email: &str) -> axum::respons
         axum::http::StatusCode::UNAUTHORIZED,
         axum::Json(serde_json::json!({
             "success": false,
-            "error": login_guard::LOGIN_FAIL_MSG
+            "error": LOGIN_FAIL_MSG
         })),
     )
         .into_response()
@@ -244,7 +256,7 @@ pub async fn api_logout(
     jar: axum_extra::extract::CookieJar,
 ) -> impl IntoResponse {
     let pool = &state.pool;
-    let ip = login_guard::client_ip(&headers);
+    let ip = client_ip(&headers);
 
     if let Some(session_cookie) = jar.get("sophia_session") {
         let sid = session_cookie.value().to_string();

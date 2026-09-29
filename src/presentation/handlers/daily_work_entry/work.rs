@@ -8,6 +8,7 @@ use chrono::{Datelike, NaiveDate};
 use sqlx::PgPool;
 use crate::infrastructure::repositories::{order_repo, timesheet_repo};
 use crate::presentation::middleware::role::AuthUser;
+use crate::domain::services::month_range::month_range;
 use super::{check_permission, calc_actual_minutes, parse_time, WorkEntryQuery, SaveWorkEntriesRequest};
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -26,12 +27,11 @@ pub async fn list_work_entries(
     }
 
     // 月の範囲
-    let start_date = NaiveDate::from_ymd_opt(params.year, params.month as u32, 1)
-        .unwrap_or(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
-    let end_date = if params.month == 12 {
-        NaiveDate::from_ymd_opt(params.year + 1, 1, 1).unwrap()
-    } else {
-        NaiveDate::from_ymd_opt(params.year, (params.month + 1) as u32, 1).unwrap()
+    let (start_date, end_date) = match month_range(params.year, params.month) {
+        Some((start, end)) => (start, end),
+        None => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "year/month が不正です"}))).into_response();
+        }
     };
 
     let entries = timesheet_repo::list_work_entries(&pool, params.engineer_id, start_date, end_date)
@@ -150,12 +150,11 @@ pub async fn work_entries_summary(
     }
 
     // 月の範囲
-    let start_date = NaiveDate::from_ymd_opt(params.year, params.month as u32, 1)
-        .unwrap_or(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
-    let end_date = if params.month == 12 {
-        NaiveDate::from_ymd_opt(params.year + 1, 1, 1).unwrap()
-    } else {
-        NaiveDate::from_ymd_opt(params.year, (params.month + 1) as u32, 1).unwrap()
+    let (start_date, end_date) = match month_range(params.year, params.month) {
+        Some((start, end)) => (start, end),
+        None => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "year/month が不正です"}))).into_response();
+        }
     };
 
     // 集計クエリ

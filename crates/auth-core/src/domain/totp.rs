@@ -90,6 +90,59 @@ pub fn decrypt_secret(blob_b64: &str, secret_key: &str) -> Result<Vec<u8>, AuthE
         .map_err(|e| AuthError::Totp(format!("秘密鍵の復号に失敗: {e}")))
 }
 
+/// AES-256-GCM暗号化結果（ciphertext/nonceを別々のDBカラムに保存するアプリ向け）。
+/// [`EncryptedSecret`]（単一blobカラム）とは異なり、ciphertext/nonceを個別に
+/// 永続化するスキーマ（例: Sophiaのsecret_encrypted/nonceカラム）向けに用意した。
+pub struct EncryptedSecretSplit {
+    pub ciphertext_b64: String,
+    pub nonce_b64: String,
+}
+
+/// TOTP秘密鍵をAES-256-GCMで暗号化する（ciphertext/nonce個別カラム版）。
+pub fn encrypt_secret_split(
+    plaintext: &[u8],
+    secret_key: &str,
+) -> Result<EncryptedSecretSplit, AuthError> {
+    let key_bytes = derive_key(secret_key);
+    let key = GenericArray::from_slice(&key_bytes);
+    let cipher = Aes256Gcm::new(key);
+
+    let nonce_bytes: [u8; 12] = rand::random();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|e| AuthError::Totp(format!("秘密鍵の暗号化に失敗: {e}")))?;
+
+    Ok(EncryptedSecretSplit {
+        ciphertext_b64: BASE64.encode(&ciphertext),
+        nonce_b64: BASE64.encode(&nonce_bytes),
+    })
+}
+
+/// AES-256-GCMで暗号化されたTOTP秘密鍵を復号する（ciphertext/nonce個別カラム版）。
+pub fn decrypt_secret_split(
+    ciphertext_b64: &str,
+    nonce_b64: &str,
+    secret_key: &str,
+) -> Result<Vec<u8>, AuthError> {
+    let key_bytes = derive_key(secret_key);
+    let key = GenericArray::from_slice(&key_bytes);
+    let cipher = Aes256Gcm::new(key);
+
+    let ciphertext = BASE64
+        .decode(ciphertext_b64)
+        .map_err(|e| AuthError::Totp(format!("秘密鍵ciphertextのデコードに失敗: {e}")))?;
+    let nonce_bytes = BASE64
+        .decode(nonce_b64)
+        .map_err(|e| AuthError::Totp(format!("秘密鍵nonceのデコードに失敗: {e}")))?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .map_err(|e| AuthError::Totp(format!("秘密鍵の復号に失敗: {e}")))
+}
+
 // ── TOTP 操作 ──
 
 /// 新しいTOTP秘密鍵を生成する（バイト列、20バイト）。
@@ -188,6 +241,19 @@ mod tests {
 
         let encrypted = encrypt_secret(original, secret_key).unwrap();
         let decrypted = decrypt_secret(&encrypted.blob_b64, secret_key).unwrap();
+
+        assert_eq!(original.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn test_split_encrypt_decrypt_roundtrip() {
+        let secret_key = "test-secret-key-for-split";
+        let original = b"test-totp-secret-bytes-split";
+
+        let encrypted = encrypt_secret_split(original, secret_key).unwrap();
+        let decrypted =
+            decrypt_secret_split(&encrypted.ciphertext_b64, &encrypted.nonce_b64, secret_key)
+                .unwrap();
 
         assert_eq!(original.to_vec(), decrypted);
     }

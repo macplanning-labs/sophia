@@ -14,3 +14,4 @@ pub mod attachment_parsers;
 pub mod peppol_client;
 pub mod peppol_importer;
 pub mod ollama_client;
+pub mod bootstrap_admin;

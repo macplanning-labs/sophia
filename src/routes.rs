@@ -1219,7 +1219,7 @@ pub fn create_router(state: AppState) -> Router {
         .burst_size(60)
         .key_extractor(SmartIpKeyExtractor)
         .finish()
-        .unwrap();
+        .expect("webhook IP ベースレート制限設定が不正（定数のため起動時に検出）");
 
     let webhook_router = Router::new()
         .route("/api/v1/webhook/timesheet", post(handlers::api::index))
@@ -1240,14 +1240,14 @@ pub fn create_router(state: AppState) -> Router {
         .burst_size(60)
         .key_extractor(SmartIpKeyExtractor)
         .finish()
-        .unwrap();
+        .expect("IP ベースレート制限設定が不正（定数のため起動時に検出）");
 
     let key_governor_conf = GovernorConfigBuilder::default()
         .per_second(5) // 300 req/min相当の目安
         .burst_size(300)
         .key_extractor(ApiKeyExtractor)
         .finish()
-        .unwrap();
+        .expect("API キーベースレート制限設定が不正（定数のため起動時に検出）");
 
     let v1_router = Router::new()
         .route(
@@ -1451,11 +1451,12 @@ pub fn create_router(state: AppState) -> Router {
                     if std::path::Path::new(&fallback).exists() {
                         let body = tokio::fs::read(&fallback).await.unwrap_or_default();
                         return Ok::<_, std::convert::Infallible>(
-                            axum::response::Response::builder()
-                                .status(200)
-                                .header("content-type", "text/html; charset=utf-8")
-                                .body(axum::body::Body::from(body))
-                                .unwrap(),
+                            crate::presentation::http_util::build_response(
+                                axum::response::Response::builder()
+                                    .status(200)
+                                    .header("content-type", "text/html; charset=utf-8"),
+                                axum::body::Body::from(body)
+                            ),
                         );
                     }
                 }
@@ -1464,11 +1465,12 @@ pub fn create_router(state: AppState) -> Router {
                 let body = tokio::fs::read("frontend/out/index.html")
                     .await
                     .unwrap_or_default();
-                Ok(axum::response::Response::builder()
-                    .status(200)
-                    .header("content-type", "text/html; charset=utf-8")
-                    .body(axum::body::Body::from(body))
-                    .unwrap())
+                Ok(crate::presentation::http_util::build_response(
+                    axum::response::Response::builder()
+                        .status(200)
+                        .header("content-type", "text/html; charset=utf-8"),
+                    axum::body::Body::from(body)
+                ))
             },
         ));
         app = app.fallback_service(serve_dir);

@@ -29,11 +29,11 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 use tracing;
+use crate::domain::services::static_regex::compile_static;
 
 /// メール本文からEDI-OASIS注文書URLの detail_id を抽出する正規表現
 static EDI_ORDER_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"https?://edi\.e-business\.co\.jp/home/orders/detail:(\d+)")
-        .expect("EDI URL regex")
+    compile_static(r"https?://edi\.e-business\.co\.jp/home/orders/detail:(\d+)")
 });
 
 /// EDI-OASIS接続エラー
@@ -979,6 +979,12 @@ impl EdiOasisClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_static_regexes_compile() {
+        // 起動時にすべての静的正規表現がコンパイル可能か検証
+        LazyLock::force(&EDI_ORDER_URL_RE);
+    }
 
     #[test]
     fn test_extract_order_detail_id() {

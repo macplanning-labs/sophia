@@ -5,6 +5,8 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use crate::domain::services::static_regex::compile_static;
+use std::sync::LazyLock;
 
 /// 精算条件（値オブジェクト）。
 ///
@@ -124,14 +126,22 @@ pub fn is_valid_qualified_invoice_registration_no(s: &str) -> bool {
     if s.is_empty() {
         return true;
     }
-    static RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"^T\d{13}$").expect("registration_no regex"));
+    static RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| compile_static(r"^T\d{13}$"));
     RE.is_match(s)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_static_regexes_compile() {
+        // 起動時にすべての静的正規表現がコンパイル可能か検証
+        // is_valid_qualified_invoice_registration_no() 関数を呼び出すことで LazyLock が評価される
+        let _ = is_valid_qualified_invoice_registration_no("");
+        let _ = is_valid_qualified_invoice_registration_no("T1234567890123");
+    }
 
     #[test]
     fn test_registration_no_valid() {

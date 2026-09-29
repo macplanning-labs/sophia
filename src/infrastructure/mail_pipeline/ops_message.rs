@@ -66,6 +66,11 @@ pub fn classify_phase1_fatal(error: &str) -> Phase1FatalKind {
     Phase1FatalKind::Other
 }
 
+/// Phase1 の IMAP 一時障害としてリトライ対象か（認証失敗・設定欠落・DB障害は対象外）。
+pub fn is_retryable_phase1_imap_error(error: &str) -> bool {
+    matches!(classify_phase1_fatal(error), Phase1FatalKind::ImapNetwork)
+}
+
 /// Chat・メール文面用のコピー（件名核とアドバイス）
 pub struct FatalAlertCopy {
     pub title: String,   // Chat太字・メール件名の核（日時は呼び出し側で付与）
@@ -85,7 +90,7 @@ pub fn fatal_alert_copy(kind: Phase1FatalKind) -> FatalAlertCopy {
         },
         Phase1FatalKind::ImapNetwork => FatalAlertCopy {
             title: "メール自動取込が停止（IMAP接続）".to_string(),
-            advice: "imap.gmail.com:993 への疎通・TLS・タイムアウトを確認してください。".to_string(),
+            advice: "IMAP サーバー(IMAP_HOST / IMAP_PORT)への疎通・TLS・タイムアウトを確認してください。".to_string(),
         },
         Phase1FatalKind::ConfigMissing => FatalAlertCopy {
             title: "メール自動取込が停止（認証情報未設定）".to_string(),
@@ -133,6 +138,23 @@ mod tests {
     fn test_classify_phase1_fatal_imap_network() {
         let error = "IMAP接続タイムアウト";
         assert_eq!(classify_phase1_fatal(error), Phase1FatalKind::ImapNetwork);
+    }
+
+    #[test]
+    fn test_is_retryable_phase1_imap_error() {
+        assert!(is_retryable_phase1_imap_error(
+            "IMAPログインエラー: Resource temporarily unavailable (os error 11)"
+        ));
+        assert!(is_retryable_phase1_imap_error("IMAP接続タイムアウト"));
+        assert!(!is_retryable_phase1_imap_error(
+            "NO [AUTHENTICATIONFAILED] Invalid credentials"
+        ));
+        assert!(!is_retryable_phase1_imap_error(
+            "IMAP認証情報が設定されていません"
+        ));
+        assert!(!is_retryable_phase1_imap_error(
+            "自社情報のSMTP認証情報取得に失敗しました: error communicating with database"
+        ));
     }
 
     #[test]

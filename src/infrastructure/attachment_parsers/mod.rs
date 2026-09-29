@@ -35,7 +35,7 @@ pub enum ParsedDocument {
 
 /// PDFバイト列をテキスト抽出した上で、書類種別に応じたパーサーへディスパッチする
 pub fn parse_pdf(kind: DocumentKind, pdf_bytes: &[u8]) -> Result<ParsedDocument, PhaseError> {
-    let text = pdf_extract::extract_text_from_mem(pdf_bytes)
+    let text = crate::domain::services::pdf_text::extract_text(pdf_bytes)
         .map_err(|e| PhaseError::Permanent(format!("PDFテキスト抽出失敗: {e}")))?;
 
     match kind {

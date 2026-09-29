@@ -67,10 +67,7 @@ pub fn classify_work_day(date: NaiveDate) -> WorkDayKind {
     if date.weekday() == Weekday::Sun {
         return WorkDayKind::StatutoryHoliday;
     }
-    let is_holiday = jpholiday::is_holiday(
-        jpholiday::Date::new(date.year(), date.month(), date.day())
-            .expect("chrono::NaiveDate is always a valid calendar date"),
-    );
+    let is_holiday = super::business_day::is_national_holiday(date);
     if date.weekday() == Weekday::Sat || is_holiday {
         WorkDayKind::NonStatutoryHoliday
     } else {

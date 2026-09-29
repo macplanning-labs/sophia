@@ -8,6 +8,7 @@ use regex::Regex;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use std::sync::LazyLock;
+use crate::domain::services::static_regex::compile_static;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PaymentNoticeItem {
@@ -47,21 +48,21 @@ pub fn parse(text: &str) -> ParsedPaymentNotice {
     let mut result = ParsedPaymentNotice::default();
 
     static INVOICE_NO_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?:請求番号|注[⽂文]番号|伝票番号)[：:\s]*([A-Z0-9\-]+)").unwrap()
+        compile_static(r"(?:請求番号|注[⽂文]番号|伝票番号)[：:\s]*([A-Z0-9\-]+)")
     });
     if let Some(c) = INVOICE_NO_RE.captures(text) {
         result.invoice_number = Some(c[1].trim().to_string());
     }
 
     static ISSUE_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?:請求日|発行日|作成日)[：:\s]*(\d{4})[年/](\d{1,2})[月/](\d{1,2})").unwrap()
+        compile_static(r"(?:請求日|発行日|作成日)[：:\s]*(\d{4})[年/](\d{1,2})[月/](\d{1,2})")
     });
     if let Some(c) = ISSUE_DATE_RE.captures(text) {
         result.issue_date = ymd(&c[1], &c[2], &c[3]);
     }
 
     static DUE_DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?:支払期日|支払日|お支払日)[：:\s]*(\d{4})[年/](\d{1,2})[月/](\d{1,2})").unwrap()
+        compile_static(r"(?:支払期日|支払日|お支払日)[：:\s]*(\d{4})[年/](\d{1,2})[月/](\d{1,2})")
     });
     if let Some(c) = DUE_DATE_RE.captures(text) {
         result.due_date = ymd(&c[1], &c[2], &c[3]);
@@ -69,10 +70,9 @@ pub fn parse(text: &str) -> ParsedPaymentNotice {
 
     // 対象月: 作業期間「2026年4月1日 〜 2026年4月30日」の開始日の年月
     static WORK_PERIOD_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(
+        compile_static(
             r"(\d{4})[年/](\d{1,2})[月/](\d{1,2})日?\s*[〜～~]\s*(\d{4})[年/](\d{1,2})[月/](\d{1,2})",
         )
-        .unwrap()
     });
     if let Some(c) = WORK_PERIOD_RE.captures(text) {
         result.target_month = ymd(&c[1], &c[2], "1");
@@ -80,28 +80,28 @@ pub fn parse(text: &str) -> ParsedPaymentNotice {
     // フォールバック: 「2026年04月分」「2026年4月」等
     if result.target_month.is_none() {
         static TARGET_MONTH_FALLBACK_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"(\d{4})[年/](\d{1,2})[月分]").unwrap());
+            LazyLock::new(|| compile_static(r"(\d{4})[年/](\d{1,2})[月分]"));
         if let Some(c) = TARGET_MONTH_FALLBACK_RE.captures(text) {
             result.target_month = ymd(&c[1], &c[2], "1");
         }
     }
 
     static PROJECT_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?s)(?:業務名称|件名|案件名)[：:\s]*\n?\s*(.+?)(?:\n|作業期間)").unwrap()
+        compile_static(r"(?s)(?:業務名称|件名|案件名)[：:\s]*\n?\s*(.+?)(?:\n|作業期間)")
     });
-    static DATE_START_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d{4}年").unwrap());
+    static DATE_START_RE: LazyLock<Regex> = LazyLock::new(|| compile_static(r"^\d{4}年"));
     if let Some(c) = PROJECT_NAME_RE.captures(text) {
         let name = c[1].trim();
         if !name.is_empty() && !DATE_START_RE.is_match(name) {
-            static WS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
+            static WS_RE: LazyLock<Regex> = LazyLock::new(|| compile_static(r"\s+"));
             result.project_name = Some(truncate_chars(&WS_RE.replace_all(name, " "), 255));
         }
     }
 
     static PERSON_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?:作業責任者|担当者|作業者)[：:\s]*\n?\s*(.+?)(?:\n)").unwrap());
+        LazyLock::new(|| compile_static(r"(?:作業責任者|担当者|作業者)[：:\s]*\n?\s*(.+?)(?:\n)"));
     static PERSON_EXCLUDE_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^(連絡|委託|業務|￥|\d{4}年)").unwrap());
+        LazyLock::new(|| compile_static(r"^(連絡|委託|業務|￥|\d{4}年)"));
     if let Some(c) = PERSON_RE.captures(text) {
         let name = c[1].trim();
         if !name.is_empty() && !PERSON_EXCLUDE_RE.is_match(name) {
@@ -111,7 +111,7 @@ pub fn parse(text: &str) -> ParsedPaymentNotice {
 
     // ── 金額 ──
     static UNIT_PRICE_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?:[⽉月]額基本料[⾦金]|単価)[：:\s]*[￥¥]?([\d,]+)").unwrap()
+        compile_static(r"(?:[⽉月]額基本料[⾦金]|単価)[：:\s]*[￥¥]?([\d,]+)")
     });
     if let Some(c) = UNIT_PRICE_RE.captures(text) {
         if let Some(unit_price) = parse_amount(&c[1]) {
@@ -129,19 +129,19 @@ pub fn parse(text: &str) -> ParsedPaymentNotice {
     // 文字クラス[合計金額]*はPython版と同様、これらの文字の任意個の並びを許容する
     // （「税抜合計金額」「税抜金額」等の表記ゆれをまとめて拾うための緩いマッチ）
     static SUBTOTAL_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?:税抜[合計金額]*|小計)[：:\s]*[￥¥]?([\d,]+)").unwrap());
+        LazyLock::new(|| compile_static(r"(?:税抜[合計金額]*|小計)[：:\s]*[￥¥]?([\d,]+)"));
     if let Some(c) = SUBTOTAL_RE.captures(text) {
         result.subtotal = parse_amount(&c[1]);
     }
 
     static TAX_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"(?:消費税|税額)[：:\s]*[￥¥]?([\d,]+)").unwrap());
+        LazyLock::new(|| compile_static(r"(?:消費税|税額)[：:\s]*[￥¥]?([\d,]+)"));
     if let Some(c) = TAX_RE.captures(text) {
         result.tax_amount = parse_amount(&c[1]);
     }
 
     static TOTAL_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?:税込[合計金額]*|合計[金額]*|請求金額|ご請求額)[：:\s]*[￥¥]?([\d,]+)").unwrap()
+        compile_static(r"(?:税込[合計金額]*|合計[金額]*|請求金額|ご請求額)[：:\s]*[￥¥]?([\d,]+)")
     });
     if let Some(c) = TOTAL_RE.captures(text) {
         result.total = parse_amount(&c[1]);
@@ -168,6 +168,13 @@ pub fn parse(text: &str) -> ParsedPaymentNotice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_static_regexes_compile() {
+        // 起動時にすべての静的正規表現がコンパイル可能か検証
+        // parse() 関数を呼び出すことで LazyLock が評価される
+        let _ = parse("");
+    }
 
     #[test]
     fn parses_core_fields_and_reconciles_totals() {

@@ -1,11 +1,12 @@
 /// infrastructure/repositories/settlement_repo.rs — 月次確定・精算ダッシュボード用リポジトリ
 
 use anyhow::Result;
-use chrono::{Datelike, NaiveDate};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
 use crate::domain::services::settlement_dashboard::{SettlementRow, SettlementFilter};
+use crate::domain::services::month_range::first_of_next_month;
 
 /// 月次確定データをJOINクエリで取得
 pub async fn list_settlement_rows(
@@ -14,11 +15,8 @@ pub async fn list_settlement_rows(
     filter: &SettlementFilter,
 ) -> Result<Vec<SettlementRow>> {
     let month_start = target_month;
-    let month_end = if target_month.month() == 12 {
-        NaiveDate::from_ymd_opt(target_month.year() + 1, 1, 1).unwrap()
-    } else {
-        NaiveDate::from_ymd_opt(target_month.year(), target_month.month() + 1, 1).unwrap()
-    };
+    let month_end = first_of_next_month(target_month)
+        .ok_or_else(|| anyhow::anyhow!("年月の計算に失敗しました（オーバーフロー）"))?;
 
     let mut sql = String::from(r#"
         SELECT

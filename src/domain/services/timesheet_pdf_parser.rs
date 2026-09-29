@@ -10,10 +10,38 @@ use chrono::NaiveDate;
 use regex::Regex;
 use rust_decimal::Decimal;
 use tracing::warn;
+use std::sync::LazyLock;
 
 use super::excel_parser::{
     check_work_alerts, DailyEntry, TimesheetParseResult, error_result_for_pdf,
 };
+use crate::domain::services::static_regex::compile_static;
+
+// 静的正規表現（LazyLock）
+static YM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    compile_static(r"(\d{4})\s*年\s*(\d{1,2})\s*月")
+});
+static PERSON_RE: LazyLock<Regex> = LazyLock::new(|| {
+    compile_static(r"氏名[：:\s　]*([^\n\r]+)")
+});
+static DIGIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    compile_static(r"^\d")
+});
+static TOTAL_HOURS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    compile_static(r"合計\s*(\d+)\s*時間\s*(\d+)\s*分")
+});
+static WORK_ENTRY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    compile_static(r"(?m)^(\d{1,2})\s+([月火水木金土日祝])\s*$")
+});
+static TIME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    compile_static(r"(?m)^(\d{2}:\d{2})$")
+});
+static HOURS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    compile_static(r"(?m)^(\d+)\s*時間(?:\s*(\d+)\s*分)?")
+});
+static WORK_ENTRY_DETAILED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    compile_static(r"(?m)^(\d{1,2})\s+([月火水木金土日祝])\s+(\d{2}:\d{2})\s+(\d{2}:\d{2})\s+(\d+)\s+(\d+)\s*時間\s+(\d+)\s*分")
+});
 
 /// PDFバイト列を解析する（拡張子判定は呼び出し側 / `excel_parser::auto_detect_and_parse`）
 pub fn parse(file_bytes: &[u8], original_filename: &str) -> TimesheetParseResult {
@@ -27,7 +55,7 @@ pub fn parse(file_bytes: &[u8], original_filename: &str) -> TimesheetParseResult
 }
 
 fn parse_inner(file_bytes: &[u8], original_filename: &str) -> Result<TimesheetParseResult> {
-    let text = pdf_extract::extract_text_from_mem(file_bytes)
+    let text = crate::domain::services::pdf_text::extract_text(file_bytes)
         .map_err(|e| anyhow::anyhow!("PDFテキスト抽出失敗: {e}"))?;
     parse_cross_timesheet_text(&text, original_filename)
 }
@@ -98,7 +126,7 @@ fn looks_like_cross_timesheet(text: &str, filename: &str) -> bool {
 }
 
 fn extract_year_month(text: &str, filename: &str) -> Result<Option<(i32, u32)>> {
-    let re = Regex::new(r"(\d{4})\s*年\s*(\d{1,2})\s*月").unwrap();
+    let re = &*YM_RE;
     if let Some(c) = re.captures(text) {
         let y: i32 = c[1].parse()?;
         let m: u32 = c[2].parse()?;
@@ -107,7 +135,7 @@ fn extract_year_month(text: &str, filename: &str) -> Result<Option<(i32, u32)>> 
         }
     }
     // ファイル名: 勤務表_2026年07月... or 勤務表_2026年7月...
-    let re_fn = Regex::new(r"(\d{4})\s*年\s*(\d{1,2})\s*月").unwrap();
+    let re_fn = &*YM_RE;
     if let Some(c) = re_fn.captures(filename) {
         let y: i32 = c[1].parse()?;
         let m: u32 = c[2].parse()?;
@@ -129,7 +157,7 @@ fn normalize_person_name(raw: &str) -> String {
 
 fn extract_worker_name(text: &str, filename: &str) -> Result<String> {
     // 「氏名 xxx」同一行
-    let re_same = Regex::new(r"氏名[：:\s　]*([^\n\r]+)").unwrap();
+    let re_same = &*PERSON_RE;
     if let Some(c) = re_same.captures(text) {
         let mut name = normalize_person_name(c[1].trim());
         // 後続ラベルがつながった場合を除去
@@ -168,7 +196,7 @@ fn extract_worker_name(text: &str, filename: &str) -> Result<String> {
     {
         if let Some((_, name_part)) = stem.rsplit_once('_') {
             let name = normalize_person_name(name_part);
-            if !name.is_empty() && !Regex::new(r"^\d").unwrap().is_match(&name) {
+            if !name.is_empty() && !DIGIT_RE.is_match(&name) {
                 return Ok(name);
             }
         }
@@ -178,7 +206,7 @@ fn extract_worker_name(text: &str, filename: &str) -> Result<String> {
 }
 
 fn extract_total_hours(text: &str) -> Option<f64> {
-    let re = Regex::new(r"合計\s*(\d+)\s*時間\s*(\d+)\s*分").unwrap();
+    let re = &*TOTAL_HOURS_RE;
     re.captures(text).map(|c| {
         let h: f64 = c[1].parse().unwrap_or(0.0);
         let m: f64 = c[2].parse().unwrap_or(0.0);
@@ -188,12 +216,9 @@ fn extract_total_hours(text: &str) -> Option<f64> {
 
 fn extract_daily_entries(text: &str, year: i32, month: u32) -> Result<Vec<DailyEntry>> {
     // pypdf系: "1 水 09:00 18:00 60 8 時間 0 分"
-    let re_work = Regex::new(
-        r"(?m)^(\d{1,2})\s+([月火水木金土日祝])\s+(\d{2}:\d{2})\s+(\d{2}:\d{2})\s+(\d+)\s+(\d+)\s*時間\s+(\d+)\s*分",
-    )
-    .unwrap();
+    let re_work = &*WORK_ENTRY_DETAILED_RE;
     // 休: "4 土" / "20 祝"
-    let re_off = Regex::new(r"(?m)^(\d{1,2})\s+([月火水木金土日祝])\s*$").unwrap();
+    let re_off = &*WORK_ENTRY_RE;
 
     let mut by_day: std::collections::BTreeMap<u32, DailyEntry> = std::collections::BTreeMap::new();
 
@@ -258,9 +283,9 @@ fn extract_daily_entries(text: &str, year: i32, month: u32) -> Result<Vec<DailyE
 
 /// pdfminer/pdf-extract 風の列バラバラテキスト向け
 fn extract_daily_columnar(text: &str, year: i32, month: u32) -> Option<std::collections::BTreeMap<u32, DailyEntry>> {
-    let day_re = Regex::new(r"(?m)^(\d{1,2})\s+([月火水木金土日祝])\s*$").unwrap();
-    let time_re = Regex::new(r"(?m)^(\d{2}:\d{2})$").unwrap();
-    let hours_re = Regex::new(r"(?m)^(\d+)\s*時間(?:\s*(\d+)\s*分)?").unwrap();
+    let day_re = &*WORK_ENTRY_RE;
+    let time_re = &*TIME_RE;
+    let hours_re = &*HOURS_RE;
 
     let days: Vec<(u32, String)> = day_re
         .captures_iter(text)
@@ -345,8 +370,22 @@ mod tests {
     use rust_decimal::prelude::ToPrimitive;
 
     #[test]
+    fn test_static_regexes_compile() {
+        // 起動時にすべての静的正規表現がコンパイル可能か検証
+        LazyLock::force(&YM_RE);
+        LazyLock::force(&PERSON_RE);
+        LazyLock::force(&DIGIT_RE);
+        LazyLock::force(&TOTAL_HOURS_RE);
+        LazyLock::force(&WORK_ENTRY_RE);
+        LazyLock::force(&TIME_RE);
+        LazyLock::force(&HOURS_RE);
+        LazyLock::force(&WORK_ENTRY_DETAILED_RE);
+    }
+
+    #[test]
+    #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
     fn parses_cross_timesheet_text_fixture() {
-        let text = std::fs::read_to_string("document/勤務表_クロスシステム_サンプル.txt").unwrap();
+        let text = std::fs::read_to_string("docs/templates/勤務表_クロスシステム_サンプル.txt").unwrap();
         let result = parse_cross_timesheet_text(
             &text,
             "勤務表_2026年07月21日_勝又祐紀.pdf",
@@ -364,8 +403,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
     fn parses_cross_timesheet_pdf_bytes() {
-        let bytes = std::fs::read("document/勤務表_クロスシステム_サンプル.pdf").unwrap();
+        let bytes = std::fs::read("docs/templates/勤務表_クロスシステム_サンプル.pdf").unwrap();
         let result = parse(&bytes, "勤務表_2026年07月21日_勝又祐紀.pdf");
         assert!(
             result.error.is_none(),

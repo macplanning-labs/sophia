@@ -94,6 +94,21 @@ enum Commands {
         template: Option<String>,
     },
 
+    /// 最初の管理者を作成する(ユーザーが0人のときのみ)
+    CreateAdmin {
+        /// メールアドレス
+        #[arg(long)]
+        email: String,
+
+        /// ユーザー名（省略時はメール の @ より前）
+        #[arg(long)]
+        username: Option<String>,
+
+        /// パスワードを標準入力から読む（指定なければ INITIAL_ADMIN_PASSWORD 環境変数）
+        #[arg(long, default_value_t = false)]
+        password_stdin: bool,
+    },
+
     /// スキーマ適用済みの既存環境に対して _sqlx_migrations をベースライン（追跡開始）
     BaselineMigrations,
 }
@@ -274,6 +289,19 @@ async fn main() -> anyhow::Result<()> {
             domain::services::email_test::run_email_test(&pool, &to, template.as_deref()).await?;
         }
 
+        Commands::CreateAdmin { email, username, password_stdin } => {
+            tracing::info!("👤 初期管理者作成");
+
+            let pool = infrastructure::db::create_pool().await?;
+            run_migrations(&pool).await?;
+
+            match infrastructure::bootstrap_admin::run_cli(&pool, &email, username.as_deref(), password_stdin).await {
+                Ok(true) => {}
+                Ok(false) => std::process::exit(1),
+                Err(e) => return Err(e),
+            }
+        }
+
         Commands::BaselineMigrations => {
             baseline_migrations().await?;
         }
@@ -286,11 +314,29 @@ async fn serve() -> anyhow::Result<()> {
     // 設定読み込み
     let config = config::AppConfig::from_env()?;
 
+    // WebAuthn allowlist の設定漏れを早期検知する（本番/DRで未設定だとWebAuthnが
+    // 常にlocalhostのみ許可され、実ドメインからのパスキー登録/認証が必ず失敗するため）
+    let env_name = std::env::var("ENV_NAME").unwrap_or_else(|_| "local".to_string());
+    if matches!(env_name.as_str(), "production" | "dr" | "staging")
+        && std::env::var("WEBAUTHN_ALLOWED_HOSTS")
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+    {
+        tracing::warn!(
+            "⚠️ WEBAUTHN_ALLOWED_HOSTS が未設定です（ENV_NAME={}）。localhost以外のHostからの \
+             WebAuthn登録/認証は全て拒否されます。実ドメインを設定してください",
+            env_name
+        );
+    }
+
     // DB接続
     let pool = infrastructure::db::create_pool().await?;
 
     // マイグレーション実行（SQLファイルを順序付きで実行）
     run_migrations(&pool).await?;
+
+    // 初期管理者を作成（環境変数で指定されていれば）
+    infrastructure::bootstrap_admin::run_from_env(&pool).await;
 
     // AppState 構築
     // WebAuthn の RP ID/Origin は固定値を持たず、リクエストごとに Host ヘッダーから
@@ -298,6 +344,12 @@ async fn serve() -> anyhow::Result<()> {
     let state = config::AppState {
         pool,
         secret_key: config.secret_key.clone(),
+        portal_attempt_store: std::sync::Arc::new(
+            infrastructure::repositories::attempt_lock_store::InMemoryAttemptStore::new(),
+        ),
+        mfa_attempt_store: std::sync::Arc::new(
+            infrastructure::repositories::attempt_lock_store::InMemoryAttemptStore::new(),
+        ),
     };
 
     // メール取得スケジューラをバックグラウンドで起動（毎時実行）

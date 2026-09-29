@@ -18,6 +18,7 @@ pub struct MailRow {
     pub is_reflected: bool,
     pub note: String,
     pub body_text: String,
+    /// JSON配列の文字列（JSONBを::textで取得）。SQLで COALESCE(attachments, '[]'::jsonb)::text に変換済み
     pub attachments: String,
 }
 
@@ -27,7 +28,7 @@ pub async fn list_unreflected_mails(pool: &PgPool) -> Result<Vec<MailRow>> {
         r#"
         SELECT id, sender_name, sender_email, subject, received_at,
                classification, matched_entity_name, is_reflected, note,
-               body_text, attachments
+               body_text, COALESCE(attachments, '[]'::jsonb)::text AS attachments
         FROM t_mail_scan_log
         WHERE is_reflected = FALSE
         ORDER BY received_at DESC
@@ -107,4 +108,127 @@ pub async fn find_mail_body(pool: &PgPool, mail_id: i64) -> Result<Option<String
     .fetch_optional(pool)
     .await?;
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::repositories::test_support;
+
+    #[tokio::test]
+    async fn test_list_unreflected_mails_attachments_coalesce() {
+        test_support::with_rollback(|pool| async move {
+            // テスト用のメール2件を未反映状態で INSERT
+            // A: attachments に JSON 配列を持つ行
+            sqlx::query(
+                r#"INSERT INTO t_mail_scan_log
+                   (gmail_message_id, sender_email, sender_name, subject, received_at,
+                    classification, matched_entity_name, is_reflected, attachments)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)"#
+            )
+            .bind("test-msg-a-for-attachments-coalesce")
+            .bind("sender-a@example.com")
+            .bind("Sender A")
+            .bind("Test Mail A - Attachments")
+            .bind(chrono::DateTime::parse_from_rfc3339("2099-01-02T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc))
+            .bind("test")
+            .bind("Entity A")
+            .bind(false)
+            .bind(r#"["a.pdf","b.xlsx"]"#)
+            .execute(&pool)
+            .await
+            .expect("Failed to insert test mail A");
+
+            // B: attachments が NULL の行（COALESCE で '[]' に正規化されること）
+            // ステージング/本番は NULL 許容だが、ローカルDBは NOT NULL でスキーマがずれているため、
+            // このトランザクション内だけ制約を外す（DDL もロールバックされ、実DBには残らない）
+            sqlx::query("ALTER TABLE t_mail_scan_log ALTER COLUMN attachments DROP NOT NULL")
+                .execute(&pool)
+                .await
+                .expect("Failed to relax NOT NULL for test");
+            sqlx::query(
+                r#"INSERT INTO t_mail_scan_log
+                   (gmail_message_id, sender_email, sender_name, subject, received_at,
+                    classification, matched_entity_name, is_reflected, attachments)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)"#
+            )
+            .bind("test-msg-b-for-attachments-coalesce")
+            .bind("sender-b@example.com")
+            .bind("Sender B")
+            .bind("Test Mail B - Empty Attachments")
+            .bind(chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc))
+            .bind("test")
+            .bind("Entity B")
+            .bind(false)
+            .execute(&pool)
+            .await
+            .expect("Failed to insert test mail B");
+
+            // list_unreflected_mails を実行
+            let result = list_unreflected_mails(&pool).await;
+            assert!(result.is_ok(), "list_unreflected_mails should succeed");
+
+            let mails = result.unwrap();
+            // 新しい順に取得されるため、A が最初に来る（received_at: 2099-01-02）
+            assert!(mails.len() >= 2, "Should have at least 2 mails");
+
+            // 最初のメール（A）を確認
+            let mail_a = &mails[0];
+            assert_eq!(mail_a.subject, "Test Mail A - Attachments");
+            let attachments_a: Vec<String> = serde_json::from_str(&mail_a.attachments)
+                .expect("Failed to deserialize attachments_a as JSON array");
+            assert_eq!(attachments_a, vec!["a.pdf", "b.xlsx"],
+                       "Mail A attachments should be deserialized correctly");
+
+            // 2番目のメール（B）を確認
+            let mail_b = &mails[1];
+            assert_eq!(mail_b.subject, "Test Mail B - Empty Attachments");
+            let attachments_b: Vec<String> = serde_json::from_str(&mail_b.attachments)
+                .expect("Failed to deserialize attachments_b as JSON array");
+            assert_eq!(attachments_b, Vec::<String>::new(),
+                       "Mail B attachments（NULL）は空配列に正規化されること");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_list_unreflected_mails_excludes_reflected() {
+        test_support::with_rollback(|pool| async move {
+            // 反映済みのメール（is_reflected=true）を INSERT
+            sqlx::query(
+                r#"INSERT INTO t_mail_scan_log
+                   (gmail_message_id, sender_email, sender_name, subject, received_at,
+                    classification, matched_entity_name, is_reflected, attachments)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)"#
+            )
+            .bind("test-msg-reflected-should-not-appear")
+            .bind("sender-reflected@example.com")
+            .bind("Reflected Sender")
+            .bind("Test Reflected Mail")
+            .bind(chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc))
+            .bind("test")
+            .bind("Entity Reflected")
+            .bind(true) // is_reflected = true
+            .bind(r#"["attachment.pdf"]"#)
+            .execute(&pool)
+            .await
+            .expect("Failed to insert reflected mail");
+
+            // list_unreflected_mails を実行
+            let result = list_unreflected_mails(&pool).await;
+            assert!(result.is_ok(), "list_unreflected_mails should succeed");
+
+            let mails = result.unwrap();
+            // 反映済みメールは含まれない
+            let reflected_found = mails.iter().any(|m| m.subject == "Test Reflected Mail");
+            assert!(!reflected_found, "Reflected mails should not appear in list_unreflected_mails");
+        })
+        .await;
+    }
 }

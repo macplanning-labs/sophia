@@ -1,7 +1,9 @@
 use crate::presentation::cookie_util;
-use crate::presentation::login_guard::{self, GuardStatus};
+use crate::presentation::auth_messages::{client_ip, LOCKED_MSG};
+use crate::config::AppState;
 use crate::infrastructure::repositories::auth_repo;
 use crate::infrastructure::repositories::invite_repo;
+use auth_core::domain::attempt_lock::{build_lock_key, AttemptLockConfig};
 use axum::{
     extract::State,
     response::IntoResponse,
@@ -15,10 +17,11 @@ use sqlx::PgPool;
 /// エンジニアのメールアドレスを受け取り、ログインURLをメール送信する。
 /// パスワード不要。リンクの有効期限は24時間。
 pub async fn api_portal_login(
-    State(pool): State<PgPool>,
+    State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let pool = &state.pool;
     let email = payload["email"].as_str().unwrap_or_default().trim();
     if email.is_empty() || !email.contains('@') {
         return axum::Json(serde_json::json!({
@@ -26,27 +29,37 @@ pub async fn api_portal_login(
         })).into_response();
     }
 
-    let ip = login_guard::client_ip(&headers);
-    let guard_key = login_guard::portal_key(&ip, email);
-    if let GuardStatus::Locked { retry_after_secs } = login_guard::check(&guard_key) {
-        return (
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            [(axum::http::header::RETRY_AFTER, retry_after_secs.to_string())],
-            axum::Json(serde_json::json!({
-                "success": false,
-                "error": login_guard::LOCKED_MSG,
-                "retry_after_secs": retry_after_secs
-            })),
-        ).into_response();
+    let ip = client_ip(&headers);
+    let guard_key = build_lock_key(&ip, &email.trim().to_lowercase());
+    let cfg = AttemptLockConfig::default();
+
+    match state.portal_attempt_store.locked_retry_after_seconds(&guard_key).await {
+        Ok(Some(retry_after_secs)) => {
+            return (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, retry_after_secs.to_string())],
+                axum::Json(serde_json::json!({
+                    "success": false,
+                    "error": LOCKED_MSG,
+                    "retry_after_secs": retry_after_secs
+                })),
+            ).into_response();
+        }
+        Ok(None) => {}
+        Err(e) => tracing::error!("試行回数ロックの確認に失敗: {:?}", e),
     }
+
     // Count each portal-login attempt (anti email-bomb / enumeration probe)
-    if let GuardStatus::Locked { retry_after_secs } = login_guard::record_failure(&guard_key) {
+    if let Err(e) = state.portal_attempt_store.record_failure(&guard_key, &cfg).await {
+        tracing::error!("試行回数の記録に失敗: {:?}", e);
+    }
+    if let Ok(Some(retry_after_secs)) = state.portal_attempt_store.locked_retry_after_seconds(&guard_key).await {
         return (
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             [(axum::http::header::RETRY_AFTER, retry_after_secs.to_string())],
             axum::Json(serde_json::json!({
                 "success": false,
-                "error": login_guard::LOCKED_MSG,
+                "error": LOCKED_MSG,
                 "retry_after_secs": retry_after_secs
             })),
         ).into_response();

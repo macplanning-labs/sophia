@@ -19,6 +19,8 @@ use sqlx::PgPool;
 pub struct AppState {
     pub pool: PgPool,
     pub secret_key: String,
+    pub portal_attempt_store: std::sync::Arc<dyn auth_core::domain::attempt_lock::AttemptStore>,
+    pub mfa_attempt_store: std::sync::Arc<dyn auth_core::domain::attempt_lock::AttemptStore>,
 }
 
 /// 既存の State<PgPool> ハンドラとの互換性を維持する
