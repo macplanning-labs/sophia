@@ -437,7 +437,7 @@ impl EdiOasisClient {
         let month = end_month_str.and_then(|m| m.parse::<i32>().ok())
             .or_else(|| work_start.as_ref().and_then(|ws| ws.get(5..7)?.parse().ok()));
 
-        // details 内の item_name を抽出（Go map[] 形式: item_name:前野 謙）
+        // details 内の item_name を抽出（Go map[] 形式: item_name:山田 太郎）
         let worker_name = {
             let re = Regex::new(r"item_name:([^\s\]]+(?:\s[^\s\]]+)?)").ok();
             re.and_then(|r| r.captures(raw))
@@ -825,7 +825,7 @@ impl EdiOasisClient {
     fn parse_oasis_invoice_item_block(block: &str) -> InvoiceDetailItem {
         use regex::Regex;
 
-        // 値はスペース区切り。氏名（例: "前野 謙"）のようにスペースを含む値にも対応するため、
+        // 値はスペース区切り。氏名（例: "山田 太郎"）のようにスペースを含む値にも対応するため、
         // 直後のトークンまでを1回だけ許容で取り込む（parse_oasis_order_jsonのworker_name抽出と同じ方針）
         let extract_str = |key: &str| -> Option<String> {
             let re = Regex::new(&format!(r"(?:^|\s){}:([^\s\]]+(?:\s[^\s\]]+)?)", regex::escape(key))).ok()?;
@@ -1023,7 +1023,7 @@ mod tests {
     /// ステージングでOASIS APIから実際に取得したinvoiceJson(id=13383)の生データ（2件目までの完全な部分）を使用
     #[test]
     fn parse_oasis_invoice_json_extracts_engineer_items() {
-        let raw = r#"{"year":"2026","tax_rate":"0.10","turnover_amount":2460000,"id":13383,"month":"06","details":[map[id:29440 is_blanket_contract:false is_hourly_pay:false item_amount:880000 item_basic_amount:800000 item_comment:<nil> item_expense_amount:0 item_extra_hours:0.00 item_max_hours:200.00 item_min_hours:140.00 item_min_max:140.00/200.00 item_minus_per_hour:5710 item_minus_per_hour_memo:不足単価：￥5,710/h item_name:前野 謙 item_no:1 item_other_amount:0 item_overtime_amount:0 item_plus_per_hour:4000 item_plus_per_hour_memo:超過単価：￥4,000/h item_rate:1.0 item_tax_amount:80000 item_total_hours:160.00 item_turnover_amount:800000 member_content_type:49 member_object_id:30858 member_type:10 month:06 monthly_request:563183 order:25384 project:2439 project_members:[10651] request:13383 request_no:2606123 simple_member_type:02 year:2026] map[id:29441 is_blanket_contract:false is_hourly_pay:false item_amount:924000 item_basic_amount:840000 item_comment:<nil> item_expense_amount:0 item_extra_hours:0.00 item_max_hours:190.00 item_min_hours:140.00 item_min_max:140.00/190.00 item_minus_per_hour:6000 item_minus_per_hour_memo:不足単価：￥6,000/h item_name:吉川 裕 item_no:2 item_other_amount:0 item_overtime_amount:0 item_plus_per_hour:4420 item_plus_per_hour_memo:超過単価：￥4,420/h item_rate:1.0 item_tax_amount:84000 item_total_hours:160.00 item_turnover_amount:840000 member_content_type:49 member_object_id:31005 member_type:10 month:06 monthly_request:534994 order:25383 project:2439 project_members:[11243] request:13383 request_no:2606123 simple_member_type:02 year:2026]]}"#;
+        let raw = r#"{"year":"2026","tax_rate":"0.10","turnover_amount":2460000,"id":13383,"month":"06","details":[map[id:29440 is_blanket_contract:false is_hourly_pay:false item_amount:880000 item_basic_amount:800000 item_comment:<nil> item_expense_amount:0 item_extra_hours:0.00 item_max_hours:200.00 item_min_hours:140.00 item_min_max:140.00/200.00 item_minus_per_hour:5710 item_minus_per_hour_memo:不足単価：￥5,710/h item_name:山田 太郎 item_no:1 item_other_amount:0 item_overtime_amount:0 item_plus_per_hour:4000 item_plus_per_hour_memo:超過単価：￥4,000/h item_rate:1.0 item_tax_amount:80000 item_total_hours:160.00 item_turnover_amount:800000 member_content_type:49 member_object_id:30858 member_type:10 month:06 monthly_request:563183 order:25384 project:2439 project_members:[10651] request:13383 request_no:2606123 simple_member_type:02 year:2026] map[id:29441 is_blanket_contract:false is_hourly_pay:false item_amount:924000 item_basic_amount:840000 item_comment:<nil> item_expense_amount:0 item_extra_hours:0.00 item_max_hours:190.00 item_min_hours:140.00 item_min_max:140.00/190.00 item_minus_per_hour:6000 item_minus_per_hour_memo:不足単価：￥6,000/h item_name:佐藤 次郎 item_no:2 item_other_amount:0 item_overtime_amount:0 item_plus_per_hour:4420 item_plus_per_hour_memo:超過単価：￥4,420/h item_rate:1.0 item_tax_amount:84000 item_total_hours:160.00 item_turnover_amount:840000 member_content_type:49 member_object_id:31005 member_type:10 month:06 monthly_request:534994 order:25383 project:2439 project_members:[11243] request:13383 request_no:2606123 simple_member_type:02 year:2026]]}"#;
 
         let detail = EdiOasisClient::parse_oasis_invoice_json(raw, 13383);
 
@@ -1032,7 +1032,7 @@ mod tests {
         assert_eq!(detail.items.len(), 2);
 
         let item0 = &detail.items[0];
-        assert_eq!(item0.item_name, "前野 謙");
+        assert_eq!(item0.item_name, "山田 太郎");
         assert_eq!(item0.item_amount, 880000.0);
         assert_eq!(item0.item_basic_amount, 800000.0);
         assert_eq!(item0.item_tax_amount, 80000.0);
@@ -1044,13 +1044,13 @@ mod tests {
         assert_eq!(item0.item_total_hours, 160.0);
 
         let item1 = &detail.items[1];
-        assert_eq!(item1.item_name, "吉川 裕");
+        assert_eq!(item1.item_name, "佐藤 次郎");
         assert_eq!(item1.item_amount, 924000.0);
         assert_eq!(item1.item_basic_amount, 840000.0);
     }
 
     /// orderJson（Go map[] 混在形式）からitem_amountが正しく抽出できることを確認する回帰テスト。
-    /// parse_oasis_invoice_json_extracts_engineer_items で使った実データ(id=29440,前野謙,
+    /// parse_oasis_invoice_json_extracts_engineer_items で使った実データ(id=29440,山田太郎,
     /// item_basic_amount:800000/item_amount:880000)と同じ値の系列を使い、注文側の
     /// parse_oasis_order_json でも同様に抽出できることを検証する（HANDOVER記載の
     /// 「item_amount抽出の新規取込での動作は未検証」の解消。実際のOASIS注文JSONは
@@ -1058,14 +1058,14 @@ mod tests {
     /// 既知の実測値をベースにしたコードレベルの検証に留める）。
     #[test]
     fn parse_oasis_order_json_extracts_item_amount() {
-        let raw = r#"{"contract_type":"1","end_year":"2026","end_month":"6","order_no":"SP20260601000001","order_date":"2026-05-15","work_start_date":"2026-06-01","work_end_date":"2026-06-30","contract_name":"横須賀市上下水道局の給排水設備工事等電子申請システム改修","header":<nil>,"status":"1","details":[map[id:29440 is_blanket_contract:false is_hourly_pay:false item_amount:880000 item_basic_amount:800000 item_comment:<nil> item_expense_amount:0 item_extra_hours:0.00 item_max_hours:200.00 item_min_hours:140.00 item_min_max:140.00/200.00 item_minus_per_hour:5710 item_minus_per_hour_memo:不足単価：￥5,710/h item_name:前野 謙 item_no:1 item_other_amount:0 item_overtime_amount:0 item_plus_per_hour:4000 item_plus_per_hour_memo:超過単価：￥4,000/h item_rate:1.0 item_tax_amount:80000 item_total_hours:160.00 item_turnover_amount:800000 member_content_type:49 member_object_id:30858 member_type:10 month:06 order:25384 project:2439 project_members:[10651] simple_member_type:02 year:2026]]}"#;
+        let raw = r#"{"contract_type":"1","end_year":"2026","end_month":"6","order_no":"SP20260601000001","order_date":"2026-05-15","work_start_date":"2026-06-01","work_end_date":"2026-06-30","contract_name":"サンプル市の電子申請システム改修","header":<nil>,"status":"1","details":[map[id:29440 is_blanket_contract:false is_hourly_pay:false item_amount:880000 item_basic_amount:800000 item_comment:<nil> item_expense_amount:0 item_extra_hours:0.00 item_max_hours:200.00 item_min_hours:140.00 item_min_max:140.00/200.00 item_minus_per_hour:5710 item_minus_per_hour_memo:不足単価：￥5,710/h item_name:山田 太郎 item_no:1 item_other_amount:0 item_overtime_amount:0 item_plus_per_hour:4000 item_plus_per_hour_memo:超過単価：￥4,000/h item_rate:1.0 item_tax_amount:80000 item_total_hours:160.00 item_turnover_amount:800000 member_content_type:49 member_object_id:30858 member_type:10 month:06 order:25384 project:2439 project_members:[10651] simple_member_type:02 year:2026]]}"#;
 
         let detail = EdiOasisClient::parse_oasis_order_json(raw, 25384);
 
         assert_eq!(detail.year, Some(2026));
         assert_eq!(detail.month, Some(6));
         assert_eq!(detail.order_no.as_deref(), Some("SP20260601000001"));
-        assert_eq!(detail.worker_name.as_deref(), Some("前野 謙"));
+        assert_eq!(detail.worker_name.as_deref(), Some("山田 太郎"));
         assert_eq!(detail.unit_price, Some(800000));
         assert_eq!(detail.amount, Some(880000));
     }

@@ -171,7 +171,7 @@ fn extract_worker_name(text: &str, filename: &str) -> Result<String> {
         }
     }
 
-    // 行単位: 氏名\n勝又　祐紀
+    // 行単位: 氏名\n鈴木　花子
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     for i in 0..lines.len() {
         if lines[i] == "氏名" || lines[i].starts_with("氏名") {
@@ -188,7 +188,7 @@ fn extract_worker_name(text: &str, filename: &str) -> Result<String> {
         }
     }
 
-    // ファイル名: 勤務表_2026年07月21日_勝又祐紀.pdf
+    // ファイル名: 勤務表_2026年07月21日_鈴木花子.pdf
     if let Some(stem) = filename
         .rsplit('/')
         .next()
@@ -388,13 +388,13 @@ mod tests {
         let text = std::fs::read_to_string("docs/templates/勤務表_クロスシステム_サンプル.txt").unwrap();
         let result = parse_cross_timesheet_text(
             &text,
-            "勤務表_2026年07月21日_勝又祐紀.pdf",
+            "勤務表_2026年07月21日_鈴木花子.pdf",
         )
         .unwrap();
 
         assert!(result.error.is_none());
         assert_eq!(result.target_month, NaiveDate::from_ymd_opt(2026, 7, 1));
-        assert_eq!(result.worker_name, "勝又 祐紀");
+        assert_eq!(result.worker_name, "鈴木 花子");
         assert_eq!(result.work_days, 22);
         assert!((result.total_hours.to_f64().unwrap() - 198.5).abs() < 0.01);
         assert!(result.has_times);
@@ -406,7 +406,7 @@ mod tests {
     #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
     fn parses_cross_timesheet_pdf_bytes() {
         let bytes = std::fs::read("docs/templates/勤務表_クロスシステム_サンプル.pdf").unwrap();
-        let result = parse(&bytes, "勤務表_2026年07月21日_勝又祐紀.pdf");
+        let result = parse(&bytes, "勤務表_2026年07月21日_鈴木花子.pdf");
         assert!(
             result.error.is_none(),
             "PDF解析エラー: {:?}",
@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(result.work_days, 22);
         assert!((result.total_hours.to_f64().unwrap_or(0.0) - 198.5).abs() < 0.01);
         // 氏名はスペース正規化済み（全角スペース→半角）
-        assert!(result.worker_name.contains("勝又"));
-        assert!(result.worker_name.contains("祐紀"));
+        assert!(result.worker_name.contains("鈴木"));
+        assert!(result.worker_name.contains("花子"));
     }
 }

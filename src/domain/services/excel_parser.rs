@@ -895,7 +895,7 @@ mod tests {
     #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
     fn parses_crosssystem_timesheet_format() {
         let bytes = std::fs::read("docs/templates/勤務表_yyyy年mm月_氏名フルネーム.xlsx").unwrap();
-        let result = auto_detect_and_parse(&bytes, "勤務表_2026年7月_前野謙.xlsx");
+        let result = auto_detect_and_parse(&bytes, "勤務表_2026年7月_山田太郎.xlsx");
 
         assert!(result.error.is_none(), "解析エラー: {:?}", result.error);
         assert_eq!(result.sheet_name, "出勤簿");
