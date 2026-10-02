@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn test_extract_text_sample_pdf() {
         // サンプル勤務表 PDF から本文を取得
-        let pdf_path = "docs/templates/勤務表_クロスシステム_サンプル.pdf";
+        let pdf_path = "docs/templates/勤務表_サンプル商事_サンプル.pdf";
         if let Ok(bytes) = std::fs::read(pdf_path) {
             let result = extract_text(&bytes);
             assert!(result.is_ok(), "PDF テキスト抽出失敗: {:?}", result.err());

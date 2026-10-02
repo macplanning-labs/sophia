@@ -79,7 +79,7 @@ pub fn normalize_subject(subject: &str) -> String {
 ///
 /// 入力:
 /// - from_name: 相手の名前（例："長塚彩香"）
-/// - company_name: 会社名（例："クロスシステムサービス株式会社"）
+/// - company_name: 会社名（例："サンプル商事株式会社"）
 /// - email_count: 該当メール総数
 /// - attachment_items: [(filename, kind, hours_label, timesheet_status), ...]
 pub fn build_structured_summary(
@@ -208,9 +208,9 @@ mod tests {
             ),
         ];
 
-        let summary = build_structured_summary("長塚彩香", "クロスシステムサービス株式会社", 4, &attachments);
+        let summary = build_structured_summary("長塚彩香", "サンプル商事株式会社", 4, &attachments);
         assert!(summary.contains("長塚彩香さん"), "Summary should contain name: {}", summary);
-        assert!(summary.contains("クロスシステムサービス株式会社"), "Summary should contain company");
+        assert!(summary.contains("サンプル商事株式会社"), "Summary should contain company");
         assert!(summary.contains("最終"), "Summary should contain '最終'");
         assert!(summary.contains("見込み"), "Summary should contain '見込み'");
     }
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn test_build_structured_summary_no_attachments() {
         let attachments: Vec<_> = vec![];
-        let summary = build_structured_summary("宇田川哲宏", "クロスシステムサービス株式会社", 3, &attachments);
+        let summary = build_structured_summary("宇田川哲宏", "サンプル商事株式会社", 3, &attachments);
         assert!(summary.contains("宇田川哲宏さん"));
         assert!(summary.contains("メールが3通あります"));
         assert!(summary.contains("自動要約は準備中"));

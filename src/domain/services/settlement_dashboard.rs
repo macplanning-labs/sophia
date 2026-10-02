@@ -756,7 +756,7 @@ pub async fn create_invoices_by_client(
     //
     // 判定は edi_system_type の非空判定ではなく "EDI_OASIS" との完全一致で行う。
     // 非空判定だと「メールで受け取っている」等の備考的な値を入れただけの非EDI連携
-    // クライアント（例: クロスシステム、edi_system_type='EMAIL'）まで誤って除外され、
+    // クライアント（例: サンプル商事、edi_system_type='EMAIL'）まで誤って除外され、
     // 本来Sophia側で発行すべき請求書が発行されなくなる不具合が実際に発生した。
     let mut groups: HashMap<(i64, String), Vec<&SettlementViewRow>> = HashMap::new();
     for vr in view_rows {
