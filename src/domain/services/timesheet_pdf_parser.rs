@@ -1,6 +1,6 @@
 /// domain/services/timesheet_pdf_parser.rs — 稼働報告（勤務表）PDF パーサ
 ///
-/// 現状はクロスシステムサービス株式会社の定型「勤務表」PDF（テキスト埋め込み）向け。
+/// 現状はサンプル商事株式会社の定型「勤務表」PDF（テキスト埋め込み）向け。
 /// スキャン画像PDFや他社フォーマットは対象外（OCRは未対応）。
 ///
 /// 出力は Excel パーサと同じ `TimesheetParseResult` で、既存のプレビュー→確認登録フローに乗せる。
@@ -63,7 +63,7 @@ fn parse_inner(file_bytes: &[u8], original_filename: &str) -> Result<TimesheetPa
 /// テキスト抽出済みのクロス勤務表をパース（単体テスト用に公開）
 pub fn parse_cross_timesheet_text(text: &str, original_filename: &str) -> Result<TimesheetParseResult> {
     if !looks_like_cross_timesheet(text, original_filename) {
-        bail!("対応していない勤務表PDFです（クロスシステムの定型勤務表のみ対応）");
+        bail!("対応していない勤務表PDFです（サンプル商事の定型勤務表のみ対応）");
     }
 
     let (year, month) = extract_year_month(text, original_filename)?
@@ -121,7 +121,7 @@ fn looks_like_cross_timesheet(text: &str, filename: &str) -> bool {
     let has_title = text.contains("勤務表") || filename.contains("勤務表");
     let has_marker = text.contains("稼動年月")
         || text.contains("実稼働時間")
-        || text.contains("クロスシステム");
+        || text.contains("サンプル商事");
     has_title && has_marker
 }
 
@@ -383,9 +383,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
     fn parses_cross_timesheet_text_fixture() {
-        let text = std::fs::read_to_string("docs/templates/勤務表_クロスシステム_サンプル.txt").unwrap();
+        let text = std::fs::read_to_string("docs/templates/勤務表_サンプル商事_サンプル.txt").unwrap();
         let result = parse_cross_timesheet_text(
             &text,
             "勤務表_2026年07月21日_鈴木花子.pdf",
@@ -403,9 +402,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
     fn parses_cross_timesheet_pdf_bytes() {
-        let bytes = std::fs::read("docs/templates/勤務表_クロスシステム_サンプル.pdf").unwrap();
+        let bytes = std::fs::read("docs/templates/勤務表_サンプル商事_サンプル.pdf").unwrap();
         let result = parse(&bytes, "勤務表_2026年07月21日_鈴木花子.pdf");
         assert!(
             result.error.is_none(),

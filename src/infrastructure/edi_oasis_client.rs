@@ -491,9 +491,9 @@ impl EdiOasisClient {
     /// POST /v1/orders/approve
     /// {
     ///   "id": order_id,
-    ///   "ctx_email": "y.yoshikawa@example.com",
-    ///   "appr_email": "y.yoshikawa@example.com",
-    ///   "ctx_mail": "y.yoshikawa@example.com",
+    ///   "ctx_email": "h.yamada@example.com",
+    ///   "appr_email": "h.yamada@example.com",
+    ///   "ctx_mail": "h.yamada@example.com",
     ///   "fullName": "有限会社マックプランニング",
     ///   "full_name": "有限会社マックプランニング"
     /// }

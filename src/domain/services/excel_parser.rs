@@ -124,7 +124,7 @@ fn parse_inner(file_bytes: &[u8], original_filename: &str) -> Result<TimesheetPa
     info!("[Excel] 検出シート: {}", sheet_name);
 
     // Step 1.5: ヘッダー情報検出（「稼動年月」「氏名」ラベルセルからの相対位置）
-    // 例: クロスシステムの勤務表フォーマットは A3="稼動年月" D3=西暦 E3=月、F3="氏名" I3=氏名の値
+    // 例: サンプル商事の勤務表フォーマットは A3="稼動年月" D3=西暦 E3=月、F3="氏名" I3=氏名の値
     // という配置（ラベルセルから見て west+3/+4列目に値がある）。この年月が検出できた場合、
     // 日付列の値が1〜31の小さい整数（=Excelシリアル値ではなく「日」のみの入力）であっても
     // 正しい日付を組み立てられるようにする。
@@ -192,7 +192,7 @@ struct HeaderInfo {
 }
 
 /// 「稼動年月」「氏名」ラベルセルを探し、その相対位置（+3列/+4列）から値を読み取る。
-/// クロスシステムの勤務表フォーマット（A3="稼動年月" D3=西暦 E3=月、F3="氏名" I3=氏名）で
+/// サンプル商事の勤務表フォーマット（A3="稼動年月" D3=西暦 E3=月、F3="氏名" I3=氏名）で
 /// 確認された配置。ラベルセルからの相対オフセットにしているため、この行全体が別の列位置に
 /// ずれても追従できる。
 fn detect_header_info(rows: &[Vec<Data>]) -> HeaderInfo {
@@ -605,7 +605,7 @@ fn cell_to_date(cell: &Data) -> Option<NaiveDate> {
 ///
 /// 「稼動年月」ヘッダーが検出できている場合、日付列の値が1〜31の小さい整数であれば
 /// Excelシリアル値としてではなく、その年月内の「日」として解釈する
-/// （クロスシステムの勤務表フォーマット: A列に日にちのみが入力され、年月は別セルで指定）。
+/// （サンプル商事の勤務表フォーマット: A列に日にちのみが入力され、年月は別セルで指定）。
 /// それ以外（本物のExcel日付型・シリアル値、または年月ヘッダー未検出）は従来通り。
 fn cell_to_date_with_ym(cell: &Data, year_month: Option<(i32, u32)>) -> Option<NaiveDate> {
     if let (Data::Float(f), Some((year, month))) = (cell, year_month) {
@@ -883,7 +883,7 @@ mod tests {
         assert_eq!(alerts[0].alert_type, "weekend");
     }
 
-    /// クロスシステムの勤務表フォーマット（A列=日にちのみ、B列=曜日、
+    /// サンプル商事の勤務表フォーマット（A列=日にちのみ、B列=曜日、
     /// 年月は稼動年月ラベルセルに別掲、氏名もI3セルに別掲）の実物サンプルで
     /// 正しく解析できることを確認する回帰テスト。
     /// このフォーマットで過去に発生していた不具合:
@@ -892,8 +892,7 @@ mod tests {
     /// - is_date_valueの`> 1.0`が月初日(値=1)を除外していた
     /// - 日にちのみの値(1〜31)をExcelシリアル値として解釈し1900年扱いになっていた
     #[test]
-    #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
-    fn parses_crosssystem_timesheet_format() {
+    fn parses_sampletrading_timesheet_format() {
         let bytes = std::fs::read("docs/templates/勤務表_yyyy年mm月_氏名フルネーム.xlsx").unwrap();
         let result = auto_detect_and_parse(&bytes, "勤務表_2026年7月_山田太郎.xlsx");
 
@@ -923,9 +922,8 @@ mod tests {
     /// 拡張子欠落／誤拡張子でも `%PDF` マジックバイトでPDFパーサへ振り分けること。
     /// partner portal で file_name 欠落時に Excel(ZIP) 経路へ落ち EOCD になる回帰を防ぐ。
     #[test]
-    #[ignore = "サンプルファイル(docs/templates)が公開版に無いため無効"]
     fn routes_pdf_by_magic_bytes_even_without_pdf_extension() {
-        let bytes = std::fs::read("docs/templates/勤務表_クロスシステム_サンプル.pdf").unwrap();
+        let bytes = std::fs::read("docs/templates/勤務表_サンプル商事_サンプル.pdf").unwrap();
         assert!(bytes.starts_with(b"%PDF"));
 
         for name in ["unknown.xlsx", "upload.bin", ""] {

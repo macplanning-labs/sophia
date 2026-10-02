@@ -7,7 +7,7 @@
 /// 対応形式:
 ///   - イービジネス形式（注文番号: EB260228I00010 等）
 ///   - NTP形式（発注書番号: PO-0000000001）
-///   - クロスシステムサービス形式（No.2668 / 件名：PM支援業務 等）
+///   - サンプル商事形式（No.2668 / 件名：PM支援業務 等）
 ///   - 汎用形式（正規表現でベストエフォートパース）
 ///
 /// 文字クラス中の `⽂/⽉/⾦/⾜/⽀` はCJK部首互換文字（U+2E80台）。
@@ -68,9 +68,9 @@ fn is_ntp_format(text: &str) -> bool {
 }
 
 fn is_cross_format(text: &str) -> bool {
-    text.contains("クロスシステムサービス")
-        || text.contains("CROSS SYSTEM SERVICE")
-        || text.contains("CROSS SYSTEM")
+    text.contains("サンプル商事")
+        || text.contains("SAMPLE TRADING SERVICE")
+        || text.contains("SAMPLE TRADING")
 }
 
 fn parse_amount(s: &str) -> Option<i64> {
@@ -466,8 +466,8 @@ mod tests {
     #[test]
     fn parse_cross_extracts_core_fields() {
         let text = "発注書\n\
-             クロスシステムサービス株式会社\n\
-             CROSS SYSTEM SERVICE\n\
+             サンプル商事株式会社\n\
+             SAMPLE TRADING SERVICE\n\
              No.2668\n\
              発注日：2026年6月29日\n\
              件名：PM支援業務\n\

@@ -244,9 +244,9 @@ async fn classify(
 ) -> Classification {
     // EDI連携クライアント（m_client.edi_system_type='EDI_OASIS'、Phase2が年月ポーリング対象とする
     // クライアントのみ）からの通知メールか。単なる非空判定だと「メールで受け取っている」等の
-    // 備考的な値を入れただけの非EDI連携クライアント（例: クロスシステム）まで誤って
+    // 備考的な値を入れただけの非EDI連携クライアント（例: サンプル商事）まで誤って
     // EdiApi分類してしまい、Phase2のポーリング対象にも入らないため添付が一切処理されなくなる
-    // （実際にクロスシステムでedi_system_type='EMAIL'という値が設定され発生した不具合）。
+    // （実際にサンプル商事でedi_system_type='EMAIL'という値が設定され発生した不具合）。
     #[derive(sqlx::FromRow)]
     struct EdiClientMatch {
         id: i64,
