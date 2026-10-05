@@ -1,0 +1,8 @@
+# cargo-audit 設定（OSS）
+# rkyv / rsa は Cargo.lock に残る optional 依存だが、現行ターゲットの依存グラフには含まれない
+# （cargo tree -i でヒットなし）。バイナリへリンクされないため ignore。
+[advisories]
+ignore = [
+  "RUSTSEC-2026-0235", # rkyv — unused optional via rust_decimal; not in build graph
+  "RUSTSEC-2023-0071", # rsa — unused via sqlx-mysql optional path; not in build graph (postgres only)
+]

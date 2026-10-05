@@ -1,0 +1,68 @@
+name: Desktop Build (macOS/Windows)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag to build/attach assets to (e.g. v0.1.0-beta.1). Required for manual runs.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: '--target aarch64-apple-darwin'
+          - platform: windows-latest
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain setup
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './frontend/src-tauri -> target'
+
+      - name: Node.js setup
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Tauri build + upload to GitHub Releases
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: ./frontend
+          tagName: ${{ github.event.inputs.tag_name || github.ref_name }}
+          releaseName: 'Sophia ${{ github.event.inputs.tag_name || github.ref_name }} (Beta)'
+          releaseBody: |
+            Sophia Desktop Application Beta Version.
+
+            This is a beta release. There may be bugs.
+            Please report any issues you find to the Issues page.
+
+            Unsigned builds: You may see OS warnings on first launch
+            (macOS: right-click → Open / Windows: More info → Run).
+          releaseDraft: true
+          prerelease: true
+          args: ${{ matrix.args }}

@@ -1,0 +1,429 @@
+/* ========================================
+   theme.css — Sophia Dark/Light テーマシステム
+   WIPプロジェクト管理ツールの data-theme 方式に準拠
+   ======================================== */
+
+/* ============================================
+   Dark モード（デフォルト）
+   ============================================ */
+:root,
+[data-theme='dark'] {
+    --sophia-bg-primary: #0f1117;
+    --sophia-bg-secondary: #1a1d23;
+    --sophia-bg-card: #1e2128;
+    --sophia-bg-elevated: #252830;
+    --sophia-bg-hover: rgba(79, 140, 255, 0.04);
+    --sophia-bg-input: #1a1d23;
+    --sophia-text-primary: #e2e8f0;
+    --sophia-text-secondary: #94a3b8;
+    --sophia-text-muted: #64748b;
+    --sophia-border-subtle: rgba(255,255,255,0.08);
+    --sophia-border-default: rgba(255,255,255,0.12);
+    --sophia-shadow-card: 0 2px 8px rgba(0,0,0,0.3);
+    --sophia-shadow-sticky: 0 -4px 12px rgba(0,0,0,0.4);
+    --sophia-accent-blue: #4f8cff;
+    --sophia-accent-green: #22c55e;
+    --sophia-accent-orange: #f59e0b;
+    --sophia-accent-red: #ef4444;
+    --sophia-accent-purple: #a855f7;
+    /* サイドバー */
+    --sophia-sidebar-bg: #1a1d23;
+    --sophia-sidebar-text: #94a3b8;
+    --sophia-sidebar-active-bg: rgba(79, 140, 255, 0.1);
+    --sophia-sidebar-active-text: #4f8cff;
+    /* テーブル */
+    --sophia-table-header-bg: #1a1d23;
+    --sophia-table-row-hover: rgba(79, 140, 255, 0.04);
+    --sophia-table-border: rgba(255,255,255,0.06);
+    --sophia-table-footer-bg: #1e2128;
+    /* フィルターバー */
+    --sophia-filter-bg: #1e2128;
+    /* ナビバー */
+    --sophia-navbar-bg: #1a1d23;
+    --sophia-navbar-border: rgba(255,255,255,0.08);
+    /* アクションバー */
+    --sophia-action-bar-bg: rgba(26, 29, 35, 0.95);
+    /* セクション色 */
+    --sophia-billing-color: #4f8cff;
+    --sophia-billing-bg: rgba(79, 140, 255, 0.05);
+    --sophia-payment-color: #f59e0b;
+    --sophia-payment-bg: rgba(245, 158, 11, 0.05);
+    --sophia-profit-color: #22c55e;
+    --sophia-profit-bg: rgba(34, 197, 94, 0.05);
+}
+
+/* ============================================
+   Light モード
+   ============================================ */
+[data-theme='light'] {
+    --sophia-bg-primary: #f5f7fa;
+    --sophia-bg-secondary: #ffffff;
+    --sophia-bg-card: #ffffff;
+    --sophia-bg-elevated: #ffffff;
+    --sophia-bg-hover: rgba(79, 140, 255, 0.06);
+    --sophia-bg-input: #ffffff;
+    --sophia-text-primary: #1a1a2e;
+    --sophia-text-secondary: #475569;
+    --sophia-text-muted: #94a3b8;
+    --sophia-border-subtle: rgba(0,0,0,0.06);
+    --sophia-border-default: rgba(0,0,0,0.10);
+    --sophia-shadow-card: 0 1px 4px rgba(0,0,0,0.08);
+    --sophia-shadow-sticky: 0 -2px 8px rgba(0,0,0,0.08);
+    --sophia-accent-blue: #3b72d4;
+    --sophia-accent-green: #16a34a;
+    --sophia-accent-orange: #d97706;
+    --sophia-accent-red: #dc2626;
+    --sophia-accent-purple: #7c3aed;
+    /* サイドバー */
+    --sophia-sidebar-bg: #1e293b;
+    --sophia-sidebar-text: #94a3b8;
+    --sophia-sidebar-active-bg: rgba(59, 114, 212, 0.15);
+    --sophia-sidebar-active-text: #60a5fa;
+    /* テーブル */
+    --sophia-table-header-bg: #f8fafc;
+    --sophia-table-row-hover: rgba(59, 114, 212, 0.04);
+    --sophia-table-border: rgba(0,0,0,0.06);
+    --sophia-table-footer-bg: #f8fafc;
+    /* フィルターバー */
+    --sophia-filter-bg: #ffffff;
+    /* ナビバー */
+    --sophia-navbar-bg: #ffffff;
+    --sophia-navbar-border: rgba(0,0,0,0.08);
+    /* アクションバー */
+    --sophia-action-bar-bg: rgba(255, 255, 255, 0.95);
+    /* セクション色 */
+    --sophia-billing-color: #2563eb;
+    --sophia-billing-bg: rgba(37, 99, 235, 0.06);
+    --sophia-payment-color: #d97706;
+    --sophia-payment-bg: rgba(217, 119, 6, 0.06);
+    --sophia-profit-color: #16a34a;
+    --sophia-profit-bg: rgba(22, 163, 74, 0.06);
+}
+
+/* ============================================
+   テーマ適用: グローバルスタイル
+   Bootstrap コンポーネントのオーバーライド
+   ============================================ */
+
+/* body 背景・テキスト */
+[data-theme] body {
+    background: var(--sophia-bg-primary) !important;
+    color: var(--sophia-text-primary) !important;
+}
+
+/* メインコンテンツエリア */
+[data-theme='dark'] main {
+    color: var(--sophia-text-primary);
+}
+
+/* サイドバー */
+[data-theme] #sidebar {
+    background: var(--sophia-sidebar-bg) !important;
+}
+
+/* ── Bootstrap Card ── */
+[data-theme='dark'] .card {
+    background: var(--sophia-bg-card) !important;
+    border-color: var(--sophia-border-subtle) !important;
+    color: var(--sophia-text-primary) !important;
+}
+[data-theme='dark'] .card-header {
+    background: var(--sophia-bg-elevated) !important;
+    border-color: var(--sophia-border-subtle) !important;
+    color: var(--sophia-text-primary) !important;
+}
+[data-theme='dark'] .card-body {
+    color: var(--sophia-text-primary) !important;
+}
+
+/* ── Bootstrap Table ── */
+[data-theme='dark'] .table {
+    --bs-table-bg: transparent;
+    --bs-table-color: var(--sophia-text-primary);
+    --bs-table-border-color: var(--sophia-border-subtle);
+    --bs-table-striped-bg: var(--sophia-bg-elevated);
+    --bs-table-hover-bg: var(--sophia-table-row-hover);
+    --bs-table-hover-color: var(--sophia-text-primary);
+    color: var(--sophia-text-primary) !important;
+    background: var(--sophia-bg-card) !important;
+}
+[data-theme='dark'] .table thead th {
+    background: var(--sophia-table-header-bg) !important;
+    color: var(--sophia-text-secondary) !important;
+    border-color: var(--sophia-border-subtle) !important;
+}
+[data-theme='dark'] .table td,
+[data-theme='dark'] .table th {
+    border-color: var(--sophia-table-border) !important;
+    background: transparent !important;
+    color: var(--sophia-text-primary) !important;
+}
+[data-theme='dark'] .table tbody tr {
+    background: var(--sophia-bg-card) !important;
+    color: var(--sophia-text-primary) !important;
+}
+[data-theme='dark'] .table tbody tr:hover {
+    background: var(--sophia-table-row-hover) !important;
+    color: var(--sophia-text-primary) !important;
+}
+[data-theme='dark'] .table > :not(caption) > * > * {
+    background-color: transparent !important;
+    color: var(--sophia-text-primary) !important;
+    box-shadow: none !important;
+}
+/* テーブルを含む直接の親コンテナ */
+[data-theme='dark'] .table-responsive {
+    background: var(--sophia-bg-card) !important;
+}
+
+/* ── Bootstrap Form ── */
+[data-theme='dark'] .form-control,
+[data-theme='dark'] .form-select {
+    background-color: var(--sophia-bg-input) !important;
+    color: var(--sophia-text-primary) !important;
+    border-color: var(--sophia-border-default) !important;
+}
+[data-theme='dark'] .form-control:focus,
+[data-theme='dark'] .form-select:focus {
+    border-color: var(--sophia-accent-blue) !important;
+    box-shadow: 0 0 0 0.2rem rgba(79, 140, 255, 0.25) !important;
+}
+[data-theme='dark'] .form-control::placeholder {
+    color: var(--sophia-text-muted) !important;
+}
+[data-theme='dark'] .form-label {
+    color: var(--sophia-text-secondary) !important;
+}
+[data-theme='dark'] .input-group-text {
+    background-color: var(--sophia-bg-elevated) !important;
+    color: var(--sophia-text-secondary) !important;
+    border-color: var(--sophia-border-default) !important;
+}
+
+/* ── Bootstrap Alert ── */
+[data-theme='dark'] .alert {
+    border-color: var(--sophia-border-subtle) !important;
+}
+
+/* ── Bootstrap Modal ── */
+[data-theme='dark'] .modal-content {
+    background: var(--sophia-bg-card) !important;
+    color: var(--sophia-text-primary) !important;
+    border-color: var(--sophia-border-subtle) !important;
+}
+[data-theme='dark'] .modal-header {
+    border-color: var(--sophia-border-subtle) !important;
+}
+[data-theme='dark'] .modal-footer {
+    border-color: var(--sophia-border-subtle) !important;
+}
+
+/* ── Bootstrap Dropdown ── */
+[data-theme='dark'] .dropdown-menu {
+    background: var(--sophia-bg-elevated) !important;
+    border-color: var(--sophia-border-subtle) !important;
+}
+[data-theme='dark'] .dropdown-item {
+    color: var(--sophia-text-primary) !important;
+}
+[data-theme='dark'] .dropdown-item:hover {
+    background: var(--sophia-bg-hover) !important;
+}
+
+/* ── Bootstrap List Group ── */
+[data-theme='dark'] .list-group-item {
+    background: var(--sophia-bg-card) !important;
+    color: var(--sophia-text-primary) !important;
+    border-color: var(--sophia-border-subtle) !important;
+}
+
+/* ── Bootstrap Pagination ── */
+[data-theme='dark'] .page-link {
+    background: var(--sophia-bg-card) !important;
+    color: var(--sophia-text-primary) !important;
+    border-color: var(--sophia-border-subtle) !important;
+}
+[data-theme='dark'] .page-item.active .page-link {
+    background: var(--sophia-accent-blue) !important;
+    border-color: var(--sophia-accent-blue) !important;
+}
+
+/* ── 背景ユーティリティ上書き ── */
+[data-theme='dark'] .bg-white {
+    background: var(--sophia-bg-card) !important;
+}
+[data-theme='dark'] .bg-light {
+    background: var(--sophia-bg-elevated) !important;
+}
+[data-theme='dark'] .text-dark {
+    color: var(--sophia-text-primary) !important;
+}
+[data-theme='dark'] .text-muted {
+    color: var(--sophia-text-muted) !important;
+}
+[data-theme='dark'] .border,
+[data-theme='dark'] .border-bottom,
+[data-theme='dark'] .border-top,
+[data-theme='dark'] .border-secondary {
+    border-color: var(--sophia-border-subtle) !important;
+}
+
+/* ── Bootstrap Nav Tabs ── */
+[data-theme='dark'] .nav-tabs {
+    border-color: var(--sophia-border-subtle) !important;
+}
+[data-theme='dark'] .nav-tabs .nav-link {
+    color: var(--sophia-text-secondary) !important;
+    border-color: transparent !important;
+}
+[data-theme='dark'] .nav-tabs .nav-link:hover {
+    color: var(--sophia-text-primary) !important;
+    border-color: var(--sophia-border-subtle) var(--sophia-border-subtle) transparent !important;
+    background: var(--sophia-bg-elevated) !important;
+}
+[data-theme='dark'] .nav-tabs .nav-link.active {
+    color: var(--sophia-accent-blue) !important;
+    background: var(--sophia-bg-card) !important;
+    border-color: var(--sophia-border-subtle) var(--sophia-border-subtle) var(--sophia-bg-card) !important;
+}
+
+/* ── Bootstrap Nav Pills ── */
+[data-theme='dark'] .nav-pills .nav-link {
+    color: var(--sophia-text-secondary) !important;
+}
+[data-theme='dark'] .nav-pills .nav-link.active {
+    background: var(--sophia-accent-blue) !important;
+    color: #fff !important;
+}
+
+/* ── 日付入力・時刻入力 ── */
+[data-theme='dark'] input[type="date"],
+[data-theme='dark'] input[type="datetime-local"],
+[data-theme='dark'] input[type="month"],
+[data-theme='dark'] input[type="time"],
+[data-theme='dark'] input[type="number"],
+[data-theme='dark'] input[type="text"],
+[data-theme='dark'] input[type="email"],
+[data-theme='dark'] input[type="password"],
+[data-theme='dark'] input[type="search"],
+[data-theme='dark'] textarea,
+[data-theme='dark'] select {
+    background-color: var(--sophia-bg-input) !important;
+    color: var(--sophia-text-primary) !important;
+    border-color: var(--sophia-border-default) !important;
+    color-scheme: dark;
+}
+
+/* ── ドロップゾーン / アップロードエリア ── */
+[data-theme='dark'] .upload-area,
+[data-theme='dark'] .drop-zone,
+[data-theme='dark'] .dropzone {
+    background: var(--sophia-bg-elevated) !important;
+    border-color: var(--sophia-accent-blue) !important;
+    color: var(--sophia-text-secondary) !important;
+}
+
+/* ── サマリーカード (各ページ固有) ── */
+[data-theme='dark'] .summary-card,
+[data-theme='dark'] .stat-card {
+    background: var(--sophia-bg-card) !important;
+    border-color: var(--sophia-border-subtle) !important;
+    color: var(--sophia-text-primary) !important;
+}
+
+/* ── インラインスタイル上書き ── */
+[data-theme='dark'] [style*="background: #fff"],
+[data-theme='dark'] [style*="background:#fff"],
+[data-theme='dark'] [style*="background: white"],
+[data-theme='dark'] [style*="background:white"],
+[data-theme='dark'] [style*="background-color: #fff"],
+[data-theme='dark'] [style*="background-color:#fff"],
+[data-theme='dark'] [style*="background-color: white"],
+[data-theme='dark'] [style*="background-color:white"] {
+    background: var(--sophia-bg-card) !important;
+}
+
+/* ── ホーム画面 固有スタイルのオーバーライド ── */
+[data-theme='dark'] .mail-body-text {
+    background: var(--sophia-bg-elevated) !important;
+    border-color: var(--sophia-border-subtle) !important;
+    color: var(--sophia-text-primary) !important;
+}
+[data-theme='dark'] .mail-detail-panel {
+    background: var(--sophia-bg-elevated) !important;
+    border-color: var(--sophia-border-subtle) !important;
+}
+[data-theme='dark'] .mail-clickable:hover {
+    background-color: var(--sophia-bg-hover) !important;
+}
+
+/* ── <style>タグ内のインライン色を上書き ── */
+[data-theme='dark'] .card.bg-white,
+[data-theme='dark'] div[class*="bg-white"],
+[data-theme='dark'] .card-body.bg-white {
+    background: var(--sophia-bg-card) !important;
+}
+
+/* ── ワークフローステップカード ── */
+[data-theme='dark'] .wf-step-card,
+[data-theme='dark'] [class*="wf-"] {
+    color: var(--sophia-text-primary) !important;
+}
+
+/* ── bg-body (Bootstrap 5.3+) ── */
+[data-theme='dark'] .bg-body,
+[data-theme='dark'] .bg-body-secondary,
+[data-theme='dark'] .bg-body-tertiary {
+    background: var(--sophia-bg-card) !important;
+}
+
+/* ── h1-h6 ── */
+[data-theme='dark'] h1, [data-theme='dark'] h2,
+[data-theme='dark'] h3, [data-theme='dark'] h4,
+[data-theme='dark'] h5, [data-theme='dark'] h6 {
+    color: var(--sophia-text-primary) !important;
+}
+
+/* ── label / small ── */
+[data-theme='dark'] label {
+    color: var(--sophia-text-secondary) !important;
+}
+
+/* ── hr ── */
+[data-theme='dark'] hr {
+    border-color: var(--sophia-border-subtle) !important;
+    opacity: 0.3;
+}
+
+/* ── ライトモード: フォーム要素 ── */
+[data-theme='light'] .form-select,
+[data-theme='light'] .form-control {
+    background-color: var(--sophia-bg-input) !important;
+    color: var(--sophia-text-primary) !important;
+    border-color: var(--sophia-border-default) !important;
+}
+
+/* テーマトグルボタン */
+.theme-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1.25rem;
+    color: var(--sophia-sidebar-text);
+    cursor: pointer;
+    font-size: 0.85rem;
+    border: none;
+    background: none;
+    width: 100%;
+    text-align: left;
+    transition: all 0.2s;
+}
+.theme-toggle:hover {
+    color: #fff;
+    background: rgba(255,255,255,0.04);
+}
+.theme-toggle i {
+    font-size: 1rem;
+    width: 1.25rem;
+    text-align: center;
+}

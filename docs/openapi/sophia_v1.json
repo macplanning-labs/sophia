@@ -1,0 +1,542 @@
+{
+  "components": {
+    "schemas": {
+      "ApiErrorResponse": {
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "ApiInvoiceLine": {
+        "properties": {
+          "amount": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "description": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "string"
+          },
+          "unit_price": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "description",
+          "quantity",
+          "unit_price",
+          "amount"
+        ],
+        "type": "object"
+      },
+      "ApiInvoiceResponse": {
+        "properties": {
+          "buyer": {
+            "$ref": "#/components/schemas/ApiParty"
+          },
+          "client_accepted_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "due_date": {
+            "format": "date",
+            "nullable": true,
+            "type": "string"
+          },
+          "invoice_id": {
+            "type": "string"
+          },
+          "issue_date": {
+            "format": "date",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/ApiInvoiceLine"
+            },
+            "type": "array"
+          },
+          "payable_amount": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "seller": {
+            "$ref": "#/components/schemas/ApiParty"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tax_summary": {
+            "items": {
+              "$ref": "#/components/schemas/ApiTaxSubtotal"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "invoice_id",
+          "issue_date",
+          "seller",
+          "buyer",
+          "lines",
+          "tax_summary",
+          "payable_amount",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ApiOrderItem": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "engineer_id": {
+            "type": "string"
+          },
+          "quantity": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "unit_price": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "engineer_id",
+          "description",
+          "unit_price",
+          "quantity"
+        ],
+        "type": "object"
+      },
+      "ApiOrderSubmitRequest": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ApiOrderItem"
+            },
+            "type": "array"
+          },
+          "order_date": {
+            "format": "date",
+            "type": "string"
+          },
+          "remarks": {
+            "nullable": true,
+            "type": "string"
+          },
+          "work_end": {
+            "format": "date",
+            "type": "string"
+          },
+          "work_start": {
+            "format": "date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_date",
+          "work_start",
+          "work_end",
+          "items"
+        ],
+        "type": "object"
+      },
+      "ApiOrderSubmitResponse": {
+        "properties": {
+          "received_order_id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "received_order_no": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "received_order_id",
+          "received_order_no"
+        ],
+        "type": "object"
+      },
+      "ApiParty": {
+        "properties": {
+          "address": {
+            "nullable": true,
+            "type": "string"
+          },
+          "contact": {
+            "nullable": true,
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "postal_code": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "ApiTaxSubtotal": {
+        "properties": {
+          "tax_amount": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "tax_rate": {
+            "type": "string"
+          },
+          "taxable_amount": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tax_rate",
+          "taxable_amount",
+          "tax_amount"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "bearerFormat": "API Key",
+        "description": "Authorization: Bearer sk_live_... または sk_test_...",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "title": "Sophia /v1 API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.0.0",
+  "paths": {
+    "/invoices": {
+      "get": {
+        "operationId": "list_invoices",
+        "parameters": [
+          {
+            "description": "開始日（YYYY-MM-DD形式）",
+            "in": "query",
+            "name": "from",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "終了日（YYYY-MM-DD形式）",
+            "in": "query",
+            "name": "to",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "最小金額",
+            "in": "query",
+            "name": "min_amount",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "最大金額",
+            "in": "query",
+            "name": "max_amount",
+            "schema": {
+              "format": "int32",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ApiInvoiceResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "請求書一覧"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "認可不可"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "サーバーエラー"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "請求書一覧",
+        "tags": [
+          "invoices"
+        ]
+      }
+    },
+    "/invoices/{id}": {
+      "get": {
+        "operationId": "get_invoice",
+        "parameters": [
+          {
+            "description": "請求書ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiInvoiceResponse"
+                }
+              }
+            },
+            "description": "請求書詳細"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "認可不可"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "見つかりません"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "サーバーエラー"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "請求書詳細",
+        "tags": [
+          "invoices"
+        ]
+      }
+    },
+    "/invoices/{id}/accept": {
+      "post": {
+        "operationId": "accept_invoice",
+        "parameters": [
+          {
+            "description": "請求書ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "承諾完了"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "認可不可"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "見つかりません"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "既に承諾済み"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "サーバーエラー"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "請求書承諾",
+        "tags": [
+          "invoices"
+        ]
+      }
+    },
+    "/orders": {
+      "post": {
+        "operationId": "submit_order",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiOrderSubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiOrderSubmitResponse"
+                }
+              }
+            },
+            "description": "発注受付完了"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "不正なパラメータ"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "認可不可"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorResponse"
+                }
+              }
+            },
+            "description": "サーバーエラー"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "summary": "発注データ送信",
+        "tags": [
+          "orders"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "取引先向け REST API",
+      "url": "/v1"
+    }
+  ],
+  "tags": [
+    {
+      "description": "請求書関連 API",
+      "name": "invoices"
+    },
+    {
+      "description": "発注関連 API",
+      "name": "orders"
+    }
+  ]
+}
