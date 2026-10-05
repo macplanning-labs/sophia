@@ -12,9 +12,14 @@ SES（システムエンジニアリングサービス）事業向けの受発�
 
 ```bash
 cp .env.example .env
-# .env の POSTGRES_PASSWORD と SECRET_KEY をローカル用の値に書き換える（初回起動前に）
+sed -i.bak "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 24)|; s|^SECRET_KEY=.*|SECRET_KEY=$(openssl rand -hex 32)|" .env && rm .env.bak
 docker compose up --build
 ```
+
+2 行目で、`POSTGRES_PASSWORD` と `SECRET_KEY` に乱数を入れます。`.env.example` ではどちらも空にしてあり、空のままだと `docker compose` が理由を表示して止まります。
+
+> **⚠️ 2026-10-05 より前に導入した方へ**
+> 以前の `.env.example` とコードには、`SECRET_KEY` の見本の値・既定値がありました。`SECRET_KEY` はログインの証明の署名と二段階認証の秘密の暗号化に使うため、見本の値のままだと、誰でもログインの証明を偽造できます。`.env` の `SECRET_KEY` を `openssl rand -hex 32` で作った値に替えて、再起動してください(全員がいったんログアウトし、二段階認証の再登録が必要になることがあります)。最新版では、未設定・見本の値のままだと起動しません。
 
 ブラウザで http://localhost:8111 を開きます。初回起動時にマイグレーションが自動適用されます。初期ユーザーは同梱していないため、最初の管理者の作り方は次の節を参照してください。
 
