@@ -12,7 +12,7 @@ SES（システムエンジニアリングサービス）事業向けの受発�
 
 ```bash
 cp .env.example .env
-# .env の POSTGRES_PASSWORD と SECRET_KEY をローカル用の値に書き換える（初回起動前に）
+# .env の POSTGRES_PASSWORD と SECRET_KEY は空欄。各自で作った値を入れる（例: openssl rand -hex 32。初回起動前に）
 docker compose up --build
 ```
 
