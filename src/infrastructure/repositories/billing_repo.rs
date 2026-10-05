@@ -49,11 +49,11 @@ impl_list_by_fk!(list_payments, PaymentRecord, "t_payment_record", "invoice_id",
 // ── 請求書承認ワークフロー（2026-07-12追加。P2-3: handlers直書きSQLの
 //    Repository層移行の第一弾。invoices.rs::api_approve/api_reject から利用）──
 
-/// 承認待ち(PENDING_APPROVAL)の請求書を承認済み(APPROVED)にする。
+/// 承認待ち(PENDING_APPROVAL)または差戻し(REJECTED)の請求書を承認済み(APPROVED)にする。
 /// 対象が承認待ちでなければ何もせずfalseを返す（楽観ロック的なガード）。
 pub async fn approve_invoice(pool: &::sqlx::PgPool, id: i64, approved_by_id: i64) -> ::anyhow::Result<bool> {
     let result = ::sqlx::query(
-        "UPDATE t_billing_invoice SET status = 'APPROVED', approved_by_id = $1, approved_at = NOW(), updated_at = NOW() WHERE id = $2 AND status = 'PENDING_APPROVAL'"
+        "UPDATE t_billing_invoice SET status = 'APPROVED', approved_by_id = $1, approved_at = NOW(), updated_at = NOW() WHERE id = $2 AND status IN ('PENDING_APPROVAL', 'REJECTED')"
     )
     .bind(approved_by_id)
     .bind(id)
@@ -62,11 +62,11 @@ pub async fn approve_invoice(pool: &::sqlx::PgPool, id: i64, approved_by_id: i64
     Ok(result.rows_affected() > 0)
 }
 
-/// 承認済み(APPROVED)の請求書を承認待ち(PENDING_APPROVAL)に差し戻す。
-/// 対象が承認済みでなければ何もせずfalseを返す。
+/// 承認待ち(PENDING_APPROVAL)または承認済み(APPROVED)の請求書を差戻し(REJECTED)にする。
+/// 対象がそれ以外（差戻し済み・送信済み）なら何もせずfalseを返す。
 pub async fn reject_invoice(pool: &::sqlx::PgPool, id: i64) -> ::anyhow::Result<bool> {
     let result = ::sqlx::query(
-        "UPDATE t_billing_invoice SET status = 'PENDING_APPROVAL', approved_by_id = NULL, approved_at = NULL, updated_at = NOW() WHERE id = $1 AND status = 'APPROVED'"
+        "UPDATE t_billing_invoice SET status = 'REJECTED', approved_by_id = NULL, approved_at = NULL, updated_at = NOW() WHERE id = $1 AND status IN ('PENDING_APPROVAL', 'APPROVED')"
     )
     .bind(id)
     .execute(pool)
@@ -146,109 +146,9 @@ pub async fn set_invoice_pdf(pool: &::sqlx::PgPool, id: i64, drive_url: &str, dr
     Ok(())
 }
 
-// ── 請求書手動生成・編集（2026-07-13追加。P2-3続き:
-//    presentation/handlers/invoices.rs 直書きSQLのRepository層移行）──
-
-/// 請求書ヘッダーを作成する（プール・トランザクションどちらでも呼べる）
-pub async fn insert_billing_invoice<'e, E>(
-    exec: E,
-    invoice_id: &str,
-    client_id: i64,
-    received_order_id: i64,
-    issue_date: chrono::NaiveDate,
-    due_date: Option<chrono::NaiveDate>,
-    subject: &str,
-    notes: &str,
-) -> ::anyhow::Result<i64>
-where
-    E: ::sqlx::PgExecutor<'e>,
-{
-    let id: i64 = ::sqlx::query_scalar(
-        r#"
-        INSERT INTO t_billing_invoice (
-            invoice_id, client_id, received_order_id, issue_date, due_date, subject, notes
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id
-        "#
-    )
-    .bind(invoice_id)
-    .bind(client_id)
-    .bind(received_order_id)
-    .bind(issue_date)
-    .bind(due_date)
-    .bind(subject)
-    .bind(notes)
-    .fetch_one(exec)
-    .await?;
-    Ok(id)
-}
-
-/// 請求明細を1件作成する（受注明細から生成）
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_billing_invoice_item<'e, E>(
-    exec: E,
-    invoice_id: i64,
-    received_order_item_id: i64,
-    product_name: &str,
-    unit_price: i32,
-    man_month: rust_decimal::Decimal,
-    actual_hours: rust_decimal::Decimal,
-    adjustment: i32,
-    amount: i32,
-    tax_category: &str,
-    sort_order: i32,
-) -> ::anyhow::Result<()>
-where
-    E: ::sqlx::PgExecutor<'e>,
-{
-    ::sqlx::query(
-        r#"
-        INSERT INTO t_billing_invoice_item (
-            invoice_id, received_order_item_id, product_name,
-            unit_price, man_month, actual_hours, adjustment, amount,
-            tax_category, sort_order
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-        "#
-    )
-    .bind(invoice_id)
-    .bind(received_order_item_id)
-    .bind(product_name)
-    .bind(unit_price)
-    .bind(man_month)
-    .bind(actual_hours)
-    .bind(adjustment)
-    .bind(amount)
-    .bind(tax_category)
-    .bind(sort_order)
-    .execute(exec)
-    .await?;
-    Ok(())
-}
-
-/// 受注書ステータスを INVOICED に更新する（プール・トランザクションどちらでも呼べる）
-pub async fn mark_received_order_invoiced<'e, E>(exec: E, received_order_id: i64) -> ::anyhow::Result<()>
-where
-    E: ::sqlx::PgExecutor<'e>,
-{
-    ::sqlx::query(
-        "UPDATE t_received_order SET status = 'INVOICED', invoice_confirmed = true, invoice_confirmed_at = NOW(), updated_at = NOW() WHERE id = $1"
-    )
-    .bind(received_order_id)
-    .execute(exec)
-    .await?;
-    Ok(())
-}
-
-/// 請求書番号採番用: 指定prefixに一致する直近のinvoice_idを取得
-pub async fn find_max_invoice_id_with_prefix(pool: &::sqlx::PgPool, prefix_pattern: &str) -> ::anyhow::Result<Option<String>> {
-    let max_seq: Option<String> = ::sqlx::query_scalar(
-        "SELECT MAX(invoice_id) FROM t_billing_invoice WHERE invoice_id LIKE $1"
-    )
-    .bind(prefix_pattern)
-    .fetch_one(pool)
-    .await?;
-    Ok(max_seq)
-}
+// ── 請求書の編集・送付先（2026-07-13追加。P2-3続き:
+//    presentation/handlers/invoices.rs 直書きSQLのRepository層移行）。
+//    手動生成（旧SSR）の関数は、未ルーティングだったため削除した ──
 
 /// 受注書の請求書送付先メールアドレスを取得する
 pub async fn find_received_order_invoice_email(pool: &::sqlx::PgPool, received_order_id: i64) -> ::anyhow::Result<Option<String>> {
@@ -354,51 +254,18 @@ pub async fn update_invoice_header(
     issue_date: chrono::NaiveDate,
     due_date: Option<chrono::NaiveDate>,
     subject: &str,
-    notes: &str,
 ) -> ::anyhow::Result<()> {
+    // 請求書（t_billing_invoice）に備考の列は無い。以前は存在しない列 notes を書こうとして、保存が必ず失敗していた
     ::sqlx::query(
         r#"UPDATE t_billing_invoice SET
             issue_date = $1, due_date = $2,
-            subject = $3, notes = $4, updated_at = NOW()
-           WHERE id = $5"#
+            subject = $3, updated_at = NOW()
+           WHERE id = $4"#
     )
     .bind(issue_date)
     .bind(due_date)
     .bind(subject)
-    .bind(notes)
     .bind(id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
-/// 請求明細を更新する（編集画面用）
-#[allow(clippy::too_many_arguments)]
-pub async fn update_invoice_item_fields(
-    pool: &::sqlx::PgPool,
-    item_id: i64,
-    invoice_id: i64,
-    product_name: &str,
-    unit_price: i32,
-    man_month: rust_decimal::Decimal,
-    actual_hours: rust_decimal::Decimal,
-    adjustment: i32,
-    amount: i32,
-) -> ::anyhow::Result<()> {
-    ::sqlx::query(
-        r#"UPDATE t_billing_invoice_item SET
-            product_name = $1, unit_price = $2, man_month = $3,
-            actual_hours = $4, adjustment = $5, amount = $6
-           WHERE id = $7 AND invoice_id = $8"#
-    )
-    .bind(product_name)
-    .bind(unit_price)
-    .bind(man_month)
-    .bind(actual_hours)
-    .bind(adjustment)
-    .bind(amount)
-    .bind(item_id)
-    .bind(invoice_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -415,7 +282,7 @@ pub async fn delete_invoice(pool: &::sqlx::PgPool, id: i64) -> ::anyhow::Result<
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
     Ok(())
 }
 
@@ -463,7 +330,7 @@ pub async fn list_invoice_rows(pool: &::sqlx::PgPool) -> ::anyhow::Result<Vec<In
 /// 請求書の入金記録一覧を取得する（詳細画面用）
 pub async fn list_invoice_payment_rows(pool: &::sqlx::PgPool, invoice_id: i64) -> ::anyhow::Result<Vec<(chrono::NaiveDate, i32, String, String)>> {
     let rows = ::sqlx::query_as(
-        "SELECT payment_date, amount, COALESCE(method, ''), COALESCE(reference, '') FROM t_invoice_payment WHERE invoice_id = $1 ORDER BY payment_date"
+        "SELECT payment_date, amount, COALESCE(method, ''), COALESCE(reference, '') FROM t_payment_record WHERE invoice_id = $1 ORDER BY payment_date"
     )
     .bind(invoice_id)
     .fetch_all(pool)

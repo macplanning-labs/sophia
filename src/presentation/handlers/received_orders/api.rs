@@ -2,6 +2,7 @@ use axum::{
     extract::{Path, State},
     response::IntoResponse,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use crate::infrastructure::repositories::order_repo::{self, ReceivedOrderRow};
 use crate::domain::models::client_contract::ReceivedOrderStatus;
@@ -51,7 +52,7 @@ pub async fn api_create(
         }))).into_response(),
     };
 
-    let contract = order_repo::find_client_contract_for_order(&pool, form.client_contract_id).await.ok().flatten();
+    let contract = order_repo::find_client_contract_for_order(&pool, form.client_contract_id).await.log_err().ok().flatten();
 
     let c = match contract {
         Some(c) => c,
@@ -105,9 +106,17 @@ pub async fn api_create(
     };
 
     let month_str = target_month.format("%Y%m").to_string();
-    let existing_count = order_repo::count_received_orders_with_prefix(&mut tx, &format!("RO-{}-%", month_str))
+    let existing_count = match order_repo::count_received_orders_with_prefix(&mut tx, &format!("RO-{}-%", month_str))
         .await
-        .unwrap_or(0);
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("受注書作成: 受注番号の採番に失敗: {:?}", e);
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({
+                "error": "受注番号の採番に失敗しました"
+            }))).into_response();
+        }
+    };
     let received_order_no = format!("RO-{}-{:03}", month_str, existing_count + 1);
 
     let order_id = match order_repo::insert_received_order_with_contract(
@@ -132,7 +141,7 @@ pub async fn api_create(
         }))).into_response();
     }
 
-    if let Err(e) = tx.commit().await {
+    if let Err(e) = crate::infrastructure::db_tx::commit_checked(tx).await {
         tracing::error!("受注書作成: commit失敗: {:?}", e);
         return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({
             "error": "コミットに失敗しました"
@@ -147,18 +156,18 @@ pub async fn api_detail(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let order = order_repo::find_received_order(&pool, id).await.ok().flatten();
+    let order = order_repo::find_received_order(&pool, id).await.log_err().ok().flatten();
 
     match order {
         Some(order) => {
-            let items = order_repo::list_received_order_items(&pool, id).await.unwrap_or_default();
+            let items = order_repo::list_received_order_items(&pool, id).await.log_err().unwrap_or_default();
 
-            let client_name = order_repo::find_client_name(&pool, order.client_id).await.unwrap_or_default();
+            let client_name = order_repo::find_client_name(&pool, order.client_id).await.log_err().unwrap_or_default();
 
             let status_enum = ReceivedOrderStatus::from_str(&order.status);
             let needs_contract_link = order.client_contract_id.is_none();
             let link_candidates = if needs_contract_link {
-                order_repo::list_contract_link_candidates(&pool, id).await.unwrap_or_default()
+                order_repo::list_contract_link_candidates(&pool, id).await.log_err().unwrap_or_default()
             } else {
                 vec![]
             };
@@ -180,6 +189,41 @@ pub async fn api_detail(
 #[derive(Debug, serde::Deserialize)]
 pub struct LinkContractBody {
     pub client_contract_id: i64,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct CreateContractBody {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub engineer_id: Option<i64>,
+}
+
+/// POST /api/received-orders/{id}/create-contract — 契約が無い注文書から、受注契約を作って紐付ける
+///
+/// 請求は注文書が正本。契約書の無いクライアントでも、注文書だけで請求できるようにするための入口。
+/// 案件・技術者は、指定が無ければ、注文書の案件名（別名）・技術者名から一意に決まるときだけ補う。
+pub async fn api_create_contract(
+    State(pool): State<PgPool>,
+    Path(id): Path<i64>,
+    body: Option<axum::Json<CreateContractBody>>,
+) -> Result<impl IntoResponse, AppError> {
+    let body = body.map(|b| b.0).unwrap_or_default();
+    match order_repo::create_contract_from_received_order(&pool, id, body.project_id.as_deref(), body.engineer_id).await {
+        Ok(Some(contract_id)) => Ok(axum::Json(serde_json::json!({
+            "success": true,
+            "contract_id": contract_id,
+            "message": "注文書の内容から受注契約を作成して紐付けました"
+        })).into_response()),
+        Ok(None) => Ok((
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "success": false,
+                "error": "案件または技術者を特定できないか、同じ開始日の契約がすでにあります。案件マスタの名前（EDI別名）と技術者名を確認するか、既存の契約を紐付けてください"
+            })),
+        ).into_response()),
+        Err(e) => Err(AppError::from(e)),
+    }
 }
 
 /// POST /api/received-orders/{id}/link-contract — オペレーターが受注契約を手動紐付け
@@ -220,7 +264,7 @@ pub async fn api_rollforward(
     // を含むため、api_link_contractと同じ理由でAppError化しない（品質改善P2-1の対象外）。
     match crate::domain::services::rollforward::rollforward_order(&pool, id).await {
         Ok(new_id) => {
-            let new_order = order_repo::find_received_order(&pool, new_id).await.ok().flatten();
+            let new_order = order_repo::find_received_order(&pool, new_id).await.log_err().ok().flatten();
             let received_order_no = new_order.map(|o| o.received_order_no).unwrap_or_default();
             (axum::http::StatusCode::CREATED, axum::Json(serde_json::json!({
                 "success": true, "id": new_id, "received_order_no": received_order_no,
@@ -307,7 +351,7 @@ pub async fn api_delete(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let status = order_repo::find_received_order_status(&pool, id).await.ok().flatten();
+    let status = order_repo::find_received_order_status(&pool, id).await.log_err().ok().flatten();
 
     match status.as_deref() {
         Some("REGISTERED") | None => {}

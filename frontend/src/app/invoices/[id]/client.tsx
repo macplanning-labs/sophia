@@ -8,7 +8,10 @@ import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { FormModal, FormField, FormInput, FormTextarea } from "@/components/ui/form-modal";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { FileText, Download, X } from "lucide-react";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
+import { getStatus } from "@/lib/status";
+import { Button } from "@/components/ui/button";
+import { FileText, Download, X, Send, Globe } from "lucide-react";
 import { toast } from "sonner";
 import { useDynamicId } from "@/lib/utils";
 import { useCurrentUser } from "@/lib/useCurrentUser";
@@ -36,6 +39,7 @@ export default function InvoiceDetailPage({
   const router = useRouter();
   const qc = useQueryClient();
   const { isAdmin } = useCurrentUser();
+  const [confirmTarget, setConfirmTarget] = useState<"reject" | "delete" | null>(null);
   const { data, isLoading } = useQuery({
     queryKey: ["invoices", id],
     queryFn: () => fetchInvoiceDetail(id),
@@ -46,7 +50,9 @@ export default function InvoiceDetailPage({
     mutationFn: () => fetch(`/api/v1/invoices/${id}/delete`, { method: "POST" }).then(async r => { if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.error || "削除に失敗しました"); } return r; }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["invoices"] });
+      qc.invalidateQueries({ queryKey: ["settlement"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
+      toast.success("削除しました");
       if (onDeleted) onDeleted();
       else if (!embedded) router.push("/");
     },
@@ -70,9 +76,9 @@ export default function InvoiceDetailPage({
       qc.invalidateQueries({ queryKey: ["invoices", id] });
       qc.invalidateQueries({ queryKey: ["invoices"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
-      toast.success("差戻ししました");
+      toast.success("差し戻しました");
     },
-    onError: (e: Error) => toast.error(`差戻しに失敗しました: ${e.message}`),
+    onError: (e: Error) => toast.error(`差し戻しに失敗しました: ${e.message}`),
   });
 
   const peppolSendMut = useMutation({
@@ -90,7 +96,6 @@ export default function InvoiceDetailPage({
     issue_date: "",
     due_date: "",
     subject: "",
-    notes: "",
   });
 
   const editMutation = useMutation({
@@ -111,14 +116,13 @@ export default function InvoiceDetailPage({
         issue_date: inv.issue_date || "",
         due_date: inv.due_date || "",
         subject: inv.subject || "",
-        notes: data?.notes || "",
       });
       setEditOpen(true);
     }
   };
 
   // ── PDFプレビュー（詳細下に表示。メール送信中も確認可能） ──
-  const [pdfOpen, setPdfOpen] = useState(false);
+  const [pdfOpen, setPdfOpen] = useState(embedded);
   const pdfUrl = pdfOpen ? `/api/v1/invoices/${id}/pdf` : null;
 
   const handlePdfDownload = async () => {
@@ -174,73 +178,83 @@ export default function InvoiceDetailPage({
   const status = inv?.status;
 
   const actions = (
-    <div className="flex items-center gap-2">
-      <button
-        type="button"
-        onClick={() => setPdfOpen(true)}
-        className="px-3 py-1.5 text-xs font-medium rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/30 hover:bg-purple-500/20 transition-colors inline-flex items-center gap-1"
-      >
+    <div className="flex items-center gap-2 mb-4 p-3 bg-card border border-border rounded-lg flex-wrap">
+      <Button variant="outline" size="sm" className="border-border text-foreground gap-1" onClick={() => setPdfOpen(true)}>
         <FileText className="w-3.5 h-3.5" /> PDF
-      </button>
-      {isAdmin && status === "PENDING_APPROVAL" && (
-        <button
+      </Button>
+      {isAdmin && (status === "PENDING_APPROVAL" || status === "REJECTED") && (
+        <Button
+          variant="outline" size="sm"
+          className="border-emerald-600/50 text-emerald-400 hover:text-emerald-300 gap-1"
           onClick={() => approveMut.mutate()}
           disabled={approveMut.isPending}
-          className="px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
         >
           ✅ 承認
-        </button>
+        </Button>
       )}
-      {isAdmin && status === "APPROVED" && (
-        <button
-          onClick={() => { if (confirm("差戻ししますか？")) rejectMut.mutate(); }}
+      {isAdmin && (status === "PENDING_APPROVAL" || status === "APPROVED") && (
+        <Button
+          variant="outline" size="sm"
+          className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
+          onClick={() => setConfirmTarget("reject")}
           disabled={rejectMut.isPending}
-          className="px-3 py-1.5 text-xs font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors disabled:opacity-50"
         >
-          ↩ 差戻し
-        </button>
+          ↩ 差し戻し
+        </Button>
       )}
-      {isAdmin && (status === "APPROVED" || status === "SENT") && (
-        <button
+      {isAdmin && (
+        <Button
+          variant="outline" size="sm"
+          className="border-blue-600/50 text-blue-400 hover:text-blue-300 gap-1"
           onClick={openSendModal}
-          className="px-3 py-1.5 text-xs font-medium rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/30 hover:bg-blue-500/20 transition-colors disabled:opacity-50"
+          disabled={status !== "APPROVED" && status !== "SENT"}
+          title={status !== "APPROVED" && status !== "SENT" ? "承認後に送信できます" : undefined}
         >
-          {status === "SENT" ? "🔁 再送信" : "📧 送信メール確認・送信"}
-        </button>
+          <Send className="w-3.5 h-3.5" /> {status === "SENT" ? "再送信" : "メール送信"}
+        </Button>
       )}
-      {isAdmin && (status === "APPROVED" || status === "SENT") && (
-        <button
+      {isAdmin && (
+        <Button
+          variant="outline" size="sm"
+          className="border-indigo-600/50 text-indigo-400 hover:text-indigo-300 gap-1"
           onClick={() => peppolSendMut.mutate()}
-          disabled={peppolSendMut.isPending}
-          className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/20 transition-colors disabled:opacity-50"
+          disabled={peppolSendMut.isPending || (status !== "APPROVED" && status !== "SENT")}
         >
-          🌐 Peppol送信
-        </button>
+          <Globe className="w-3.5 h-3.5" /> Peppol送信
+        </Button>
       )}
       {isAdmin && !inv?.client_accepted_at && (
-        <button
+        <Button
+          variant="outline" size="sm"
+          className="border-indigo-600/50 text-indigo-400 hover:text-indigo-300 gap-1"
           onClick={openEditModal}
-          className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/20 transition-colors"
         >
           ✏️ 編集
-        </button>
+        </Button>
       )}
       {isAdmin && !inv?.client_accepted_at && (
-        <button
-          onClick={() => { if (confirm("この請求書を削除しますか？")) deleteInvoice.mutate(); }}
+        <Button
+          variant="outline" size="sm"
+          className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
+          onClick={() => setConfirmTarget("delete")}
           disabled={deleteInvoice.isPending}
-          className="px-3 py-1.5 text-xs font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors disabled:opacity-50"
         >
           🗑 削除
-        </button>
+        </Button>
+      )}
+      {inv?.sent_at && (
+        <span className="text-xs text-muted-foreground ml-2">
+          送信済: {String(inv.sent_at).slice(0, 16).replace("T", " ")}
+        </span>
       )}
     </div>
   );
 
   return (
-    <DetailLayout title={`請求書 #${id}`} icon="📑" backHref="/" backLabel="ダッシュボードに戻る" isLoading={isLoading} actions={actions} embedded={embedded}>
+    <DetailLayout title={`請求書 #${id}`} icon="📑" backHref="/" backLabel="ダッシュボードに戻る" isLoading={isLoading} embedded={embedded}>
       {inv && (
         <>
+          {actions}
           {(() => {
             const g = getInvoiceStatusGuidance(status ?? "");
             return g ? (
@@ -350,14 +364,6 @@ export default function InvoiceDetailPage({
             </div>
           )}
 
-          {/* 備考 */}
-          {data.notes && (
-            <div className="bg-card border border-border rounded-lg p-4">
-              <dt className="text-[11px] text-muted-foreground font-medium mb-1">備考</dt>
-              <dd className="text-sm text-foreground whitespace-pre-wrap">{data.notes}</dd>
-            </div>
-          )}
-
           {/* PDFプレビューパネル（支払通知詳細と同じUX） */}
           {pdfOpen && pdfUrl && (
             <div className="bg-card border border-border rounded-lg overflow-hidden">
@@ -422,13 +428,6 @@ export default function InvoiceDetailPage({
                 onChange={(e) => setEditForm((f) => ({ ...f, subject: e.target.value }))}
               />
             </FormField>
-            <FormField label="備考">
-              <FormTextarea
-                rows={5}
-                value={editForm.notes}
-                onChange={(e) => setEditForm((f) => ({ ...f, notes: e.target.value }))}
-              />
-            </FormField>
             {editMutation.isError && (
               <p className="text-sm text-red-400">エラー: {(editMutation.error as Error).message}</p>
             )}
@@ -479,6 +478,47 @@ export default function InvoiceDetailPage({
               <p className="text-sm text-red-400">エラー: {(sendMut.error as Error).message}</p>
             )}
           </FormModal>
+
+          <ConfirmSheet
+            open={confirmTarget === "reject"}
+            title="請求書を差し戻し"
+            facts={[
+              ...(inv?.invoice_id ? [{ label: "請求書番号", value: inv.invoice_id }] : []),
+              ...(data?.client_name ? [{ label: "取引先", value: data.client_name }] : []),
+              ...(data?.grand_total ? [{ label: "金額（税込）", value: `¥${Number(data.grand_total).toLocaleString()}` }] : []),
+              ...(status ? [{ label: "状態", value: getStatus("invoice", status).label }] : []),
+            ]}
+            variant="danger"
+            confirmLabel="差し戻し"
+            cancelLabel="キャンセル"
+            loading={rejectMut.isPending}
+            onConfirm={() => {
+              setConfirmTarget(null);
+              rejectMut.mutate();
+            }}
+            onCancel={() => setConfirmTarget(null)}
+          />
+
+          <ConfirmSheet
+            open={confirmTarget === "delete"}
+            title="請求書を削除"
+            facts={[
+              ...(inv?.invoice_id ? [{ label: "請求書番号", value: inv.invoice_id }] : []),
+              ...(data?.client_name ? [{ label: "取引先", value: data.client_name }] : []),
+              ...(data?.grand_total ? [{ label: "金額（税込）", value: `¥${Number(data.grand_total).toLocaleString()}` }] : []),
+              ...(status ? [{ label: "状態", value: getStatus("invoice", status).label }] : []),
+            ]}
+            description="この操作は取り消せません"
+            variant="danger"
+            confirmLabel="削除"
+            cancelLabel="キャンセル"
+            loading={deleteInvoice.isPending}
+            onConfirm={() => {
+              setConfirmTarget(null);
+              deleteInvoice.mutate();
+            }}
+            onCancel={() => setConfirmTarget(null)}
+          />
         </>
       )}
     </DetailLayout>

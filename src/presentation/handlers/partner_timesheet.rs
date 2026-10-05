@@ -4,6 +4,7 @@ use axum::{
     extract::{Extension, Path, State},
     response::{IntoResponse, Redirect},
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::presentation::handlers::timesheet_upload_common;
@@ -134,7 +135,7 @@ pub async fn api_timesheet_list(
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
     let timesheets: Vec<serde_json::Value> = crate::infrastructure::repositories::timesheet_repo::list_timesheets_for_partner(&pool, partner_id)
         .await
-        .unwrap_or_default()
+        .log_err().unwrap_or_default()
         .into_iter()
     .map(|(id, month, status, engineer, hours)| serde_json::json!({
         "id": id, "target_month": month, "status": status, "engineer_name": engineer, "total_hours": hours,

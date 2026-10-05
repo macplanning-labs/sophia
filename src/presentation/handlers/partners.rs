@@ -5,6 +5,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     Form,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::infrastructure::repositories::partner_repo::{self, PartnerFormInput};
@@ -38,7 +39,7 @@ pub async fn create(
     State(pool): State<PgPool>,
     Form(form): Form<PartnerForm>,
 ) -> impl IntoResponse {
-    let next_id = partner_repo::next_partner_id(&pool).await.unwrap_or_else(|_| "0000000001".to_string());
+    let next_id = partner_repo::next_partner_id(&pool).await.log_err().unwrap_or_else(|_| "0000000001".to_string());
 
     if let Err(e) = partner_repo::create(&pool, &next_id, PartnerFormInput {
         name: &form.name,

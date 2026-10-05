@@ -4,6 +4,7 @@ pub mod work;
 pub use engineer::*;
 pub use work::*;
 
+use crate::infrastructure::db_tx::LogErr;
 use chrono::{NaiveDate, NaiveTime};
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -80,7 +81,7 @@ pub async fn check_permission(pool: &PgPool, auth_user: &AuthUser, engineer_id: 
 
     // パートナー担当者の場合
     if let Some(partner_id) = auth_user.partner_id() {
-        return order_repo::engineer_belongs_to_partner(pool, engineer_id, partner_id).await.unwrap_or(false);
+        return order_repo::engineer_belongs_to_partner(pool, engineer_id, partner_id).await.log_err().unwrap_or(false);
     }
 
     false

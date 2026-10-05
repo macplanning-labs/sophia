@@ -2,11 +2,14 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { monthsInRange, defaultMonthValue, buildWorkPeriod } from "@/lib/contract-months";
 import { fetchClientContractDetail, apiPut, apiPost, apiDelete, createReceivedOrderFromContract } from "@/lib/api";
 import { FormModal, FormField, FormInput, FormSelect, FormTextarea } from "@/components/ui/form-modal";
 import { FormSection } from "@/components/contracts/form-section";
 import { Button } from "@/components/ui/button";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { toast } from "sonner";
+import { DateInput } from "@/components/ui/date-input";
 
 const SETTLEMENT_TYPES = [
   { value: "上下割", label: "上下割" },
@@ -42,43 +45,6 @@ interface ClientEditForm {
   is_active: boolean;
 }
 
-/** 契約期間内の対象月（YYYY-MM）候補を生成 */
-function monthsInRange(startDate: string, endDate: string): { value: string; label: string }[] {
-  if (!startDate || !endDate) return [];
-  const start = new Date(`${startDate.slice(0, 7)}-01T00:00:00`);
-  const end = new Date(`${endDate.slice(0, 7)}-01T00:00:00`);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return [];
-  const out: { value: string; label: string }[] = [];
-  const cur = new Date(start);
-  while (cur <= end) {
-    const y = cur.getFullYear();
-    const m = String(cur.getMonth() + 1).padStart(2, "0");
-    out.push({ value: `${y}-${m}`, label: `${y}年${m}月` });
-    cur.setMonth(cur.getMonth() + 1);
-  }
-  return out;
-}
-
-function defaultMonthValue(startDate: string, endDate: string): string {
-  const options = monthsInRange(startDate, endDate);
-  if (options.length === 0) return "";
-  const now = new Date();
-  const current = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  if (options.some((o) => o.value === current)) return current;
-  return options[options.length - 1].value;
-}
-
-/** 対象月と契約期間から target_month / work_start / work_end を算出 */
-function buildWorkPeriod(yearMonth: string, contractStart: string, contractEnd: string) {
-  const [y, m] = yearMonth.split("-").map(Number);
-  const targetMonth = `${yearMonth}-01`;
-  const lastDay = new Date(y, m, 0).getDate();
-  const monthEnd = `${yearMonth}-${String(lastDay).padStart(2, "0")}`;
-  const workStart = contractStart > targetMonth ? contractStart : targetMonth;
-  const workEnd = contractEnd < monthEnd ? contractEnd : monthEnd;
-  return { target_month: targetMonth, work_start: workStart, work_end: workEnd };
-}
-
 async function fetchFormData(): Promise<{
   projects: { value: string; label: string }[];
   engineers: { value: number; label: string }[];
@@ -99,6 +65,7 @@ export function ClientContractEditModal({ contractId, open, onClose }: Props) {
   const [form, setForm] = useState<ClientEditForm | null>(null);
   const [orderMonth, setOrderMonth] = useState("");
   const [extendDate, setExtendDate] = useState("");
+  const [confirmAction, setConfirmAction] = useState<"delete" | "extend" | "createOrder" | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["client-contracts", String(contractId)],
@@ -255,6 +222,7 @@ export function ClientContractEditModal({ contractId, open, onClose }: Props) {
   const canCreateOrder = !!c && c.is_active !== false && monthOptions.length > 0 && !!orderMonth;
 
   return (
+    <>
     <FormModal
       open={open}
       title={`受注契約 #${contractId} の編集`}
@@ -281,10 +249,7 @@ export function ClientContractEditModal({ contractId, open, onClose }: Props) {
               size="sm"
               className="border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
               disabled={deleteMutation.isPending || updateMutation.isPending || createOrderMutation.isPending}
-              onClick={() => {
-                if (!confirm(`受注契約 #${contractId} を削除しますか？この操作は取り消せません。`)) return;
-                deleteMutation.mutate();
-              }}
+              onClick={() => setConfirmAction("delete")}
             >
               {deleteMutation.isPending ? "削除中…" : "削除"}
             </Button>
@@ -303,8 +268,8 @@ export function ClientContractEditModal({ contractId, open, onClose }: Props) {
             契約更改（期間延長）のみ、既存の受注書に影響しないため常に可能です。現在の終了日: {c?.end_date || "-"}
           </p>
           <div className="flex items-center gap-2 flex-wrap">
-            <input
-              type="date"
+            <DateInput
+              
               value={extendDate}
               onChange={(e) => setExtendDate(e.target.value)}
               min={c?.end_date || undefined}
@@ -314,10 +279,7 @@ export function ClientContractEditModal({ contractId, open, onClose }: Props) {
               type="button"
               size="sm"
               disabled={!extendDate || extendMutation.isPending}
-              onClick={() => {
-                if (!confirm(`終了日を ${extendDate} に延長しますか？`)) return;
-                extendMutation.mutate();
-              }}
+              onClick={() => setConfirmAction("extend")}
             >
               {extendMutation.isPending ? "延長中…" : "契約を延長"}
             </Button>
@@ -507,11 +469,7 @@ export function ClientContractEditModal({ contractId, open, onClose }: Props) {
                 type="button"
                 size="sm"
                 disabled={!canCreateOrder || createOrderMutation.isPending}
-                onClick={() => {
-                  const label = monthOptions.find((o) => o.value === orderMonth)?.label ?? orderMonth;
-                  if (!confirm(`${label}の受注書を作成しますか？`)) return;
-                  createOrderMutation.mutate();
-                }}
+                onClick={() => setConfirmAction("createOrder")}
               >
                 {createOrderMutation.isPending ? "作成中…" : "受注書を作成"}
               </Button>
@@ -529,5 +487,57 @@ export function ClientContractEditModal({ contractId, open, onClose }: Props) {
         </p>
       )}
     </FormModal>
+
+    <ConfirmSheet
+      open={confirmAction === "delete"}
+      title="受注契約を削除"
+      facts={[
+        { label: "契約ID", value: contractId },
+        ...(data?.engineer_name ? [{ label: "要員名", value: data.engineer_name }] : []),
+      ]}
+      description="この操作は取り消せません。"
+      variant="danger"
+      confirmLabel="削除"
+      loading={deleteMutation.isPending}
+      onConfirm={() => {
+        setConfirmAction(null);
+        deleteMutation.mutate();
+      }}
+      onCancel={() => setConfirmAction(null)}
+    />
+
+    <ConfirmSheet
+      open={confirmAction === "extend"}
+      title="終了日を延長"
+      facts={[
+        { label: "契約ID", value: contractId },
+        ...(data?.end_date ? [{ label: "現在の終了日", value: data.end_date }] : []),
+        ...(extendDate ? [{ label: "新しい終了日", value: extendDate }] : []),
+      ]}
+      confirmLabel="延長"
+      loading={extendMutation.isPending}
+      onConfirm={() => {
+        setConfirmAction(null);
+        extendMutation.mutate();
+      }}
+      onCancel={() => setConfirmAction(null)}
+    />
+
+    <ConfirmSheet
+      open={confirmAction === "createOrder"}
+      title="受注書を作成"
+      facts={[
+        { label: "契約ID", value: contractId },
+        { label: "対象月", value: monthOptions.find((o) => o.value === orderMonth)?.label ?? orderMonth },
+      ]}
+      confirmLabel="作成"
+      loading={createOrderMutation.isPending}
+      onConfirm={() => {
+        setConfirmAction(null);
+        createOrderMutation.mutate();
+      }}
+      onCancel={() => setConfirmAction(null)}
+    />
+    </>
   );
 }

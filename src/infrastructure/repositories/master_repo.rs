@@ -65,11 +65,20 @@ pub struct MasterTableDef {
 }
 
 // ── EDI方式の選択肢 ──
-static EDI_OPTIONS: &[(&str, &str)] = &[
-    ("", "なし"),
-    ("EDI_OASIS", "EDI-OASIS"),
-    ("EMAIL", "メール"),
+/// 請求書の単位(m_client.billing_unit)。既定は PROJECT(現行どおり案件ごと)
+static BILLING_UNIT_OPTIONS: &[(&str, &str)] = &[
+    ("PROJECT", "案件ごと"),
+    ("CLIENT", "取引先まとめ"),
 ];
+
+/// select が空で送られたときの値。billing_unit は DB に CHECK 制約があり空文字を入れられないため、既定の PROJECT にする
+/// (フォームを経由しない更新や、未選択の新規登録で、保存が失敗しないように)
+fn empty_select_default(col_name: &str) -> &'static str {
+    if col_name == "billing_unit" { "PROJECT" } else { "" }
+}
+
+// 「EDI方式」の選択肢は、取引先ごとのカスタマイズが足す（crate::custom::EDI_OPTIONS）
+static EDI_OPTIONS: &[(&str, &str)] = crate::custom::EDI_OPTIONS;
 
 // ── 雇用形態の選択肢 ──
 static EMPLOYMENT_OPTIONS: &[(&str, &str)] = &[
@@ -152,6 +161,8 @@ pub static MASTER_TABLES: &[MasterTableDef] = &[
             ColDef { name: "phone", label: "電話", in_list: false, in_form: true, is_pk: false, input_type: "text", options: &[], required: false, fk_table: "", fk_value: "", fk_label: "" },
             ColDef { name: "address", label: "住所", in_list: false, in_form: true, is_pk: false, input_type: "text", options: &[], required: false, fk_table: "", fk_value: "", fk_label: "" },
             ColDef { name: "edi_system_type", label: "EDI方式", in_list: true, in_form: true, is_pk: false, input_type: "select", options: EDI_OPTIONS, required: false, fk_table: "", fk_value: "", fk_label: "" },
+            ColDef { name: "invoice_issued_by_client", label: "請求書は先方が作る", in_list: false, in_form: true, is_pk: false, input_type: "checkbox", options: &[], required: false, fk_table: "", fk_value: "", fk_label: "" },
+            ColDef { name: "billing_unit", label: "請求単位", in_list: true, in_form: true, is_pk: false, input_type: "select", options: BILLING_UNIT_OPTIONS, required: false, fk_table: "", fk_value: "", fk_label: "" },
             ColDef { name: "edi_notification_email", label: "EDI通知メール", in_list: false, in_form: true, is_pk: false, input_type: "text", options: &[], required: false, fk_table: "", fk_value: "", fk_label: "" },
             ColDef { name: "work_report_email", label: "稼働報告送付先", in_list: false, in_form: true, is_pk: false, input_type: "email", options: &[], required: false, fk_table: "", fk_value: "", fk_label: "" },
             ColDef { name: "invoice_email", label: "請求書送付先（宛先）", in_list: false, in_form: true, is_pk: false, input_type: "email", options: &[], required: false, fk_table: "", fk_value: "", fk_label: "" },
@@ -541,8 +552,9 @@ pub async fn execute_update(pool: &PgPool, def: &MasterTableDef, id: &str, pk_co
     Ok(())
 }
 
-/// 新規作成実行。自動採番カラムがあれば採番して body に埋め込んでから挿入する
-pub async fn execute_create(pool: &PgPool, def: &MasterTableDef, mut body: serde_json::Value) -> Result<(), sqlx::Error> {
+/// 新規作成実行。自動採番カラムがあれば採番して body に埋め込んでから挿入する。
+/// 自動採番のIDがある表(例: パートナー)は、作ったIDを返す(画面が、作った直後に選べるように)
+pub async fn execute_create(pool: &PgPool, def: &MasterTableDef, mut body: serde_json::Value) -> Result<Option<String>, sqlx::Error> {
     // ── 自動採番: auto_id_column が設定されていて、値が空ならDBから次番号を生成 ──
     if !def.auto_id_column.is_empty() {
         let current_val = body.get(def.auto_id_column)
@@ -574,7 +586,15 @@ pub async fn execute_create(pool: &PgPool, def: &MasterTableDef, mut body: serde
     }
 
     query.execute(pool).await?;
-    Ok(())
+    Ok(created_id(def, &body))
+}
+
+/// 作ったIDを body から取り出す(自動採番カラムがある表のみ)
+fn created_id(def: &MasterTableDef, body: &serde_json::Value) -> Option<String> {
+    if def.auto_id_column.is_empty() {
+        return None;
+    }
+    body.get(def.auto_id_column).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string())
 }
 
 /// EDI採番ルールに従ったID自動生成
@@ -757,7 +777,7 @@ fn bind_value<'q>(
             } else {
                 let raw = body[col.name].as_str().unwrap_or("");
                 if raw.is_empty() {
-                    query.bind(raw.to_string())
+                    query.bind(empty_select_default(col.name).to_string())
                 } else if let Ok(v) = raw.parse::<i64>() {
                     query.bind(v)
                 } else {
@@ -771,3 +791,44 @@ fn bind_value<'q>(
         }
     }
 }
+
+#[cfg(test)]
+mod billing_unit_tests {
+    use super::*;
+
+    #[test]
+    fn empty_billing_unit_falls_back_to_project() {
+        assert_eq!(empty_select_default("billing_unit"), "PROJECT");
+        assert_eq!(empty_select_default("edi_system_type"), "");
+    }
+
+    #[test]
+    fn client_master_has_billing_unit_select_with_both_options() {
+        let def = find_table("clients").expect("clients マスタ");
+        let col = def.columns.iter().find(|c| c.name == "billing_unit").expect("billing_unit");
+        assert_eq!(col.input_type, "select");
+        let values: Vec<&str> = col.options.iter().map(|(v, _)| *v).collect();
+        assert_eq!(values, vec!["PROJECT", "CLIENT"]);
+    }
+}
+
+#[cfg(test)]
+mod created_id_tests {
+    use super::*;
+
+    #[test]
+    fn auto_numbered_tables_return_the_created_id() {
+        let partners = find_table("partners").expect("partners");
+        let body = serde_json::json!({"partner_id": "0000000007", "name": "x"});
+        assert_eq!(created_id(partners, &body), Some("0000000007".to_string()));
+        let empty = serde_json::json!({"name": "x"});
+        assert_eq!(created_id(partners, &empty), None, "IDが無ければ None");
+    }
+
+    #[test]
+    fn tables_without_auto_id_return_none() {
+        let engineers = find_table("engineers").expect("engineers");
+        assert_eq!(created_id(engineers, &serde_json::json!({"id": 5})), None);
+    }
+}
+

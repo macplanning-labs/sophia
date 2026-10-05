@@ -111,7 +111,16 @@ pub async fn submit_order(
 
     let prefix = format!("RO-{}{:02}-", year, month);
     let count = order_repo::count_received_orders_with_prefix(&mut *tx, &format!("{}%", prefix)).await
-        .unwrap_or(0);
+        .map_err(|e| {
+            tracing::error!("Failed to count received orders: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(ApiErrorResponse {
+                    error: "database_error".to_string(),
+                    message: Some("Failed to create order".to_string()),
+                }),
+            )
+        })?;
     let order_no = format!("{}{:03}", prefix, count + 1);
 
     let order_id = order_repo::insert_received_order_basic(
@@ -200,7 +209,7 @@ pub async fn submit_order(
         }
     }
 
-    tx.commit().await
+    crate::infrastructure::db_tx::commit_checked(tx).await
         .map_err(|e| {
             tracing::error!("Failed to commit transaction: {:?}", e);
             (

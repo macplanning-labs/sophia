@@ -7,6 +7,7 @@
 /// マスターテンプレート（GOOGLE_SHEETS_TIMESHEET_TEMPLATE_ID）を社員ごとに複製・共有し、
 /// 記入後の値を読み取ってSophiaに取り込む。
 
+use crate::infrastructure::db_tx::LogErr;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::info;
@@ -62,7 +63,7 @@ pub async fn copy_template_and_share(employee_email: &str, sheet_name: &str) -> 
         .context("スプレッドシートの複製リクエストに失敗")?;
 
     if !copy_resp.status().is_success() {
-        let body = copy_resp.text().await.unwrap_or_default();
+        let body = copy_resp.text().await.log_err().unwrap_or_default();
         anyhow::bail!("スプレッドシートの複製に失敗しました: {}", body);
     }
     let copied: DriveFile = copy_resp.json().await.context("スプレッドシートの複製レスポンスの解析に失敗")?;
@@ -82,7 +83,7 @@ pub async fn copy_template_and_share(employee_email: &str, sheet_name: &str) -> 
         .context("編集権限の付与リクエストに失敗")?;
 
     if !perm_resp.status().is_success() {
-        let body = perm_resp.text().await.unwrap_or_default();
+        let body = perm_resp.text().await.log_err().unwrap_or_default();
         anyhow::bail!("編集権限の付与に失敗しました: {}", body);
     }
 
@@ -117,7 +118,7 @@ pub async fn read_values(file_id: &str, range: &str) -> Result<Option<Vec<Vec<se
         .context("スプレッドシートの値取得リクエストに失敗")?;
 
     if !resp.status().is_success() {
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp.text().await.log_err().unwrap_or_default();
         anyhow::bail!("スプレッドシートの値取得に失敗しました: {}", body);
     }
 

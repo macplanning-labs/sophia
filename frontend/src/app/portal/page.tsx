@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { FileText, FileCheck, Download, CheckCircle } from "lucide-react";
 import { toast } from "sonner";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { fetchPortalOrders, approvePortalOrder } from "@/lib/api";
 
 interface Order {
@@ -24,6 +25,7 @@ export default function PortalOrdersPage() {
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pdfType, setPdfType] = useState<"order" | "acceptance">("order");
+  const [confirmApprove, setConfirmApprove] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["portal-orders"],
@@ -48,7 +50,12 @@ export default function PortalOrdersPage() {
 
   const handleApprove = useCallback(() => {
     if (!selected) return;
-    if (!window.confirm(`注文書 ${selected.order_id} を承諾しますか？\n\n一度承諾すると取り消しできません。`)) return;
+    setConfirmApprove(true);
+  }, [selected]);
+
+  const doApprove = useCallback(() => {
+    if (!selected) return;
+    setConfirmApprove(false);
     approveMutation.mutate(selected.order_id);
   }, [selected, approveMutation]);
 
@@ -179,6 +186,21 @@ export default function PortalOrdersPage() {
           <iframe src={pdfUrl} className="w-full h-[600px]" title="PDF Preview" />
         </div>
       )}
+
+      <ConfirmSheet
+        open={confirmApprove && selected !== undefined}
+        title="注文書を承諾"
+        facts={selected ? [
+          { label: "注文書番号", value: selected.order_id },
+          { label: "案件名", value: selected.project_name },
+          { label: "対象年月", value: selected.target_month },
+        ] : undefined}
+        description="一度承諾すると取り消しできません。"
+        confirmLabel="承諾"
+        loading={approveMutation.isPending}
+        onConfirm={doApprove}
+        onCancel={() => setConfirmApprove(false)}
+      />
     </div>
   );
 }

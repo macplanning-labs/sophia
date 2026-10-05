@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { X } from "lucide-react";
 import type { CreatedNotice } from "@/lib/types";
 import NoticeDetailPage from "@/app/notices/[id]/client";
@@ -16,12 +16,20 @@ function formatYen(n: number): string {
 
 /** 支払通知一括発行直後、パートナー行の下に表示するインラインパネル。
  *  PDFプレビュー・承認・送信までこの場で続けられるようにする。 */
-export function CreatedNoticesInline({ notices, onDismiss }: Props) {
+export function CreatedNoticesInline({ notices: all, onDismiss }: Props) {
+  const [removed, setRemoved] = useState<Set<string>>(new Set());
+  const notices = useMemo(() => all.filter((x) => !removed.has(String(x.notice_id))), [all, removed]);
   const [activeId, setActiveId] = useState<string | null>(notices[0]?.notice_id ?? null);
 
   useEffect(() => {
     setActiveId(notices[0]?.notice_id ?? null);
   }, [notices]);
+
+  const handleDeleted = (id: string) => {
+    const rest = notices.filter((x) => String(x.notice_id) !== id);
+    setRemoved((prev) => new Set(prev).add(id));
+    if (rest.length === 0) onDismiss();
+  };
 
   if (notices.length === 0) return null;
 
@@ -59,9 +67,8 @@ export function CreatedNoticesInline({ notices, onDismiss }: Props) {
                   : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
             >
-              {n.project_name ? `${n.project_name} · ` : ""}
-              {formatYen(n.total)}
-              {n.needs_approval ? " · 要承認" : ""}
+              {`${n.partner_name}${n.project_name ? ` · ${n.project_name}` : ""} · ${formatYen(n.total)}`}
+              {" · 要承認"}
             </button>
           ))}
         </div>
@@ -69,7 +76,7 @@ export function CreatedNoticesInline({ notices, onDismiss }: Props) {
 
       <div className="px-3 py-3 max-h-[min(60vh,520px)] overflow-y-auto">
         {activeId != null && (
-          <NoticeDetailPage key={activeId} noticeId={activeId} embedded />
+          <NoticeDetailPage key={activeId} noticeId={activeId} embedded onDeleted={() => handleDeleted(String(activeId))} />
         )}
       </div>
     </div>

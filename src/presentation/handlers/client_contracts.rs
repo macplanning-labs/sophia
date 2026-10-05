@@ -15,6 +15,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     Form,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::domain::models::client_contract::{ClientContractForm, ClientContractWithNames};
@@ -92,7 +93,7 @@ pub async fn api_index(State(pool): State<PgPool>) -> axum::Json<Vec<ClientContr
 
 /// ロック判定: 紐づく受注書がACCEPTED以降ならtrue
 async fn is_cc_locked(pool: &PgPool, cc_id: i64) -> bool {
-    order_repo::count_locked_orders_for_client_contract(pool, cc_id).await.unwrap_or(0) > 0
+    order_repo::count_locked_orders_for_client_contract(pool, cc_id).await.log_err().unwrap_or(0) > 0
 }
 
 /// GET /api/client-contracts/{id} — 詳細（JSON）
@@ -100,11 +101,11 @@ pub async fn api_detail(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let contract = order_repo::find_client_contract_with_names(&pool, id).await.ok().flatten();
+    let contract = order_repo::find_client_contract_with_names(&pool, id).await.log_err().ok().flatten();
 
     match contract {
         Some(c) => {
-            let order_items = order_repo::list_recent_order_items_for_contract(&pool, id).await.unwrap_or_default();
+            let order_items = order_repo::list_recent_order_items_for_contract(&pool, id).await.log_err().unwrap_or_default();
 
             let is_locked = is_cc_locked(&pool, id).await;
             axum::Json(serde_json::json!({
@@ -176,7 +177,7 @@ pub async fn api_extend(
         }))).into_response()),
     };
 
-    let current = order_repo::find_client_contract_with_names(&pool, id).await.ok().flatten();
+    let current = order_repo::find_client_contract_with_names(&pool, id).await.log_err().ok().flatten();
     let current_end_date = match current {
         Some(c) => c.end_date,
         None => return Ok((axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({
@@ -214,7 +215,7 @@ pub async fn api_delete(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let Some(_contract) = order_repo::find_client_contract_with_names(&pool, id).await.ok().flatten() else {
+    let Some(_contract) = order_repo::find_client_contract_with_names(&pool, id).await.log_err().ok().flatten() else {
         return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({
             "success": false, "error": "該当する受注契約が見つかりません"
         }))).into_response();

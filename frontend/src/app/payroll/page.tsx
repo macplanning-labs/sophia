@@ -12,6 +12,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DetailModal } from "@/components/ui/detail-modal";
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { cn } from "@/lib/utils";
 import PayrollDetailPage from "./[id]/client";
 
@@ -36,6 +37,7 @@ function PayrollPageContent() {
   const [nameFilter, setNameFilter] = useState("");
   const [monthFilter, setMonthFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [confirmCalculate, setConfirmCalculate] = useState(false);
 
   const queryClient = useQueryClient();
   const { canViewAllPayroll } = useCurrentUser();
@@ -143,11 +145,7 @@ function PayrollPageContent() {
             className="bg-muted border border-border text-sm text-foreground rounded-md px-2 py-1.5"
           />
           <button
-            onClick={() => {
-              if (confirm(`${calcMonth}の給与を計算しますか？（既に計算済みの社員はスキップされます）`)) {
-                calculateMut.mutate(calcMonth);
-              }
-            }}
+            onClick={() => setConfirmCalculate(true)}
             disabled={calculateMut.isPending}
             className="px-3 py-1.5 text-xs font-medium rounded-md bg-teal-500/10 text-teal-400 border border-teal-500/30 hover:bg-teal-500/20 transition-colors disabled:opacity-50"
           >
@@ -244,6 +242,20 @@ function PayrollPageContent() {
           <PayrollDetailPage id={editId} embedded />
         </DetailModal>
       )}
+
+      <ConfirmSheet
+        open={confirmCalculate}
+        title="給与を計算"
+        facts={[{ label: "対象月", value: calcMonth }]}
+        description="既に計算済みの社員はスキップされます。"
+        confirmLabel="計算"
+        loading={calculateMut.isPending}
+        onConfirm={() => {
+          setConfirmCalculate(false);
+          calculateMut.mutate(calcMonth);
+        }}
+        onCancel={() => setConfirmCalculate(false)}
+      />
     </div>
   );
 }

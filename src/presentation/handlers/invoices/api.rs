@@ -1,5 +1,6 @@
 /// invoices/api.rs — SPA用 JSON API（一覧・詳細）
 
+use crate::infrastructure::db_tx::LogErr;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use sqlx::PgPool;
@@ -26,11 +27,9 @@ pub async fn api_detail(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let invoice = billing_repo::find_invoice(&pool, id).await.ok().flatten();
-
-    match invoice {
-        Some(inv) => {
-            let items = billing_repo::list_invoice_items(&pool, id).await.unwrap_or_default();
+    match billing_repo::find_invoice(&pool, id).await {
+        Ok(Some(inv)) => {
+            let items = billing_repo::list_invoice_items(&pool, id).await.log_err().unwrap_or_default();
             // t_billing_invoice_item に adjustment 列が無いため、精算額−基本単価で復元して返す
             let items: Vec<serde_json::Value> = items.into_iter().map(|item| {
                 let adjustment = item.amount - item.unit_price;
@@ -41,17 +40,17 @@ pub async fn api_detail(
                 v
             }).collect();
 
-            let client_name = order_repo::find_client_name(&pool, inv.client_id).await.unwrap_or_default();
+            let client_name = order_repo::find_client_name(&pool, inv.client_id).await.log_err().unwrap_or_default();
 
             // 入金記録
-            let payments: Vec<serde_json::Value> = billing_repo::list_invoice_payment_rows(&pool, id).await.unwrap_or_default()
+            let payments: Vec<serde_json::Value> = billing_repo::list_invoice_payment_rows(&pool, id).await.log_err().unwrap_or_default()
             .iter().map(|r| serde_json::json!({
                 "payment_date": r.0.to_string(), "amount": r.1, "method": r.2, "reference": r.3,
             })).collect();
 
             // 関連受注書 + 案件名
             let (received_order_no, project_name): (Option<String>, Option<String>) = if let Some(ro_id) = inv.received_order_id {
-                let row = billing_repo::find_received_order_no_project_name(&pool, ro_id).await.ok().flatten();
+                let row = billing_repo::find_received_order_no_project_name(&pool, ro_id).await.log_err().ok().flatten();
                 match row {
                     Some((no, name)) => (Some(no), if name.is_empty() { None } else { Some(name) }),
                     None => (None, None),
@@ -82,6 +81,10 @@ pub async fn api_detail(
                 "notes": "",
             })).into_response()
         }
-        None => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
+        Ok(None) => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => {
+            tracing::error!("請求書詳細の取得に失敗: id={id}: {e:?}");
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({"success": false, "error": "データを取得できませんでした"}))).into_response()
+        }
     }
 }

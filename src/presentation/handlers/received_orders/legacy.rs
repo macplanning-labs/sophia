@@ -1,8 +1,11 @@
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     response::{IntoResponse, Redirect},
     Form,
 };
+use crate::domain::models::client_contract::ReceivedOrderStatus;
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use crate::infrastructure::repositories::order_repo;
 use crate::presentation::api_response::AppError;
@@ -129,7 +132,7 @@ pub async fn create(
         ).await?;
     }
 
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
 
     Ok(Redirect::to("/received-orders"))
 }
@@ -140,14 +143,27 @@ pub async fn update_status(
     Path(id): Path<i64>,
     Form(form): Form<StatusForm>,
 ) -> Result<impl IntoResponse, AppError> {
-    let valid = ["REGISTERED", "REPORT_RECEIVED", "REPORT_SENT", "INVOICED", "PAID"];
-    if !valid.contains(&form.status.as_str()) {
-        return Ok(Redirect::to(&format!("/received-orders/{}", id)));
+    // 許可する状態は ReceivedOrderStatus を唯一の正とする(画面の選択肢・ダッシュボードの工程と同じ7つ)
+    let Some(status) = ReceivedOrderStatus::parse(&form.status) else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "success": false, "error": "無効なステータスです" })),
+        ).into_response());
+    };
+
+    let rows = order_repo::update_received_order_status_by_id(&pool, id, status.as_str()).await?;
+
+    // 更新対象が無いのに成功と表示しない
+    if rows == 0 {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "success": false, "error": "受注書が見つかりません" })),
+        ).into_response());
     }
 
-    order_repo::update_received_order_status_by_id(&pool, id, &form.status).await?;
-
-    Ok(Redirect::to(&format!("/received-orders/{}", id)))
+    Ok(axum::Json(serde_json::json!({
+        "success": true
+    })).into_response())
 }
 
 /// POST /received-orders/{id}/edit — 更新（未ルーティングのdead code。相当機能は`api::api_update`）
@@ -202,7 +218,7 @@ pub async fn delete(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let status = order_repo::find_received_order_status(&pool, id).await.ok().flatten();
+    let status = order_repo::find_received_order_status(&pool, id).await.log_err().ok().flatten();
 
     match status.as_deref() {
         Some("REGISTERED") | None => {}

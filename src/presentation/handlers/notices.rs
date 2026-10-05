@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     Form,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::domain::models::partner_contract::PaymentNotice;
@@ -43,7 +44,7 @@ pub async fn create(
     let order_id = &form.purchase_order_id;
 
     // 発注注文書を取得
-    let order = order_repo::find_purchase_order_for_notice(&pool, order_id).await.ok().flatten();
+    let order = order_repo::find_purchase_order_for_notice(&pool, order_id).await.log_err().ok().flatten();
 
     let (partner_id, _project_id, target_month) = match order {
         Some(o) => o,
@@ -115,10 +116,10 @@ async fn build_notice_email_ctx(
     pool: &PgPool,
     id: &str,
 ) -> Result<(PaymentNotice, String, String, String, std::collections::HashMap<String, String>, String), (axum::http::StatusCode, String)> {
-    let notice = order_repo::find_payment_notice(pool, id).await.ok().flatten()
+    let notice = order_repo::find_payment_notice(pool, id).await.log_err().ok().flatten()
         .ok_or((axum::http::StatusCode::NOT_FOUND, "支払通知書が見つかりません".to_string()))?;
 
-    let partner_info = order_repo::find_partner_name_email_cc(pool, &notice.partner_id).await.ok().flatten();
+    let partner_info = order_repo::find_partner_name_email_cc(pool, &notice.partner_id).await.log_err().ok().flatten();
     let (partner_name, partner_email, partner_cc) = partner_info.unwrap_or_default();
 
     if partner_email.is_empty() {
@@ -184,6 +185,14 @@ pub async fn send_mail(
             Err((status, msg)) => return Ok((status, axum::Json(serde_json::json!({ "success": false, "error": msg }))).into_response()),
         };
 
+    if let Some(n) = order_repo::find_payment_notice(&pool, &id).await.log_err()? {
+        if matches!(n.approval_status.as_deref(), Some("PENDING_APPROVAL" | "REJECTED")) {
+            return Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
+                "success": false, "error": "承認前（承認待ち・差戻し）の支払通知書は送信できません。先に承認してください。"
+            }))).into_response());
+        }
+    }
+
     let email_svc = EmailService::new(pool.clone());
 
     // 件名・本文: 送信モーダルで編集済みならそれを使い、無指定ならテンプレートから生成
@@ -239,7 +248,7 @@ pub async fn download_pdf(
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
 
-    let notice = match order_repo::find_payment_notice(&pool, &id).await.ok().flatten() {
+    let notice = match order_repo::find_payment_notice(&pool, &id).await.log_err().ok().flatten() {
         Some(n) => n,
         None => return pdf_error(StatusCode::NOT_FOUND, "支払通知書が見つかりません".into()),
     };
@@ -260,7 +269,7 @@ pub async fn download_invoice_pdf(
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
 
-    let notice = match order_repo::find_payment_notice(&pool, &id).await.ok().flatten() {
+    let notice = match order_repo::find_payment_notice(&pool, &id).await.log_err().ok().flatten() {
         Some(n) => n,
         None => return pdf_error(StatusCode::NOT_FOUND, "支払通知書が見つかりません".into()),
     };
@@ -319,21 +328,21 @@ pub async fn build_payment_notice_pdf_data(
     // 技術者名を取得
     let mut engineer_names: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
     for item in &items {
-        let name = order_repo::find_engineer_name_for_partner_contract(pool, item.partner_contract_id).await.ok().flatten();
+        let name = order_repo::find_engineer_name_for_partner_contract(pool, item.partner_contract_id).await.log_err().ok().flatten();
         if let Some(n) = name {
             engineer_names.insert(item.partner_contract_id, n);
         }
     }
 
-    let company = order_repo::find_company_bank_info(pool).await.ok().flatten();
+    let company = order_repo::find_company_bank_info(pool).await.log_err().ok().flatten();
     let (company_name, bank_name, bank_branch, account_type, account_number, account_name) = company.unwrap_or_default();
 
     // 自社住所等（請求書PDFの宛先表示用）
     let company_detail = crate::infrastructure::repositories::billing_repo::find_company_invoice_info(pool)
-        .await.ok().flatten();
+        .await.log_err().ok().flatten();
 
     let project_name = order_repo::find_project_name_by_purchase_order(pool, &notice.purchase_order_id)
-        .await.ok().flatten();
+        .await.log_err().ok().flatten();
 
     let target_month = notice.target_month.format("%Y年%m月").to_string();
 
@@ -424,7 +433,7 @@ pub async fn generate_partner_invoice_pdf_bytes(
     let pdf_data = build_payment_notice_pdf_data(pool, notice).await
         .map_err(|e| format!("PDFデータ構築エラー: {}", e))?;
     let issuer_row = order_repo::find_partner_invoice_issuer(pool, &notice.partner_id).await
-        .ok().flatten()
+        .log_err().ok().flatten()
         .unwrap_or_else(|| PartnerInvoiceIssuerRow {
             name: pdf_data.partner_name.clone(),
             ..Default::default()
@@ -460,7 +469,7 @@ pub async fn api_delete(
     State(pool): State<PgPool>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let notice = order_repo::find_payment_notice(&pool, &id).await.ok().flatten();
+    let notice = order_repo::find_payment_notice(&pool, &id).await.log_err().ok().flatten();
 
     match notice {
         Some(n) if n.partner_accepted_at.is_none() => {}
@@ -518,13 +527,13 @@ pub async fn api_detail(
     State(pool): State<PgPool>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let notice = order_repo::find_payment_notice(&pool, &id).await.ok().flatten();
+    let notice = order_repo::find_payment_notice(&pool, &id).await.log_err().ok().flatten();
 
     match notice {
         Some(notice) => {
-            let items = order_repo::list_payment_notice_items(&pool, &id).await.unwrap_or_default();
+            let items = order_repo::list_payment_notice_items(&pool, &id).await.log_err().unwrap_or_default();
 
-            let partner_name = order_repo::find_partner_name(&pool, &notice.partner_id).await.unwrap_or_default();
+            let partner_name = order_repo::find_partner_name(&pool, &notice.partner_id).await.log_err().unwrap_or_default();
 
             let target_month_display = notice.target_month.format("%Y年%m月").to_string();
 
@@ -548,5 +557,34 @@ pub async fn api_detail(
             })).into_response()
         }
         None => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+/// POST /api/notices/{id}/approve — 承認（Admin限定、PENDING_APPROVAL/REJECTED→APPROVED）
+pub async fn api_approve(
+    State(pool): State<PgPool>,
+    Path(id): Path<String>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+) -> Result<impl IntoResponse, AppError> {
+    match order_repo::approve_payment_notice(&pool, &id, auth_user.user.id).await {
+        Ok(true) => Ok(axum::Json(serde_json::json!({ "success": true })).into_response()),
+        Ok(false) => Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
+            "success": false, "error": "承認待ち・差戻しの支払通知書のみ承認できます（既に承認済みの可能性があります）"
+        }))).into_response()),
+        Err(e) => Err(AppError::from(e)),
+    }
+}
+
+/// POST /api/notices/{id}/reject — 差戻し（Admin限定、PENDING_APPROVAL/APPROVED→REJECTED）
+pub async fn api_reject(
+    State(pool): State<PgPool>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    match order_repo::reject_payment_notice(&pool, &id).await {
+        Ok(true) => Ok(axum::Json(serde_json::json!({ "success": true })).into_response()),
+        Ok(false) => Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
+            "success": false, "error": "承認待ちまたは承認済みで、パートナー承諾前の支払通知書のみ差戻しできます"
+        }))).into_response()),
+        Err(e) => Err(AppError::from(e)),
     }
 }

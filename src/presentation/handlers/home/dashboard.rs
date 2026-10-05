@@ -34,7 +34,7 @@ const PO_STEPS: &[(&str, &str)] = &[
 
 /// 受注ステップ: 受注 → 勤怠 → 送付 → 請求書 → 請求送付 → 受諾 → 入金
 /// （発注側のNOTICE_CREATED→NOTICE_CONFIRMEDと同じ粒度に揃えたもの。2026-08-18追加）
-const RO_STEPS: &[(&str, &str)] = &[
+pub(crate) const RO_STEPS: &[(&str, &str)] = &[
     ("REGISTERED", "受注"),
     ("REPORT_RECEIVED", "勤怠"),
     ("REPORT_SENT", "送付"),
@@ -853,5 +853,19 @@ mod tests {
         };
         let deadline = ro_step_deadline("REGISTERED", work_end, "", &settings, today);
         assert_eq!(deadline, ymd(2026, 7, 21));
+    }
+}
+
+#[cfg(test)]
+mod ro_steps_contract_tests {
+    use super::RO_STEPS;
+    use crate::domain::models::client_contract::ReceivedOrderStatus;
+
+    /// 画面の工程・状態変更の許可リストが、受注書の状態(ReceivedOrderStatus::ALL)と一致する(B3 の再発防止)
+    #[test]
+    fn dashboard_steps_match_received_order_statuses() {
+        let steps: Vec<&str> = RO_STEPS.iter().map(|(s, _)| *s).collect();
+        let all: Vec<&str> = ReceivedOrderStatus::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(steps, all);
     }
 }

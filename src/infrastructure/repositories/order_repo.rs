@@ -331,7 +331,7 @@ pub async fn delete_purchase_order(pool: &PgPool, order_id: &str) -> Result<()> 
         .bind(order_id)
         .execute(&mut *tx)
         .await?;
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
     Ok(())
 }
 
@@ -758,7 +758,8 @@ pub async fn insert_purchase_order_item<'e, E>(
     fixed_hours: Option<Decimal>,
     deduction_rate: i32,
     overtime_rate: i32,
-    price: i32,
+    // 明細金額（t_purchase_order_item.amount。マイグレーション 047 で price から改名）
+    amount: i32,
 ) -> Result<()>
 where
     E: sqlx::PgExecutor<'e>,
@@ -769,7 +770,7 @@ where
             order_id, partner_contract_id, base_fee, effort,
             actual_hours, settlement_type, lower_limit_hours,
             upper_limit_hours, fixed_hours, deduction_rate,
-            overtime_rate, price, purchase_order_pk
+            overtime_rate, amount, purchase_order_pk
         ) VALUES ($1, $2, $3, $4, 0, $5, $6, $7, $8, $9, $10, $11,
                   (SELECT id FROM t_purchase_order WHERE order_id = $1))
         "#
@@ -784,7 +785,7 @@ where
     .bind(fixed_hours)
     .bind(deduction_rate)
     .bind(overtime_rate)
-    .bind(price)
+    .bind(amount)
     .execute(exec)
     .await?;
     Ok(())
@@ -1164,19 +1165,8 @@ pub async fn copy_order_items(
     Ok(items)
 }
 
-// ── EDI-OASIS注文一覧・PDF生成（2026-07-13追加。P2-3続き:
+// ── PDF一括生成（2026-07-13追加。P2-3続き:
 //    presentation/handlers/home.rs 直書きSQLのRepository層移行）──
-
-/// 指定対象年月で取込済みの受注書client_order_number一覧（EDI-OASIS取込済み判定用）
-pub async fn find_imported_client_order_numbers(pool: &PgPool, target_month: &str) -> Result<Vec<String>> {
-    let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT client_order_number FROM t_received_order WHERE target_month = $1 AND client_order_number IS NOT NULL AND client_order_number != ''"
-    )
-    .bind(target_month)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
-}
 
 /// order_pdfが未生成の注文書一覧（PDF一括生成バッチ用）
 pub async fn list_purchase_orders_without_pdf(pool: &PgPool) -> Result<Vec<PurchaseOrder>> {
@@ -1191,9 +1181,12 @@ pub async fn list_purchase_orders_without_pdf(pool: &PgPool) -> Result<Vec<Purch
 /// 注文書明細（PDF出力用: 技術者名, 基本料金, 稼働率, 金額）
 pub async fn find_order_items_for_pdf(pool: &PgPool, order_id: &str) -> Result<Vec<(String, i64, String, i64)>> {
     let rows: Vec<(String, i64, String, i64)> = sqlx::query_as(
-        "SELECT COALESCE(poi.engineer_name, CONCAT('契約#', poi.partner_contract_id)), \
+        "SELECT COALESCE(e.name, CONCAT('契約#', poi.partner_contract_id)), \
          poi.base_fee::bigint, poi.effort::text, poi.amount::bigint \
-         FROM t_purchase_order_item poi WHERE poi.order_id = $1 ORDER BY poi.id"
+         FROM t_purchase_order_item poi \
+         LEFT JOIN m_partner_contract pc ON pc.id = poi.partner_contract_id \
+         LEFT JOIN m_engineer e ON e.id = pc.engineer_id \
+         WHERE poi.order_id = $1 ORDER BY poi.id"
     )
     .bind(order_id)
     .fetch_all(pool)
@@ -1392,17 +1385,24 @@ pub async fn list_recent_order_items_for_contract(pool: &PgPool, client_contract
     Ok(rows)
 }
 
-/// 顧客契約がロック対象か（紐づく受注書がACCEPTED以降のステータスを持つか）
+/// 受注契約をロックする(編集・削除させない)受注書の状態: 請求済み以降。
+/// 受注書の状態は REGISTERED → REPORT_RECEIVED → REPORT_SENT → INVOICED → INVOICE_SENT → INVOICE_CONFIRMED → PAID の7つ
+/// (+ CANCELLED)。以前は存在しない 'ACCEPTED'(発注書の状態)を使っており、INVOICE_SENT / INVOICE_CONFIRMED が漏れていた。
+pub const CLIENT_CONTRACT_LOCKING_ORDER_STATUSES: [&str; 4] =
+    ["INVOICED", "INVOICE_SENT", "INVOICE_CONFIRMED", "PAID"];
+
+/// 顧客契約がロック対象か（紐づく受注書が請求済み以降のステータスを持つか）
 pub async fn count_locked_orders_for_client_contract(pool: &PgPool, client_contract_id: i64) -> Result<i64> {
     let count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM t_received_order_item roi
         JOIN t_received_order ro ON roi.order_id = ro.id
         WHERE roi.client_contract_id = $1
-          AND ro.status IN ('ACCEPTED', 'INVOICED', 'PAID')
+          AND ro.status = ANY($2)
         "#
     )
     .bind(client_contract_id)
+    .bind(&CLIENT_CONTRACT_LOCKING_ORDER_STATUSES[..])
     .fetch_one(pool)
     .await?;
     Ok(count)
@@ -1837,7 +1837,15 @@ pub async fn count_orders_for_partner(pool: &PgPool, partner_id: &str) -> Result
 
 /// パートナーの稼働報告件数
 pub async fn count_timesheets_for_partner(pool: &PgPool, partner_id: &str) -> Result<i64> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM t_monthly_timesheet WHERE partner_id = $1")
+    // 勤務表（t_monthly_timesheet）に partner_id の列は無い。一覧（list_timesheets_for_partner）と同じ条件で数える
+    let count: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*)
+             FROM t_monthly_timesheet mt
+             JOIN m_client_contract cc ON mt.client_contract_id = cc.id
+             JOIN m_engineer me ON cc.engineer_id = me.id
+             JOIN m_partner_contract pc ON pc.engineer_id = me.id AND pc.is_active = true
+            WHERE pc.partner_id = $1"#
+    )
         .bind(partner_id)
         .fetch_one(pool)
         .await?;
@@ -1979,7 +1987,7 @@ pub async fn delete_payment_notice(pool: &PgPool, notice_id: &str) -> Result<()>
         .bind(notice_id)
         .execute(&mut *tx)
         .await?;
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
     Ok(())
 }
 
@@ -2008,13 +2016,16 @@ pub async fn find_payment_notice_by_uuid(pool: &PgPool, uuid: &uuid::Uuid) -> Re
     Ok(row)
 }
 
-/// システム設定から自社名を取得する（未設定時はデフォルト値）
+/// 会社情報（s_company_info）から自社名を取得する（未設定・空のときはデフォルト値）
+///
+/// 以前は存在しない表 s_system_setting を読んでいて、設定した会社名が使われず、常に既定値になっていた。
 pub async fn find_company_name_setting(pool: &PgPool) -> Result<String> {
     let name: Option<String> = sqlx::query_scalar(
-        "SELECT COALESCE(value, '有限会社マックプランニング') FROM s_system_setting WHERE key = 'COMPANY_NAME'"
+        "SELECT NULLIF(BTRIM(name), '') FROM s_company_info ORDER BY id LIMIT 1"
     )
     .fetch_optional(pool)
-    .await?;
+    .await?
+    .flatten();
     Ok(name.unwrap_or_else(|| "有限会社マックプランニング".into()))
 }
 
@@ -2310,13 +2321,13 @@ pub async fn insert_received_order_item_minimal(
 }
 
 /// 受注書のステータスを更新する（idで検索）
-pub async fn update_received_order_status_by_id(pool: &PgPool, id: i64, status: &str) -> Result<()> {
-    sqlx::query("UPDATE t_received_order SET status = $1, updated_at = NOW() WHERE id = $2")
+pub async fn update_received_order_status_by_id(pool: &PgPool, id: i64, status: &str) -> Result<u64> {
+    let result = sqlx::query("UPDATE t_received_order SET status = $1, updated_at = NOW() WHERE id = $2")
         .bind(status)
         .bind(id)
         .execute(pool)
         .await?;
-    Ok(())
+    Ok(result.rows_affected())
 }
 
 /// 受注書を取得する
@@ -2385,6 +2396,8 @@ pub async fn list_contract_link_candidates(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutoLinkOutcome {
     Linked { contract_id: i64 },
+    /// 契約が無かったので、注文書の内容から契約を作って紐付けた（注文書が正本。契約は便宜的な入れ物）
+    CreatedContract { contract_id: i64 },
     AlreadyLinked { contract_id: i64 },
     NoMatch,
     Ambiguous { count: i64 },
@@ -2436,7 +2449,13 @@ pub async fn try_auto_link_received_order_contract(
     .await?;
 
     match ids.as_slice() {
-        [] => Ok(AutoLinkOutcome::NoMatch),
+        [] => {
+            // 契約が無い。案件と技術者が一意に決まれば、注文書の内容から契約を作って紐付ける
+            match create_contract_from_received_order(pool, received_order_id, None, None).await? {
+                Some(contract_id) => Ok(AutoLinkOutcome::CreatedContract { contract_id }),
+                None => Ok(AutoLinkOutcome::NoMatch),
+            }
+        }
         [contract_id] => {
             link_received_order_to_contract(pool, received_order_id, *contract_id).await?;
             Ok(AutoLinkOutcome::Linked {
@@ -2449,11 +2468,129 @@ pub async fn try_auto_link_received_order_contract(
     }
 }
 
+/// 注文書の内容から受注契約を作り、その注文書に紐付ける。
+///
+/// 請求は注文書が正本で、契約は注文書を扱うための便宜的な入れ物（稼働報告が契約に結びつく仕組みのため、
+/// 契約書の無いクライアントの注文書でも、契約の行が1つ要る）。
+/// 案件（`project_id`）と技術者（`engineer_id`）は、指定が無ければ、注文書から一意に決まるときだけ補う。
+/// 決まらないとき、同じ開始日の契約がすでにあるときは、何も作らず `None` を返す（手動の紐付けに委ねる）。
+pub async fn create_contract_from_received_order(
+    pool: &PgPool,
+    received_order_id: i64,
+    project_id: Option<&str>,
+    engineer_id: Option<i64>,
+) -> Result<Option<i64>> {
+    // 案件: 指定があればそれ、無ければ「同じクライアントで、案件名か別名が一致」するものが1件のときだけ
+    let project_id: Option<String> = match project_id {
+        Some(p) => Some(p.to_string()),
+        None => {
+            let ids: Vec<String> = sqlx::query_scalar(
+                r#"
+                SELECT pr.project_id
+                  FROM t_received_order ro
+                  JOIN m_project pr ON pr.client_id = ro.client_id AND pr.is_active
+                 WHERE ro.id = $1
+                   AND (pr.name = ro.project_name
+                        OR (NULLIF(BTRIM(COALESCE(pr.edi_project_alias, '')), '') IS NOT NULL
+                            AND BTRIM(pr.edi_project_alias) = BTRIM(ro.project_name)))
+                "#,
+            )
+            .bind(received_order_id)
+            .fetch_all(pool)
+            .await?;
+            match ids.as_slice() {
+                [one] => Some(one.clone()),
+                _ => None,
+            }
+        }
+    };
+    let Some(project_id) = project_id else { return Ok(None) };
+
+    // 技術者: 指定、注文書の技術者、明細の氏名（空白を除いて比較）の順。1人に決まるときだけ
+    let engineer_id: Option<i64> = match engineer_id {
+        Some(e) => Some(e),
+        None => {
+            let from_order: Option<Option<i64>> =
+                sqlx::query_scalar("SELECT engineer_id FROM t_received_order WHERE id = $1")
+                    .bind(received_order_id)
+                    .fetch_optional(pool)
+                    .await?;
+            match from_order.flatten() {
+                Some(e) => Some(e),
+                None => {
+                    let ids: Vec<i64> = sqlx::query_scalar(
+                        r#"
+                        SELECT DISTINCT e.id
+                          FROM t_received_order_item roi
+                          JOIN m_engineer e
+                            ON REPLACE(REPLACE(e.name, ' ', ''), '　', '')
+                             = REPLACE(REPLACE(roi.engineer_name, ' ', ''), '　', '')
+                         WHERE roi.order_id = $1
+                           AND NULLIF(BTRIM(roi.engineer_name), '') IS NOT NULL
+                           AND e.is_active
+                        "#,
+                    )
+                    .bind(received_order_id)
+                    .fetch_all(pool)
+                    .await?;
+                    match ids.as_slice() {
+                        [one] => Some(*one),
+                        _ => None,
+                    }
+                }
+            }
+        }
+    };
+    let Some(engineer_id) = engineer_id else { return Ok(None) };
+
+    let mut tx = pool.begin().await?;
+    // 期間は、注文書の作業期間（対象月を含むように広げる）。条件は、注文書の最初の明細からコピーする
+    let contract_id: Option<i64> = sqlx::query_scalar(
+        r#"
+        INSERT INTO m_client_contract (
+            project_id, engineer_id, start_date, end_date,
+            settlement_type, lower_limit_hours, upper_limit_hours, fixed_hours,
+            base_rate, deduction_rate, overtime_rate, effort, mid_month_rule, remarks
+        )
+        SELECT $2, $3,
+               LEAST(ro.work_start, ro.target_month),
+               GREATEST(ro.work_end, ro.target_month),
+               COALESCE(NULLIF(roi.settlement_type, ''), 'RANGE'),
+               COALESCE(roi.lower_limit_hours, 140.0), COALESCE(roi.upper_limit_hours, 180.0), roi.fixed_hours,
+               COALESCE(roi.unit_price, 0), COALESCE(roi.deduction_rate, 0), COALESCE(roi.overtime_rate, 0),
+               COALESCE(roi.man_month, 1.00), COALESCE(NULLIF(roi.mid_month_rule, ''), 'FULL'),
+               '注文書 ' || ro.received_order_no || ' から自動作成'
+          FROM t_received_order ro
+          LEFT JOIN LATERAL (
+               SELECT * FROM t_received_order_item WHERE order_id = ro.id ORDER BY id LIMIT 1
+          ) roi ON true
+         WHERE ro.id = $1
+        ON CONFLICT (project_id, engineer_id, start_date) DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(received_order_id)
+    .bind(&project_id)
+    .bind(engineer_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
+
+    let Some(contract_id) = contract_id else { return Ok(None) };
+    link_received_order_to_contract(pool, received_order_id, contract_id).await?;
+    Ok(Some(contract_id))
+}
+
 pub fn log_auto_link_outcome(context: &str, order_id: i64, outcome: &AutoLinkOutcome) {
     match outcome {
         AutoLinkOutcome::Linked { contract_id } => {
             tracing::info!(
                 "[{context}] 受注契約を自動紐付け: order_id={order_id}, contract_id={contract_id}"
+            );
+        }
+        AutoLinkOutcome::CreatedContract { contract_id } => {
+            tracing::info!(
+                "[{context}] 契約が無いため、注文書の内容から受注契約を作成して紐付け: order_id={order_id}, contract_id={contract_id}"
             );
         }
         AutoLinkOutcome::AlreadyLinked { .. } => {}
@@ -2532,7 +2669,7 @@ pub async fn link_received_order_to_contract(
     .execute(&mut *tx)
     .await?;
 
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
     Ok(())
 }
 
@@ -2712,7 +2849,7 @@ pub async fn delete_received_order(pool: &PgPool, id: i64) -> Result<()> {
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
     Ok(())
 }
 
@@ -2938,6 +3075,31 @@ pub async fn find_payment_notice(pool: &PgPool, notice_id: &str) -> Result<Optio
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+/// 承認待ち・差戻し(REJECTED)の支払通知書を承認済み(APPROVED)にする。承認待ちでなければfalse。
+pub async fn approve_payment_notice(pool: &PgPool, notice_id: &str, approved_by_id: i64) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE t_payment_notice SET approval_status = 'APPROVED', approved_by_id = $1, approved_at = NOW() \
+         WHERE notice_id = $2 AND approval_status IN ('PENDING_APPROVAL', 'REJECTED')"
+    )
+    .bind(approved_by_id)
+    .bind(notice_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 承認待ち・承認済みの支払通知書を差戻し(REJECTED)にする（パートナー承諾前のみ）。
+pub async fn reject_payment_notice(pool: &PgPool, notice_id: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE t_payment_notice SET approval_status = 'REJECTED', approved_by_id = NULL, approved_at = NULL \
+         WHERE notice_id = $1 AND approval_status IN ('PENDING_APPROVAL', 'APPROVED') AND partner_accepted_at IS NULL"
+    )
+    .bind(notice_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// パートナー名を取得する
@@ -3317,5 +3479,34 @@ mod report_received_advance_tests {
         assert!(!is_pre_report_received_po_status("PAID"));
         assert!(!is_pre_report_received_po_status("CANCELLED"));
         assert!(!is_pre_report_received_po_status(""));
+    }
+}
+
+#[cfg(test)]
+mod client_contract_lock_tests {
+    use super::CLIENT_CONTRACT_LOCKING_ORDER_STATUSES;
+
+    /// 受注書の状態として実在する値(dashboard の状態表と一致)
+    const ALL_ORDER_STATUSES: [&str; 8] = [
+        "REGISTERED", "REPORT_RECEIVED", "REPORT_SENT", "INVOICED",
+        "INVOICE_SENT", "INVOICE_CONFIRMED", "PAID", "CANCELLED",
+    ];
+
+    #[test]
+    fn locking_statuses_are_real_order_statuses() {
+        for s in CLIENT_CONTRACT_LOCKING_ORDER_STATUSES {
+            assert!(ALL_ORDER_STATUSES.contains(&s), "存在しない状態をロック条件に使っている: {s}");
+        }
+        assert!(!CLIENT_CONTRACT_LOCKING_ORDER_STATUSES.contains(&"ACCEPTED"), "ACCEPTED は発注書の状態");
+    }
+
+    #[test]
+    fn contract_is_locked_from_invoiced_onward_and_not_before() {
+        for s in ["INVOICED", "INVOICE_SENT", "INVOICE_CONFIRMED", "PAID"] {
+            assert!(CLIENT_CONTRACT_LOCKING_ORDER_STATUSES.contains(&s), "{s} はロックすべき");
+        }
+        for s in ["REGISTERED", "REPORT_RECEIVED", "REPORT_SENT", "CANCELLED"] {
+            assert!(!CLIENT_CONTRACT_LOCKING_ORDER_STATUSES.contains(&s), "{s} はロックしない(従来どおり)");
+        }
     }
 }

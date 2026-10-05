@@ -37,12 +37,15 @@ pub struct ProjectListRow {
     pub client_name: String,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
+    pub commercial_flow: Option<String>,
+    pub is_test: bool,
 }
 
 pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectListRow>> {
     let rows = sqlx::query_as::<_, ProjectListRow>(
         r#"
-        SELECT p.project_id, p.name, p.client_id, c.name AS client_name, p.is_active, p.created_at
+        SELECT p.project_id, p.name, p.client_id, c.name AS client_name, p.is_active, p.created_at,
+               p.commercial_flow, p.is_test
         FROM m_project p
         JOIN m_client c ON p.client_id = c.id
         ORDER BY p.created_at DESC
@@ -67,6 +70,8 @@ pub struct ProjectDetailRow {
     pub report_deadline_holiday_rule: Option<String>,
     pub report_request_day: Option<i32>,
     pub created_at: DateTime<Utc>,
+    pub commercial_flow: Option<String>,
+    pub is_test: bool,
 }
 
 pub async fn find_project_detail(pool: &PgPool, project_id: &str) -> Result<Option<ProjectDetailRow>> {
@@ -75,7 +80,8 @@ pub async fn find_project_detail(pool: &PgPool, project_id: &str) -> Result<Opti
         SELECT p.project_id, p.client_id, c.name AS client_name, p.name, p.description, p.is_active,
                COALESCE(p.edi_project_alias, '') AS edi_project_alias,
                p.report_deadline_type, p.report_deadline_value, p.report_deadline_holiday_rule,
-               p.report_request_day, p.created_at
+               p.report_request_day, p.created_at,
+               p.commercial_flow, p.is_test
         FROM m_project p
         JOIN m_client c ON p.client_id = c.id
         WHERE p.project_id = $1
@@ -154,9 +160,12 @@ pub struct ProjectUpdateInput {
     pub report_deadline_value: Option<i32>,
     pub report_deadline_holiday_rule: Option<String>,
     pub report_request_day: Option<i32>,
+    pub commercial_flow: Option<String>,
+    pub is_test: Option<bool>,
 }
 
 /// 案件情報を更新する（m_project に updated_at カラムは無いため更新しない）。更新件数を返す。
+/// commercial_flow と is_test は任意項目：None なら既存値を変えない。
 pub async fn update_project(pool: &PgPool, project_id: &str, input: &ProjectUpdateInput) -> Result<u64> {
     let result = sqlx::query(
         r#"
@@ -164,7 +173,9 @@ pub async fn update_project(pool: &PgPool, project_id: &str, input: &ProjectUpda
             client_id = $1, name = $2, description = $3, is_active = $4,
             edi_project_alias = $5,
             report_deadline_type = $6, report_deadline_value = $7,
-            report_deadline_holiday_rule = $8, report_request_day = $9
+            report_deadline_holiday_rule = $8, report_request_day = $9,
+            commercial_flow = COALESCE($11, commercial_flow),
+            is_test = COALESCE($12, is_test)
         WHERE project_id = $10
         "#
     )
@@ -178,6 +189,8 @@ pub async fn update_project(pool: &PgPool, project_id: &str, input: &ProjectUpda
     .bind(&input.report_deadline_holiday_rule)
     .bind(input.report_request_day)
     .bind(project_id)
+    .bind(&input.commercial_flow)
+    .bind(input.is_test)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
@@ -228,7 +241,7 @@ pub enum WorkLocationRef {
 
 /// トランザクション内でengineerを解決する。Newなら m_engineer にINSERTしてidを返し、
 /// Existingならそのまま返す。クライアント契約・パートナー契約の両ステップから呼ばれる共通関数。
-async fn resolve_engineer(tx: &mut Transaction<'_, Postgres>, r: &EngineerRef) -> Result<i64> {
+pub(crate) async fn resolve_engineer(tx: &mut Transaction<'_, Postgres>, r: &EngineerRef) -> Result<i64> {
     match r {
         EngineerRef::Existing { id } => Ok(*id),
         EngineerRef::New { name, name_kana, affiliation_type, partner_id, email } => {
@@ -299,6 +312,8 @@ pub struct WizardProjectInput {
     pub report_deadline_value: Option<i32>,
     pub report_deadline_holiday_rule: Option<String>,
     pub report_request_day: Option<i32>,
+    pub commercial_flow: Option<String>,
+    pub is_test: Option<bool>,
 }
 
 /// クライアント契約ステップはスキップ可能(2026-07-31確定)。
@@ -356,11 +371,114 @@ pub struct WizardPartnerContractInput {
 
 pub struct WizardInput {
     pub project: WizardProjectInput,
-    pub client_contract: Option<WizardClientContractInput>,
+    /// 受注契約（0件以上。技術者ごとに1件）
+    pub client_contracts: Vec<WizardClientContractInput>,
     pub partner_contracts: Vec<WizardPartnerContractInput>,
 }
 
-/// 案件作成ウィザードのメイン処理。1トランザクション内で案件・クライアント契約(任意)・
+/// 受注契約を1件作る(トランザクション内)。案件ウィザードとアサイン作成で共通。作った契約のIDを返す
+pub(crate) async fn insert_client_contract(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: &str,
+    engineer_id: i64,
+    cc: &WizardClientContractInput,
+) -> std::result::Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO m_client_contract (
+            project_id, engineer_id, start_date, end_date,
+            settlement_type, base_rate, effort,
+            lower_limit_hours, upper_limit_hours, fixed_hours,
+            deduction_rate, overtime_rate,
+            mid_month_rule, billing_timing, payment_terms,
+            report_deadline_days_before, currency, remarks, is_active
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, true)
+        RETURNING id
+        "#
+    )
+    .bind(project_id)
+    .bind(engineer_id)
+    .bind(cc.start_date)
+    .bind(cc.end_date)
+    .bind(&cc.settlement_type)
+    .bind(cc.base_rate)
+    .bind(cc.effort)
+    .bind(cc.lower_limit_hours)
+    .bind(cc.upper_limit_hours)
+    .bind(cc.fixed_hours)
+    .bind(cc.deduction_rate)
+    .bind(cc.overtime_rate)
+    .bind(cc.mid_month_rule.as_deref().unwrap_or("FULL_MONTH"))
+    .bind(cc.billing_timing.as_deref().unwrap_or("MONTHLY"))
+    .bind(cc.payment_terms.as_deref().unwrap_or(""))
+    .bind(cc.report_deadline_days_before.unwrap_or(5))
+    .bind(cc.currency.as_deref().unwrap_or("JPY"))
+    .bind(cc.remarks.as_deref().unwrap_or(""))
+    .fetch_one(&mut **tx)
+    .await
+}
+
+/// 発注契約(パートナー契約)を1件作る(トランザクション内)。案件ウィザードとアサイン作成で共通。作った契約のIDを返す
+pub(crate) async fn insert_partner_contract(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: &str,
+    engineer_id: i64,
+    work_location_name: &str,
+    pc: &WizardPartnerContractInput,
+) -> std::result::Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        INSERT INTO m_partner_contract (
+            project_id, engineer_id, partner_id, start_date, end_date,
+            settlement_type, lower_limit_hours, upper_limit_hours,
+            fixed_hours, base_rate, deduction_rate, overtime_rate,
+            effort, mid_month_rule,
+            "甲_責任者", "甲_担当者", "乙_責任者", "乙_担当者", "作業責任者",
+            deliverable_text, payment_condition, contract_items, work_location, remarks,
+            order_create_deadline_day, order_approve_deadline_days_before,
+            report_upload_deadline_days_before, invoice_create_deadline_day,
+            invoice_approve_deadline_day,
+            is_active
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                  $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
+                  $25, $26, $27, $28, $29, true)
+        RETURNING id
+        "#
+    )
+    .bind(project_id)
+    .bind(engineer_id)
+    .bind(&pc.partner_id)
+    .bind(pc.start_date)
+    .bind(pc.end_date)
+    .bind(&pc.settlement_type)
+    .bind(pc.lower_limit_hours)
+    .bind(pc.upper_limit_hours)
+    .bind(pc.fixed_hours)
+    .bind(pc.base_rate)
+    .bind(pc.deduction_rate)
+    .bind(pc.overtime_rate)
+    .bind(pc.effort)
+    .bind(pc.mid_month_rule.as_deref().unwrap_or("FULL_MONTH"))
+    .bind(pc.kou_responsible.as_deref().unwrap_or(""))
+    .bind(pc.kou_contact.as_deref().unwrap_or(""))
+    .bind(pc.otsu_responsible.as_deref().unwrap_or(""))
+    .bind(pc.otsu_contact.as_deref().unwrap_or(""))
+    .bind(pc.work_responsible.as_deref().unwrap_or(""))
+    .bind(pc.deliverable_text.as_deref().unwrap_or(""))
+    .bind(pc.payment_condition.as_deref().unwrap_or(""))
+    .bind(pc.contract_items.as_deref().unwrap_or(""))
+    .bind(work_location_name)
+    .bind(pc.remarks.as_deref().unwrap_or(""))
+    .bind(pc.order_create_deadline_day.unwrap_or(15))
+    .bind(pc.order_approve_deadline_days_before.unwrap_or(0))
+    .bind(pc.report_upload_deadline_days_before.unwrap_or(2))
+    .bind(pc.invoice_create_deadline_day.unwrap_or(1))
+    .bind(pc.invoice_approve_deadline_day.unwrap_or(10))
+    .fetch_one(&mut **tx)
+    .await
+}
+
+/// 案件作成ウィザードのメイン処理。1トランザクション内で案件・クライアント契約(0件以上)・
 /// パートナー契約(0件以上)をまとめて作成する。途中で何か失敗したら全体をROLLBACKし、
 /// どのステップで失敗したかが分かるメッセージを返す。作成された案件IDを返す。
 pub async fn create_project_wizard(pool: &PgPool, input: WizardInput) -> Result<String> {
@@ -372,8 +490,9 @@ pub async fn create_project_wizard(pool: &PgPool, input: WizardInput) -> Result<
         r#"
         INSERT INTO m_project (
             project_id, client_id, name, description, is_active,
-            report_deadline_type, report_deadline_value, report_deadline_holiday_rule, report_request_day
-        ) VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8)
+            report_deadline_type, report_deadline_value, report_deadline_holiday_rule, report_request_day,
+            commercial_flow, is_test
+        ) VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, COALESCE($10, false))
         "#
     )
     .bind(&project_id)
@@ -384,104 +503,29 @@ pub async fn create_project_wizard(pool: &PgPool, input: WizardInput) -> Result<
     .bind(input.project.report_deadline_value)
     .bind(&input.project.report_deadline_holiday_rule)
     .bind(input.project.report_request_day)
+    .bind(&input.project.commercial_flow)
+    .bind(input.project.is_test)
     .execute(&mut *tx)
     .await
     .context("案件の作成に失敗しました")?;
 
-    if let Some(cc) = &input.client_contract {
+    for (i, cc) in input.client_contracts.iter().enumerate() {
         let engineer_id = resolve_engineer(&mut tx, &cc.engineer).await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO m_client_contract (
-                project_id, engineer_id, start_date, end_date,
-                settlement_type, base_rate, effort,
-                lower_limit_hours, upper_limit_hours, fixed_hours,
-                deduction_rate, overtime_rate,
-                mid_month_rule, billing_timing, payment_terms,
-                report_deadline_days_before, currency, remarks, is_active
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, true)
-            "#
-        )
-        .bind(&project_id)
-        .bind(engineer_id)
-        .bind(cc.start_date)
-        .bind(cc.end_date)
-        .bind(&cc.settlement_type)
-        .bind(cc.base_rate)
-        .bind(cc.effort)
-        .bind(cc.lower_limit_hours)
-        .bind(cc.upper_limit_hours)
-        .bind(cc.fixed_hours)
-        .bind(cc.deduction_rate)
-        .bind(cc.overtime_rate)
-        .bind(cc.mid_month_rule.as_deref().unwrap_or("FULL_MONTH"))
-        .bind(cc.billing_timing.as_deref().unwrap_or("MONTHLY"))
-        .bind(cc.payment_terms.as_deref().unwrap_or(""))
-        .bind(cc.report_deadline_days_before.unwrap_or(5))
-        .bind(cc.currency.as_deref().unwrap_or("JPY"))
-        .bind(cc.remarks.as_deref().unwrap_or(""))
-        .execute(&mut *tx)
-        .await
-        .context("クライアント契約の作成に失敗しました")?;
+        insert_client_contract(&mut tx, &project_id, engineer_id, cc)
+            .await
+            .with_context(|| format!("受注契約 #{} の作成に失敗しました（同じ技術者・開始日の契約が重複していないか確認してください）", i + 1))?;
     }
 
     for pc in &input.partner_contracts {
         let engineer_id = resolve_engineer(&mut tx, &pc.engineer).await?;
         let work_location_name = resolve_work_location(&mut tx, &pc.work_location).await?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO m_partner_contract (
-                project_id, engineer_id, partner_id, start_date, end_date,
-                settlement_type, lower_limit_hours, upper_limit_hours,
-                fixed_hours, base_rate, deduction_rate, overtime_rate,
-                effort, mid_month_rule,
-                "甲_責任者", "甲_担当者", "乙_責任者", "乙_担当者", "作業責任者",
-                deliverable_text, payment_condition, contract_items, work_location, remarks,
-                order_create_deadline_day, order_approve_deadline_days_before,
-                report_upload_deadline_days_before, invoice_create_deadline_day,
-                invoice_approve_deadline_day,
-                is_active
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                      $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                      $25, $26, $27, $28, $29, true)
-            "#
-        )
-        .bind(&project_id)
-        .bind(engineer_id)
-        .bind(&pc.partner_id)
-        .bind(pc.start_date)
-        .bind(pc.end_date)
-        .bind(&pc.settlement_type)
-        .bind(pc.lower_limit_hours)
-        .bind(pc.upper_limit_hours)
-        .bind(pc.fixed_hours)
-        .bind(pc.base_rate)
-        .bind(pc.deduction_rate)
-        .bind(pc.overtime_rate)
-        .bind(pc.effort)
-        .bind(pc.mid_month_rule.as_deref().unwrap_or("FULL_MONTH"))
-        .bind(pc.kou_responsible.as_deref().unwrap_or(""))
-        .bind(pc.kou_contact.as_deref().unwrap_or(""))
-        .bind(pc.otsu_responsible.as_deref().unwrap_or(""))
-        .bind(pc.otsu_contact.as_deref().unwrap_or(""))
-        .bind(pc.work_responsible.as_deref().unwrap_or(""))
-        .bind(pc.deliverable_text.as_deref().unwrap_or(""))
-        .bind(pc.payment_condition.as_deref().unwrap_or(""))
-        .bind(pc.contract_items.as_deref().unwrap_or(""))
-        .bind(&work_location_name)
-        .bind(pc.remarks.as_deref().unwrap_or(""))
-        .bind(pc.order_create_deadline_day.unwrap_or(15))
-        .bind(pc.order_approve_deadline_days_before.unwrap_or(0))
-        .bind(pc.report_upload_deadline_days_before.unwrap_or(2))
-        .bind(pc.invoice_create_deadline_day.unwrap_or(1))
-        .bind(pc.invoice_approve_deadline_day.unwrap_or(10))
-        .execute(&mut *tx)
-        .await
-        .context("パートナー契約の作成に失敗しました")?;
+        insert_partner_contract(&mut tx, &project_id, engineer_id, &work_location_name, pc)
+            .await
+            .context("パートナー契約の作成に失敗しました")?;
     }
 
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
     Ok(project_id)
 }

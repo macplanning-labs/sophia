@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { fetchEmployeeDetail, apiPut, apiDelete } from "@/lib/api";
 import { useDynamicId } from "@/lib/utils";
 import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
@@ -12,6 +12,8 @@ import { FormModal, FormField, FormInput, FormSelect } from "@/components/ui/for
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { useCurrentUser } from "@/lib/useCurrentUser";
+import { useMounted } from "@/lib/useMounted";
 
 const EMPLOYMENT_TYPES = [
   { value: "REGULAR", label: "正社員" },
@@ -19,6 +21,25 @@ const EMPLOYMENT_TYPES = [
   { value: "PART_TIME", label: "パートタイム" },
   { value: "TEMPORARY", label: "派遣" },
 ];
+
+const toForm = (d: Awaited<ReturnType<typeof fetchEmployeeDetail>>) => ({
+  employee_id: d.employee_id ?? "",
+  last_name: d.last_name ?? "",
+  first_name: d.first_name ?? "",
+  last_name_kana: d.last_name_kana ?? "",
+  first_name_kana: d.first_name_kana ?? "",
+  employment_type: d.employment_type ?? "REGULAR",
+  email: d.email ?? "",
+  birth_date: d.birth_date ?? "",
+  hire_date: d.hire_date ?? "",
+  base_salary: String(d.base_salary ?? ""),
+  position_allowance: String(d.position_allowance ?? ""),
+  housing_allowance: String(d.housing_allowance ?? ""),
+  commuting_allowance: String(d.commuting_allowance ?? ""),
+  standard_monthly_hours: String(d.standard_monthly_hours ?? ""),
+  standard_remuneration: String(d.standard_remuneration ?? ""),
+  dependents_count: String(d.dependents_count ?? ""),
+});
 
 interface Props {
   /** When opened from list modal; falls back to useDynamicId() */
@@ -32,6 +53,9 @@ export default function EmployeeDetailPage({ id: idProp, embedded = false, onDel
   const id = idProp || dynamicId;
   const router = useRouter();
   const qc = useQueryClient();
+  const { isAdmin, isLoading: userLoading } = useCurrentUser();
+  const mounted = useMounted();
+  const showAdmin = isAdmin && mounted;
 
   const { data, isLoading } = useQuery({
     queryKey: ["employees", id],
@@ -75,32 +99,12 @@ export default function EmployeeDetailPage({ id: idProp, embedded = false, onDel
     dependents_count: "",
   });
 
-  useEffect(() => {
-    if (data && editOpen) {
-      setForm({
-        employee_id: data.employee_id ?? "",
-        last_name: data.last_name ?? "",
-        first_name: data.first_name ?? "",
-        last_name_kana: data.last_name_kana ?? "",
-        first_name_kana: data.first_name_kana ?? "",
-        employment_type: data.employment_type ?? "REGULAR",
-        email: data.email ?? "",
-        birth_date: data.birth_date ?? "",
-        hire_date: data.hire_date ?? "",
-        base_salary: String(data.base_salary ?? ""),
-        position_allowance: String(data.position_allowance ?? ""),
-        housing_allowance: String(data.housing_allowance ?? ""),
-        commuting_allowance: String(data.commuting_allowance ?? ""),
-        standard_monthly_hours: String(data.standard_monthly_hours ?? ""),
-        standard_remuneration: String(data.standard_remuneration ?? ""),
-        dependents_count: String(data.dependents_count ?? ""),
-      });
-    }
-  }, [data, editOpen]);
-
   const updateMutation = useMutation({
-    mutationFn: (payload: typeof form) =>
-      apiPut(`/api/v1/employees/${id}`, {
+    mutationFn: (payload: typeof form) => {
+      if (!payload.employee_id.trim()) {
+        throw new Error("社員コードは必須です");
+      }
+      return apiPut(`/api/v1/employees/${id}`, {
         ...payload,
         base_salary: Number(payload.base_salary) || 0,
         position_allowance: Number(payload.position_allowance) || 0,
@@ -109,7 +113,8 @@ export default function EmployeeDetailPage({ id: idProp, embedded = false, onDel
         standard_monthly_hours: Number(payload.standard_monthly_hours) || 160,
         standard_remuneration: Number(payload.standard_remuneration) || 0,
         dependents_count: Number(payload.dependents_count) || 0,
-      }),
+      });
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["employees", id] });
       qc.invalidateQueries({ queryKey: ["employees"] });
@@ -125,25 +130,27 @@ export default function EmployeeDetailPage({ id: idProp, embedded = false, onDel
       {data && (
         <>
           {/* アクションバー */}
-          <div className="flex items-center gap-2 mb-4 p-3 bg-card border border-border rounded-lg">
-            <Button
-              variant="outline" size="sm"
-              className="border-border text-foreground gap-1"
-              onClick={() => setEditOpen(true)}
-            >
-              <Pencil className="w-3.5 h-3.5" /> 編集
-            </Button>
-            <Button
-              variant="outline" size="sm"
-              className="border-red-700/50 text-red-400 hover:text-red-300 gap-1 ml-auto"
-              onClick={() => setDeleteOpen(true)}
-            >
-              <Trash2 className="w-3.5 h-3.5" /> 削除
-            </Button>
-          </div>
+          {showAdmin && !userLoading && (
+            <div className="flex items-center gap-2 mb-4 p-3 bg-card border border-border rounded-lg">
+              <Button
+                variant="outline" size="sm"
+                className="border-border text-foreground gap-1"
+                onClick={() => { if (data) setForm(toForm(data)); setEditOpen(true); }}
+              >
+                <Pencil className="w-3.5 h-3.5" /> 編集
+              </Button>
+              <Button
+                variant="outline" size="sm"
+                className="border-red-700/50 text-red-400 hover:text-red-300 gap-1 ml-auto"
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2 className="w-3.5 h-3.5" /> 削除
+              </Button>
+            </div>
+          )}
 
           <FieldGrid>
-            <Field label="社員コード" value={data.employee_id} />
+            <Field label="社員コード" value={!data.employee_id?.trim() ? "未設定" : data.employee_id} />
             <Field label="氏名" value={`${data.last_name} ${data.first_name}`} />
             <Field label="フリガナ" value={`${data.last_name_kana ?? ""} ${data.first_name_kana ?? ""}`} />
             <Field label="在籍状態" value={
@@ -171,14 +178,15 @@ export default function EmployeeDetailPage({ id: idProp, embedded = false, onDel
           </FieldGrid>
 
           {/* 編集モーダル */}
-          <FormModal
-            open={editOpen}
-            title={`社員 #${id} 編集`}
-            size="lg"
-            loading={updateMutation.isPending}
-            onSubmit={() => updateMutation.mutate(form)}
-            onClose={() => setEditOpen(false)}
-          >
+          {showAdmin && (
+            <FormModal
+              open={editOpen}
+              title={`社員 #${id} 編集`}
+              size="lg"
+              loading={updateMutation.isPending}
+              onSubmit={() => updateMutation.mutate(form)}
+              onClose={() => setEditOpen(false)}
+            >
             <div className="grid grid-cols-3 gap-4">
               <FormField label="社員コード" required>
                 <FormInput value={form.employee_id} onChange={(e) => setField("employee_id", e.target.value)} />
@@ -240,19 +248,22 @@ export default function EmployeeDetailPage({ id: idProp, embedded = false, onDel
             {updateMutation.isError && (
               <p className="text-sm text-red-400">エラー: {(updateMutation.error as Error).message}</p>
             )}
-          </FormModal>
+            </FormModal>
+          )}
 
           {/* 削除確認ダイアログ */}
-          <ConfirmDialog
-            open={deleteOpen}
-            title="社員を削除"
-            description={`社員 ${data.last_name} ${data.first_name}（${data.employee_id}）を退職扱いにしてよろしいですか？`}
-            confirmLabel="削除する"
-            variant="danger"
-            loading={deleteMutation.isPending}
-            onConfirm={() => deleteMutation.mutate()}
-            onCancel={() => setDeleteOpen(false)}
-          />
+          {showAdmin && (
+            <ConfirmDialog
+              open={deleteOpen}
+              title="社員を削除"
+              description={`社員 ${data.last_name} ${data.first_name}（${data.employee_id}）を退職扱いにしてよろしいですか？`}
+              confirmLabel="削除する"
+              variant="danger"
+              loading={deleteMutation.isPending}
+              onConfirm={() => deleteMutation.mutate()}
+              onCancel={() => setDeleteOpen(false)}
+            />
+          )}
         </>
       )}
     </DetailLayout>

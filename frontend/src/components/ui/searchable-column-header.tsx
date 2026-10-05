@@ -69,8 +69,6 @@ export function SearchableColumnHeader({
   };
 
   const selected = options.find((o) => o.value === value);
-  // value="" の「すべて」も options にあればそのラベルを表示する
-  const display = selected?.label ?? (!value && allowClear ? allLabel : label);
 
   const filtered = options.filter((o) => {
     if (!query) return true;
@@ -85,7 +83,11 @@ export function SearchableColumnHeader({
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          open ? setOpen(false) : openPicker();
+          if (open) {
+            setOpen(false);
+          } else {
+            openPicker();
+          }
         }}
         className={cn(
           "inline-flex items-center gap-1 hover:text-foreground transition-colors",
@@ -94,7 +96,14 @@ export function SearchableColumnHeader({
           className
         )}
       >
-        <span className="truncate max-w-[10rem]">{display}</span>
+        <span className="truncate max-w-[10rem]">
+          {label}
+          {selected && selected.value !== "" && (
+            <span className="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-normal">
+              {selected.label}
+            </span>
+          )}
+        </span>
         <ChevronDown className={cn("w-3 h-3 shrink-0 transition-transform", open && "rotate-180")} />
       </button>
 

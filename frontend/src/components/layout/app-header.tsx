@@ -15,14 +15,18 @@ import {
   Calculator,
   UserCircle,
   ReceiptText,
+  Receipt,
   Users,
   Globe,
+  Building2,
   type LucideIcon,
 } from "lucide-react";
 import { NotificationBell } from "@/components/layout/notification-bell";
+import { MonthSwitcher } from "@/components/layout/month-switcher";
+import { CommandButton } from "@/components/layout/command-button";
+import { AccountMenu } from "@/components/layout/account-menu";
 import { resolvePageMeta, type LucideIconName } from "@/lib/page-titles";
-
-const HIDDEN_PATHS = ["/login", "/mfa", "/portal", "/upload", "/invite", "/token"];
+import { isChromeHidden } from "@/lib/layout-paths";
 
 const LUCIDE_MAP: Record<LucideIconName, LucideIcon> = {
   Gauge,
@@ -38,14 +42,16 @@ const LUCIDE_MAP: Record<LucideIconName, LucideIcon> = {
   Calculator,
   UserCircle,
   ReceiptText,
+  Receipt,
   Users,
   Globe,
+  Building2,
 };
 
-/** 全ページ共通ヘッダー。左にルート連動タイトル（アイコン・説明付き）、右に通知ベル。 */
+/** 全ページ共通ヘッダー。左にルート連動タイトル（アイコン・説明付き）、右に月切替・⌘K・通知ベル・アカウントメニュー。 */
 export function AppHeader() {
   const pathname = usePathname();
-  if (HIDDEN_PATHS.some((p) => pathname.startsWith(p))) return null;
+  if (isChromeHidden(pathname)) return null;
 
   const meta = resolvePageMeta(pathname);
   const Lucide = meta?.lucideIcon ? LUCIDE_MAP[meta.lucideIcon] : null;
@@ -80,8 +86,17 @@ export function AppHeader() {
           </>
         )}
       </div>
-      <div className="shrink-0 self-start pt-0.5">
+      <div className="shrink-0 self-start pt-0.5 flex items-center gap-2">
+        {/* 月切替ボタン */}
+        <MonthSwitcher />
+        {/* 通知ベル */}
         <NotificationBell />
+        {/* ⌘K ボタン */}
+        <div className="hidden sm:block">
+          <CommandButton />
+        </div>
+        {/* アカウントメニュー */}
+        <AccountMenu />
       </div>
     </header>
   );

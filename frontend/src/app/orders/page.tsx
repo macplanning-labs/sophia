@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import Link from "next/link";
 import { toast } from "sonner";
 import type { OrderRow } from "@/lib/types";
@@ -24,6 +25,7 @@ function OrdersPageContent() {
   const [partnerFilter, setPartnerFilter] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isDeleting, setIsDeleting] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const qc = useQueryClient();
 
   const { data: orders, isLoading } = useQuery({
@@ -98,17 +100,17 @@ function OrdersPageContent() {
     }
   };
 
-  const handleBulkDelete = async () => {
-    const count = selectedIds.size;
-    if (count === 0) return;
+  const handleBulkDelete = () => {
+    if (selectedIds.size === 0) return;
+    setConfirmOpen(true);
+  };
 
-    const msg = `${count}件の発注書を削除します。よろしいですか？`;
-    if (!confirm(msg)) return;
-
+  const handleConfirmDelete = async () => {
+    const selectedArray = Array.from(selectedIds);
     setIsDeleting(true);
     try {
       const results = await Promise.allSettled(
-        Array.from(selectedIds).map((id) => deleteOrder(id))
+        selectedArray.map((id) => deleteOrder(id))
       );
 
       const succeeded = results.filter((r) => r.status === "fulfilled").length;
@@ -117,6 +119,7 @@ function OrdersPageContent() {
       qc.invalidateQueries({ queryKey: ["orders"] });
       qc.invalidateQueries({ queryKey: ["dashboard"] });
       setSelectedIds(new Set());
+      setConfirmOpen(false);
 
       if (failed === 0) {
         toast.success(`${succeeded}件削除しました`);
@@ -130,8 +133,44 @@ function OrdersPageContent() {
     }
   };
 
+  const confirmFacts = useMemo(() => {
+    const facts = [];
+    facts.push({ label: "件数", value: `${selectedIds.size}件` });
+
+    const selectedArray = Array.from(selectedIds);
+    if (selectedArray.length > 0) {
+      const firstThree = selectedArray.slice(0, 3).map((id) => {
+        const order = filteredOrders.find((o) => o.order_id === id);
+        return order?.order_id || `#${id}`;
+      });
+      facts.push({ label: "発注番号", value: firstThree.join("、") + (selectedArray.length > 3 ? "…" : "") });
+    }
+
+    const totalAmount = Array.from(selectedIds).reduce((sum, id) => {
+      const order = filteredOrders.find((o) => o.order_id === id);
+      return sum + (order?.total_amount || 0);
+    }, 0);
+    if (totalAmount > 0) {
+      facts.push({ label: "合計金額", value: `¥${totalAmount.toLocaleString()}` });
+    }
+
+    return facts;
+  }, [selectedIds, filteredOrders]);
+
   return (
     <div className="p-6 space-y-6">
+      <ConfirmSheet
+        open={confirmOpen}
+        title="発注書を一括削除"
+        facts={confirmFacts}
+        description="この操作は取り消せません"
+        variant="danger"
+        confirmLabel="削除"
+        cancelLabel="キャンセル"
+        loading={isDeleting}
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setConfirmOpen(false)}
+      />
       {selectedIds.size > 0 && (
         <div className="flex items-center gap-3 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
           <span className="text-sm text-blue-400">選択中: {selectedIds.size}件</span>

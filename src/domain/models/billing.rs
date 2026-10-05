@@ -75,18 +75,6 @@ pub struct PaymentRecord {
     pub confirmed_at: DateTime<Utc>,
 }
 
-/// 請求書作成フォーム
-#[derive(Debug, Deserialize)]
-pub struct InvoiceForm {
-    pub client_id: i64,
-    pub received_order_id: Option<i64>,
-    pub issue_date: NaiveDate,
-    #[serde(default, deserialize_with = "crate::domain::serde_helpers::deserialize_optional_date")]
-    pub due_date: Option<NaiveDate>,
-    pub subject: Option<String>,
-    pub notes: Option<String>,
-}
-
 /// 入金登録フォーム
 #[derive(Debug, Deserialize)]
 pub struct PaymentRecordForm {

@@ -19,6 +19,7 @@ import { DetailModal } from "@/components/ui/detail-modal";
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
 import ExpenseDetailPage from "./[id]/client";
 import QRCode from "qrcode";
+import { DateInput } from "@/components/ui/date-input";
 
 const EXPENSE_STATUS_OPTIONS = [
   { value: "DRAFT", label: "下書き" },
@@ -554,8 +555,8 @@ function ExpensesPageContent() {
                   <div className="grid grid-cols-12 gap-2 items-start">
                     <div className="col-span-3">
                       <label className="block text-[11px] text-muted-foreground mb-1">日付</label>
-                      <input
-                        type="date"
+                      <DateInput
+                        
                         className="w-full bg-muted border border-border rounded-lg px-2 py-1.5 text-sm text-foreground"
                         value={item.expense_date}
                         onChange={(e) => updateRow(item.localKey, { expense_date: e.target.value })}

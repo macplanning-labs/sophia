@@ -13,6 +13,8 @@ export interface SettlementRow {
   total_hours: string | null; // Decimal as string
   timesheet_status: string | null;
   client_contract_id: number;
+  /** 対象月の注文書。null = 注文書なし（請求書は作れない） */
+  received_order_id?: number | null;
   billing_base_rate: number;
   billing_settlement_type: string;
   billing_lower_limit: string;
@@ -32,8 +34,10 @@ export interface SettlementRow {
   payment_effort: string;
   invoice_issued: boolean | null;
   notice_issued: boolean | null;
-  /** 先方EDIシステム種別（EDI_OASIS 等）。請求書発行対象外判定に使用 */
+  /** 取引先の EDI 方式（表示用） */
   client_edi_system_type?: string;
+  /** 請求書は先方が作る取引先か（取引先マスタ invoice_issued_by_client）。請求書発行対象外の判定に使用 */
+  client_invoice_by_client?: boolean;
   /** 対象月の発注書（準備状況表示用） */
   purchase_order_id?: string | null;
   purchase_order_status?: string | null;
@@ -145,6 +149,81 @@ export interface CreatedNotice {
   count: number;
   total: number;
   needs_approval: boolean;
+}
+
+// ── 請求書プレビュー・確定 ──
+
+export interface BillingPreviewItem {
+  client_contract_id: number;
+  engineer_id: number;
+  engineer_name: string;
+  project_id: string;
+  project_name: string;
+  timesheet_id: number | null;
+  amount: number;
+}
+
+export interface BillingMissingItem {
+  client_contract_id: number;
+  engineer_name: string;
+  project_id: string;
+  project_name: string;
+  timesheet_status: string | null;
+}
+
+export interface BillingInvoicePreview {
+  key: string;
+  client_id: number;
+  client_name: string;
+  billing_unit: string; // "PROJECT" | "CLIENT"
+  project_id: string | null;
+  subject: string;
+  items: BillingPreviewItem[];
+  subtotal: number;
+  tax_amount: number;
+  total: number;
+  missing: BillingMissingItem[];
+  already_issued_count: number;
+  confirmable: boolean;
+  edi_excluded: boolean;
+}
+
+export interface BillingPreviewResponse {
+  month: string;
+  invoices: BillingInvoicePreview[];
+}
+
+export interface ForceAction {
+  client_contract_id: number;
+  action: "NEXT_MONTH" | "SECOND_INVOICE";
+}
+
+export interface BillingConfirmRequest {
+  month: string;
+  keys: string[];
+  force?: boolean;
+  force_reason?: string;
+  force_actions?: ForceAction[];
+}
+
+export interface BillingConfirmedInvoice {
+  key: string;
+  invoice_id: number;
+  invoice_no: string;
+  total: number;
+}
+
+export interface BillingSkippedKey {
+  key: string;
+  reason: string;
+  missing: BillingMissingItem[];
+}
+
+export interface BillingConfirmResponse {
+  success: boolean;
+  error?: string;
+  created: BillingConfirmedInvoice[];
+  skipped: BillingSkippedKey[];
 }
 
 // ── ダッシュボード ──
@@ -292,6 +371,8 @@ export interface ProjectRow {
   client_name: string;
   is_active: boolean;
   created_at: string;
+  commercial_flow?: "DIRECT" | "SUBCONTRACT" | null;
+  is_test?: boolean;
 }
 
 export interface WizardResult extends ApiResult {
@@ -365,6 +446,8 @@ export interface CompanyInfo {
   default_from_email: string;
   notice_approval_threshold: number | null;
   token_expiry_days: number | null;
+  target_margin_direct: number;
+  target_margin_subcontract: number;
   has_smtp_password: boolean;
 }
 
@@ -455,6 +538,44 @@ export interface EmployeeRow {
   is_active: boolean;
 }
 
+// ── 要員 ──
+
+export interface MemberRow {
+  id: number;
+  name: string;
+  name_kana: string;
+  affiliation_type: string;
+  partner_id: string | null;
+  employee_id: string;
+  email: string;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface MemberAssignmentHistory {
+  client_contract_id: number;
+  project_id: string;
+  project_name: string;
+  start_date: string;
+  end_date: string;
+  unit_price: number;
+  partner_contracts?: {
+    id: number;
+    partner_id: string;
+    partner_name: string;
+    unit_price: number;
+    start_date: string;
+    end_date: string;
+  }[];
+}
+
+export interface MemberDetail extends MemberRow {
+  assignment_count?: number;
+  proposal_partners?: string[];
+  assignment_history?: MemberAssignmentHistory[];
+}
+
 // ── 経費 ──
 // 1申請(ヘッダー)は複数の明細(ExpenseItem)を持つ（交通費の複数チケット等に対応するため）。
 
@@ -543,7 +664,7 @@ export interface UserRow {
   mfa_enabled: boolean;
   /** 全社員の給与データを閲覧・確認・振込済み操作できるか（is_staffとは独立した権限） */
   can_view_all_payroll: boolean;
-  /** 全社員の経費申請を閲覧・承認・差戻しできるか（is_staffとは独立した権限） */
+  /** 全社員の経費申請を閲覧・承認・差し戻しできるか（is_staffとは独立した権限） */
   can_view_all_expenses: boolean;
   created_at: string;
   partner_id: string | null;
@@ -605,4 +726,58 @@ export interface MailThreadBrief {
 /** GET /api/v1/mail-briefs レスポンス */
 export interface MailBriefsResponse {
   briefs: MailThreadBrief[];
+}
+
+// ── アサイン編成(新UI 3-2) ──
+
+export interface AssignmentProject {
+  project_id: string;
+  project_name: string;
+  client_id: number;
+  client_name: string;
+  commercial_flow: "DIRECT" | "SUBCONTRACT" | null;
+  assignment_count: number;
+  /** うち自社社員の数(原価が分からず、粗利に原価は含まれない) */
+  internal_count: number;
+  revenue: number;
+  cost: number;
+  gross_profit: number;
+  margin_pct: number | null;
+  target_pct: number | null;
+  diff_pct: number | null;
+  /** OK | BELOW | UNSET(商流が未設定) | NOT_APPLICABLE(売上なし) */
+  status: "OK" | "BELOW" | "UNSET" | "NOT_APPLICABLE";
+}
+
+export interface AssignmentOverview {
+  projects: AssignmentProject[];
+  targets: { direct: number; subcontract: number };
+}
+
+export interface AssignmentProjectSide {
+  revenue: number;
+  cost: number;
+  gross_profit: number;
+  margin_pct: number | null;
+}
+
+export interface AssignmentPreview {
+  monthly: { revenue: number; cost: number | null; gross_profit: number | null; margin_pct: number | null };
+  target: {
+    flow: string | null;
+    target_pct: number | null;
+    diff_pct: number | null;
+    /** OK | BELOW | UNSET | NOT_APPLICABLE(自社社員=原価が分からない) */
+    status: "OK" | "BELOW" | "UNSET" | "NOT_APPLICABLE";
+  };
+  hours_scenarios: { label: string; hours: number | string; revenue: number; cost: number | null; margin_pct: number | null }[];
+  warnings: { code: string; message: string }[];
+  project_total: { before: AssignmentProjectSide; after: AssignmentProjectSide };
+}
+
+export interface AssignmentCreateResult {
+  success: boolean;
+  engineer_id: number;
+  client_contract_id: number;
+  partner_contract_id: number | null;
 }

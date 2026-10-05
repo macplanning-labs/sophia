@@ -493,12 +493,14 @@ pub async fn find_employee_display_info(pool: &PgPool, employee_id: i64) -> Resu
     Ok(format!("{}（社員自己申告）", name))
 }
 
-/// 稼働報告に紐づくメール履歴（t_email_log）一覧
+/// 稼働報告に紐づく受信メール（t_received_email）一覧
+///
+/// 以前は存在しない表 t_email_log を読んでいて、関連メールが常に空に見えていた。
 pub async fn list_source_emails_for_timesheet(pool: &PgPool, timesheet_id: i64) -> Result<Vec<(String, String, String, String)>> {
     let rows: Vec<(String, String, String, String)> = sqlx::query_as(
-        r#"SELECT COALESCE(from_name, from_email), subject,
+        r#"SELECT COALESCE(NULLIF(from_name, ''), from_email), subject,
                COALESCE(received_at::text, ''), status
-           FROM t_email_log
+           FROM t_received_email
            WHERE timesheet_id = $1
            ORDER BY received_at DESC"#
     )

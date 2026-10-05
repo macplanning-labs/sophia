@@ -21,8 +21,6 @@ use sqlx::PgPool;
 use super::ops_message;
 use crate::domain::models::mail_pipeline::{PhaseError, MAX_RETRY};
 use crate::infrastructure::attachment_parsers::{self, DocumentKind, ParsedDocument};
-use crate::infrastructure::edi_oasis_client::{InvoiceDetail, OrderDetail};
-use crate::infrastructure::edi_order_importer;
 use crate::infrastructure::repositories::order_repo;
 
 /// Phase3実行結果
@@ -30,22 +28,22 @@ use crate::infrastructure::repositories::order_repo;
 pub struct Phase3Result {
     pub imported: usize,
     pub skipped_duplicate: usize,
+    /// 勤務表の添付で、人が内容を確認して取り込むまで保留したメール数
+    pub awaiting_import: usize,
     pub parse_failed: usize,
     pub errors: Vec<String>,
     /// 今回新規登録された注文書（重複スキップは含まない）。呼び出し側で「何が新規追加されたか」を通知するのに使う
     pub new_orders: Vec<String>,
     /// 今回新規に突合できた支払通知書/請求書
     pub new_invoices: Vec<String>,
-    /// 今回新規登録された稼働報告
-    pub new_timesheets: Vec<String>,
 }
 
 impl std::fmt::Display for Phase3Result {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "取込{}件, 重複スキップ{}件, パース失敗{}件, エラー{}件",
-            self.imported, self.skipped_duplicate, self.parse_failed, self.errors.len()
+            "取込{}件, 取込待ち{}件, 重複スキップ{}件, パース失敗{}件, エラー{}件",
+            self.imported, self.awaiting_import, self.skipped_duplicate, self.parse_failed, self.errors.len()
         )
     }
 }
@@ -54,13 +52,14 @@ impl std::fmt::Display for Phase3Result {
 enum RegisterOutcome {
     Registered(RegisteredItem),
     AlreadyExists,
+    /// 勤務表の添付。稼働報告へは自動登録せず、人が内容を確認して取り込むまで保留する
+    AwaitingImport,
 }
 
 /// 新規登録された書類の種別+人が読める識別ラベル
 enum RegisteredItem {
     Order(String),
     Invoice(String),
-    Timesheet(String),
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -118,8 +117,13 @@ pub async fn run(pool: &PgPool) -> Phase3Result {
                 match item {
                     RegisteredItem::Order(label) => result.new_orders.push(label),
                     RegisteredItem::Invoice(label) => result.new_invoices.push(label),
-                    RegisteredItem::Timesheet(label) => result.new_timesheets.push(label),
                 }
+            }
+            Ok(RegisterOutcome::AwaitingImport) => {
+                // 勤務表は、ユーザーが受信メール画面で氏名・時間を確認して「取り込む」まで稼働報告にしない。
+                // 要確認として残す（Phase3は needs_manual_review=TRUE の行を再処理しない）
+                mark_status(pool, row.id, "FETCHED", true, Some("勤務表: 内容を確認して取り込んでください"), row.retry_count).await;
+                result.awaiting_import += 1;
             }
             Ok(RegisterOutcome::AlreadyExists) => {
                 // 同月に既に登録がある場合も、メール行は候補として残す（needs_manual_review=TRUE）
@@ -194,15 +198,14 @@ async fn mark_status(
 /// 1件を解析・登録する
 async fn process_one(pool: &PgPool, row: &FetchedEmail) -> Result<RegisterOutcome, PhaseError> {
     if row.source_type == "EDI_API" {
-        if row.message_id.starts_with("edi-order:") {
-            return register_edi_order(pool, row).await;
-        } else if row.message_id.starts_with("edi-invoice:") {
-            return register_edi_invoice(pool, row).await;
-        }
-        return Err(PhaseError::Permanent(format!(
-            "未知のEDI_API合成message_id形式: {}",
-            row.message_id
-        )));
+        // 取引先 EDI から取得した書類（Phase2 が作った行）。中身の読み方は取引先ごとのカスタマイズに任せ、
+        // 登録（受注の作成・請求書との突合）はここの汎用の処理で行う。
+        return match crate::custom::interpret_edi_document(&row.message_id, row.client_id, row.parsed_data.as_ref())? {
+            crate::custom::EdiDocument::Order(o) => insert_received_order(pool, &o).await,
+            crate::custom::EdiDocument::PaymentNotice { client_id, target_month, invoice_no, total } => {
+                reconcile_billing_invoice(pool, client_id, target_month, &invoice_no, total).await
+            }
+        };
     }
 
     // ATTACHMENT: 件名分類 + 拡張子で振り分け
@@ -217,7 +220,7 @@ async fn process_one(pool: &PgPool, row: &FetchedEmail) -> Result<RegisterOutcom
         match label.as_str() {
             "ORDER" => register_order_pdf(pool, row, raw_bytes).await,
             "INVOICE" => register_payment_notice_pdf(pool, row, raw_bytes).await,
-            "REPORT" => register_timesheet_attachment(pool, row, raw_bytes).await,
+            "REPORT" => Ok(RegisterOutcome::AwaitingImport),
             _ => Err(PhaseError::Permanent(format!(
                 "件名からPDF種別を判定できません（分類={label}）"
             ))),
@@ -226,61 +229,13 @@ async fn process_one(pool: &PgPool, row: &FetchedEmail) -> Result<RegisterOutcom
         || filename_lower.ends_with(".xlsm")
         || filename_lower.ends_with(".xls")
     {
-        register_timesheet_attachment(pool, row, raw_bytes).await
+        Ok(RegisterOutcome::AwaitingImport)
     } else {
         Err(PhaseError::Permanent(format!(
             "未対応の添付ファイル形式です: {}",
             row.attachment_filename
         )))
     }
-}
-
-// ============================================================
-// EDI_API（Phase2が構造化JSONを取得済み） — 注文
-// ============================================================
-
-async fn register_edi_order(pool: &PgPool, row: &FetchedEmail) -> Result<RegisterOutcome, PhaseError> {
-    let client_id = row
-        .client_id
-        .ok_or_else(|| PhaseError::Permanent("client_idが設定されていません".to_string()))?;
-    let data = row
-        .parsed_data
-        .clone()
-        .ok_or_else(|| PhaseError::Permanent("parsed_dataが空です".to_string()))?;
-    let detail: OrderDetail = serde_json::from_value(data)
-        .map_err(|e| PhaseError::Permanent(format!("OrderDetail JSONパースエラー: {e}")))?;
-
-    let order_no = detail.order_no.clone().unwrap_or_default();
-    if order_no.is_empty() {
-        return Err(PhaseError::Permanent("注文番号が取得できません".to_string()));
-    }
-
-    let (target_month, work_start, work_end) = edi_order_importer::parse_dates(&detail)
-        .map_err(PhaseError::Permanent)?;
-
-    let normalized = NormalizedOrder {
-        client_id,
-        client_order_number: order_no,
-        order_date: detail
-            .order_date
-            .as_deref()
-            .and_then(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
-            .unwrap_or(target_month),
-        target_month,
-        project_name: detail.project_name.clone().unwrap_or_else(|| "EDI注文".to_string()),
-        work_start,
-        work_end,
-        unit_price: detail.unit_price.unwrap_or(0) as i32,
-        worker_name: detail.worker_name.clone(),
-        // EDI-OASIS APIのJSONには基準時間/超過控除単価が含まれないため、既存運用の既定値を踏襲する
-        lower_limit_hours: Decimal::new(1400, 1),
-        upper_limit_hours: Decimal::new(1800, 1),
-        excess_rate: detail.unit_price.unwrap_or(0) as i32,
-        shortage_rate: detail.unit_price.unwrap_or(0) as i32,
-        remarks: format!("EDI-OASIS自動取込 (message_id={})", row.message_id),
-    };
-
-    insert_received_order(pool, &normalized).await
 }
 
 // ============================================================
@@ -344,21 +299,22 @@ async fn register_order_pdf(
 
 // ── 共通: 正規化済み注文データのDB登録 ──
 
-struct NormalizedOrder {
-    client_id: i64,
-    client_order_number: String,
-    order_date: NaiveDate,
-    target_month: NaiveDate,
-    project_name: String,
-    work_start: NaiveDate,
-    work_end: NaiveDate,
-    unit_price: i32,
-    worker_name: Option<String>,
-    lower_limit_hours: Decimal,
-    upper_limit_hours: Decimal,
-    excess_rate: i32,
-    shortage_rate: i32,
-    remarks: String,
+/// 受注として登録する注文の、正規化した形（注文書PDF・取引先 EDI のどちらからも、この形にして登録する）
+pub struct NormalizedOrder {
+    pub client_id: i64,
+    pub client_order_number: String,
+    pub order_date: NaiveDate,
+    pub target_month: NaiveDate,
+    pub project_name: String,
+    pub work_start: NaiveDate,
+    pub work_end: NaiveDate,
+    pub unit_price: i32,
+    pub worker_name: Option<String>,
+    pub lower_limit_hours: Decimal,
+    pub upper_limit_hours: Decimal,
+    pub excess_rate: i32,
+    pub shortage_rate: i32,
+    pub remarks: String,
 }
 
 async fn insert_received_order(
@@ -457,32 +413,8 @@ async fn insert_received_order(
 }
 
 // ============================================================
-// EDI_API（構造化JSON） — 請求書 / ATTACHMENT PDF — 支払通知書・請求書
+// ATTACHMENT PDF — 支払通知書・請求書 / 取引先 EDI の支払通知（突合）
 // ============================================================
-
-async fn register_edi_invoice(pool: &PgPool, row: &FetchedEmail) -> Result<RegisterOutcome, PhaseError> {
-    let client_id = row
-        .client_id
-        .ok_or_else(|| PhaseError::Permanent("client_idが設定されていません".to_string()))?;
-    let data = row
-        .parsed_data
-        .clone()
-        .ok_or_else(|| PhaseError::Permanent("parsed_dataが空です".to_string()))?;
-    let detail: InvoiceDetail = serde_json::from_value(data)
-        .map_err(|e| PhaseError::Permanent(format!("InvoiceDetail JSONパースエラー: {e}")))?;
-
-    let (year, month) = match (detail.year, detail.month) {
-        (Some(y), Some(m)) => (y, m as u32),
-        _ => return Err(PhaseError::Permanent("請求書の対象年月が取得できません".to_string())),
-    };
-    let target_month = NaiveDate::from_ymd_opt(year, month, 1)
-        .ok_or_else(|| PhaseError::Permanent(format!("無効な年月: {year}/{month}")))?;
-
-    let total: i64 = detail.items.iter().map(|i| i.item_amount as i64).sum();
-    let invoice_no = detail.invoice_no.clone().unwrap_or_default();
-
-    reconcile_billing_invoice(pool, client_id, target_month, &invoice_no, total).await
-}
 
 async fn register_payment_notice_pdf(
     pool: &PgPool,
@@ -594,165 +526,11 @@ async fn reconcile_billing_invoice(
 // ATTACHMENT Excel/PDF — 稼働報告書（勤務表）
 // ============================================================
 
-async fn register_timesheet_attachment(
-    pool: &PgPool,
-    row: &FetchedEmail,
-    raw_bytes: &[u8],
-) -> Result<RegisterOutcome, PhaseError> {
-    let parsed = crate::domain::services::excel_parser::auto_detect_and_parse(
-        raw_bytes,
-        &row.attachment_filename,
-    );
-
-    if let Some(err) = &parsed.error {
-        return Err(PhaseError::Permanent(format!("稼働報告解析失敗: {err}")));
-    }
-    let target_month = parsed
-        .target_month
-        .ok_or_else(|| PhaseError::Permanent("稼働報告から対象月を特定できませんでした".to_string()))?;
-    if parsed.worker_name.trim().is_empty() {
-        return Err(PhaseError::Permanent("稼働報告から作業者名を特定できませんでした".to_string()));
-    }
-
-    // 既存エンジニアのみ照合（空白・全角スペースを無視して比較）
-    let name_key = normalize_engineer_name_key(&parsed.worker_name);
-    let engineer_id: Option<i64> = sqlx::query_scalar(
-        "SELECT id FROM m_engineer WHERE REPLACE(REPLACE(name, '　', ''), ' ', '') = $1",
-    )
-    .bind(&name_key)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| PhaseError::Transient(format!("社員検索エラー: {e}")))?;
-    let Some(engineer_id) = engineer_id else {
-        return Err(PhaseError::Permanent(format!(
-            "作業者名'{}'に一致する社員が見つかりません",
-            parsed.worker_name
-        )));
-    };
-
-    // 対象月にアクティブな契約を検索。一意に決まらない場合は自動登録せず要確認に倒す
-    // （同一エンジニアが複数クライアントと同時契約しているケースは人手での確認が必要なため）。
-    let month_end = month_end_date(target_month);
-    let contract_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM m_client_contract WHERE engineer_id = $1 AND start_date <= $2 AND end_date >= $3",
-    )
-    .bind(engineer_id)
-    .bind(month_end)
-    .bind(target_month)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| PhaseError::Transient(format!("契約検索エラー: {e}")))?;
-
-    let contract_id = match contract_ids.as_slice() {
-        [id] => *id,
-        [] => {
-            return Err(PhaseError::Permanent(format!(
-                "エンジニア'{}'の{target_month}時点で有効な契約が見つかりません",
-                parsed.worker_name
-            )))
-        }
-        _ => {
-            return Err(PhaseError::Permanent(format!(
-                "エンジニア'{}'の{target_month}時点で契約が複数({}件)あり自動決定できません",
-                parsed.worker_name,
-                contract_ids.len()
-            )))
-        }
-    };
-
-    let settlement_overtime = {
-        use crate::domain::value_objects::SettlementTerms;
-        use crate::infrastructure::repositories::order_repo;
-        let contract = order_repo::find_client_contract_for_order(pool, contract_id)
-            .await
-            .map_err(|e| PhaseError::Transient(format!("契約取得エラー: {e}")))?
-            .ok_or_else(|| {
-                PhaseError::Permanent(format!("契約 id={contract_id} が見つかりません"))
-            })?;
-        let terms = SettlementTerms {
-            lower_limit_hours: contract.lower_limit_hours,
-            upper_limit_hours: contract.upper_limit_hours,
-            fixed_hours: contract.fixed_hours,
-            deduction_rate: contract.deduction_rate,
-            overtime_rate: contract.overtime_rate,
-        };
-        terms.excess_hours(parsed.total_hours)
-    };
-
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM t_monthly_timesheet WHERE client_contract_id = $1 AND target_month = $2)",
-    )
-    .bind(contract_id)
-    .bind(target_month)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| PhaseError::Transient(format!("重複チェックエラー: {e}")))?;
-
-    if exists {
-        return Ok(RegisterOutcome::AlreadyExists);
-    }
-
-    let daily_data = serde_json::to_value(&parsed.daily_data).unwrap_or(serde_json::Value::Null);
-    let alerts_json = serde_json::to_value(&parsed.alerts).unwrap_or(serde_json::Value::Null);
-
-    sqlx::query(
-        r#"
-        INSERT INTO t_monthly_timesheet (
-            client_contract_id, target_month, status, total_hours, work_days,
-            overtime_hours, night_hours, holiday_hours,
-            daily_data, original_filename, alerts_json, uploaded_at
-        ) VALUES ($1, $2, 'UPLOADED', $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-        "#,
-    )
-    .bind(contract_id)
-    .bind(target_month)
-    .bind(parsed.total_hours)
-    .bind(parsed.work_days)
-    .bind(settlement_overtime)
-    .bind(rust_decimal::Decimal::ZERO)
-    .bind(rust_decimal::Decimal::ZERO)
-    .bind(&daily_data)
-    .bind(&row.attachment_filename)
-    .bind(&alerts_json)
-    .execute(pool)
-    .await
-    .map_err(|e| PhaseError::Transient(format!("稼働報告INSERTエラー: {e}")))?;
-
-    // 報告受領: 発注/受注を REPORT_RECEIVED へ（失敗しても稼働報告登録は成功扱い）
-    match crate::infrastructure::repositories::order_repo::advance_to_report_received_for_timesheet(
-        pool,
-        contract_id,
-        target_month,
-    )
-    .await
-    {
-        Ok((po_n, ro_n)) if po_n > 0 || ro_n > 0 => {
-            tracing::info!(
-                "[Phase3] 報告受領ステータス更新: purchase_orders={po_n}, received_orders={ro_n}, contract_id={contract_id}, target_month={target_month}"
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(
-                "[Phase3] 報告受領ステータス更新失敗（稼働報告は登録済み）: contract_id={contract_id}, target_month={target_month}, err={e}"
-            );
-        }
-    }
-
-    tracing::info!(
-        "[Phase3] 稼働報告登録完了: contract_id={contract_id}, target_month={target_month}, worker={}",
-        parsed.worker_name
-    );
-
-    let label = format!("{}（{}）", parsed.worker_name, target_month.format("%Y年%m月"));
-    Ok(RegisterOutcome::Registered(RegisteredItem::Timesheet(label)))
-}
-
-fn normalize_engineer_name_key(name: &str) -> String {
+pub(super) fn normalize_engineer_name_key(name: &str) -> String {
     name.replace('\u{3000}', "").replace(' ', "")
 }
 
-fn month_end_date(month_start: NaiveDate) -> NaiveDate {
+pub(super) fn month_end_date(month_start: NaiveDate) -> NaiveDate {
     let next_month = if month_start.month() == 12 {
         NaiveDate::from_ymd_opt(month_start.year() + 1, 1, 1)
     } else {

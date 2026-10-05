@@ -60,6 +60,20 @@ impl ImapConfig {
     }
 }
 
+/// PostgreSQL の text 列に保存できない NUL 文字（U+0000）を取り除く。
+///
+/// メール本文・件名に NUL が1文字でも含まれると INSERT が
+/// `invalid byte sequence for encoding "UTF8": 0x00`（code=22021）で失敗し、
+/// そのメールは取り込まれないまま毎回の走査で失敗し続ける（2026-10-04 本番で発生）。
+/// DB に保存する文字列は、保存前に必ずこの関数を通す。
+pub fn strip_nul(s: &str) -> String {
+    if s.contains('\0') {
+        s.replace('\0', "")
+    } else {
+        s.to_string()
+    }
+}
+
 /// IMAP接続してINBOXを読み取り専用(EXAMINE/PEEK)で開く
 ///
 /// EXAMINEは既読フラグを変更しない。「未読/既読に依存しない」設計の根幹。
@@ -73,21 +87,21 @@ impl ImapConfig {
 pub fn connect_and_examine(config: &ImapConfig) -> Result<ImapSession, String> {
     let addr = (config.host.as_str(), config.port)
         .to_socket_addrs()
-        .map_err(|e| format!("IMAPホスト名前解決エラー: {e}"))?
+        .map_err(|e| format!("IMAP名前解決エラー: {e}"))?
         .next()
-        .ok_or_else(|| "IMAPホストのアドレス解決結果が空です".to_string())?;
+        .ok_or_else(|| "IMAP名前解決エラー: アドレス解決結果が空です".to_string())?;
 
     let tcp = TcpStream::connect_timeout(&addr, IMAP_TIMEOUT)
-        .map_err(|e| format!("IMAP接続タイムアウト/エラー: {e}"))?;
+        .map_err(|e| format!("IMAP接続エラー(TCP): {e}"))?;
     tcp.set_read_timeout(Some(IMAP_TIMEOUT))
-        .map_err(|e| format!("IMAP読み取りタイムアウト設定エラー: {e}"))?;
+        .map_err(|e| format!("IMAP接続エラー(タイムアウト設定): {e}"))?;
     tcp.set_write_timeout(Some(IMAP_TIMEOUT))
-        .map_err(|e| format!("IMAP書き込みタイムアウト設定エラー: {e}"))?;
+        .map_err(|e| format!("IMAP接続エラー(タイムアウト設定): {e}"))?;
 
-    let tls = native_tls::TlsConnector::new().map_err(|e| format!("TLS初期化エラー: {e}"))?;
+    let tls = native_tls::TlsConnector::new().map_err(|e| format!("IMAP接続エラー(TLS初期化): {e}"))?;
     let tls_stream = tls
         .connect(&config.host, tcp)
-        .map_err(|e| format!("TLSハンドシェイクエラー: {e}"))?;
+        .map_err(|e| format!("IMAP接続エラー(TLS): {e}"))?;
 
     let mut client = imap::Client::new(tls_stream);
     client
@@ -99,7 +113,7 @@ pub fn connect_and_examine(config: &ImapConfig) -> Result<ImapSession, String> {
         .map_err(|(e, _)| format!("IMAPログインエラー: {e}"))?;
     session
         .examine("INBOX")
-        .map_err(|e| format!("INBOX EXAMINE エラー: {e}"))?;
+        .map_err(|e| format!("IMAP受信箱オープンエラー(EXAMINE): {e}"))?;
     Ok(session)
 }
 
@@ -120,7 +134,7 @@ pub fn fetch_since_blocking(config: &ImapConfig, since_str: &str) -> Result<Vec<
 
     let search_result = session
         .search(format!("SINCE {since_str}"))
-        .map_err(|e| format!("メール検索エラー: {e}"))?;
+        .map_err(|e| format!("IMAP検索エラー(SEARCH): {e}"))?;
 
     if search_result.is_empty() {
         let _ = session.logout();
@@ -130,7 +144,7 @@ pub fn fetch_since_blocking(config: &ImapConfig, since_str: &str) -> Result<Vec<
     let uid_str: Vec<String> = search_result.iter().map(|id| id.to_string()).collect();
     let messages = session
         .fetch(uid_str.join(","), "(BODY.PEEK[HEADER] BODY.PEEK[TEXT] FLAGS)")
-        .map_err(|e| format!("メール取得エラー: {e}"))?;
+        .map_err(|e| format!("IMAP取得エラー(FETCH): {e}"))?;
 
     let raw_messages: Vec<RawMessage> = messages
         .iter()
@@ -153,7 +167,7 @@ pub fn fetch_since_blocking(config: &ImapConfig, since_str: &str) -> Result<Vec<
 pub fn fetch_attachments_blocking(
     config: &ImapConfig,
     message_ids: &[String],
-) -> Result<Vec<Result<Attachment, String>>, String> {
+) -> Result<Vec<Result<Vec<Attachment>, String>>, String> {
     let mut session = connect_and_examine(config)?;
 
     let results = message_ids
@@ -165,11 +179,11 @@ pub fn fetch_attachments_blocking(
     Ok(results)
 }
 
-/// 指定Message-IDのメールをIMAPで検索し、最初の添付ファイルの実体を取得する（Phase2用の内部処理）。
-fn fetch_one_attachment_blocking(session: &mut ImapSession, message_id: &str) -> Result<Attachment, String> {
+/// 指定Message-IDのメールをIMAPで検索し、添付ファイルの実体をすべて取得する（Phase2用の内部処理）。
+fn fetch_one_attachment_blocking(session: &mut ImapSession, message_id: &str) -> Result<Vec<Attachment>, String> {
     let search_result = session
         .search(format!("HEADER Message-ID \"{message_id}\""))
-        .map_err(|e| format!("メール検索エラー: {e}"))?;
+        .map_err(|e| format!("IMAP検索エラー(SEARCH): {e}"))?;
 
     let uid = search_result
         .iter()
@@ -178,7 +192,7 @@ fn fetch_one_attachment_blocking(session: &mut ImapSession, message_id: &str) ->
 
     let messages = session
         .fetch(uid.to_string(), "(BODY.PEEK[])")
-        .map_err(|e| format!("メール本文取得エラー: {e}"))?;
+        .map_err(|e| format!("IMAP取得エラー(FETCH): {e}"))?;
 
     let msg = messages
         .iter()
@@ -186,14 +200,27 @@ fn fetch_one_attachment_blocking(session: &mut ImapSession, message_id: &str) ->
         .ok_or_else(|| "メール取得結果が空です".to_string())?;
 
     let raw_bytes = msg.body().ok_or_else(|| "メール本文が空です".to_string())?;
-    let mut attachments = extract_attachments(raw_bytes);
+    let attachments = extract_attachments(raw_bytes);
 
     if attachments.is_empty() {
         return Err("添付ファイルが見つかりませんでした".to_string());
     }
+    Ok(attachments)
+}
 
-    // 最初の添付を採用する（複数添付があるメールは稀なため、当面は1メール1添付を前提とする）
-    Ok(attachments.remove(0))
+/// 勤務表・注文書などの書類として読める拡張子か（署名の画像などを除くため）
+pub fn is_document_filename(filename: &str) -> bool {
+    let lower = filename.to_lowercase();
+    [".pdf", ".xlsx", ".xlsm", ".xls"].iter().any(|ext| lower.ends_with(ext))
+}
+
+/// 従来の取込（受注書・請求書PDFなど）が使う「主の添付」を選ぶ。
+/// 書類として読める添付のうち最初の1件。無ければ最初の添付（従来と同じ）。
+pub fn pick_primary_attachment(attachments: &[Attachment]) -> Option<&Attachment> {
+    attachments
+        .iter()
+        .find(|a| is_document_filename(&a.filename))
+        .or_else(|| attachments.first())
 }
 
 /// ヘッダーから指定フィールドの値を取得
@@ -300,6 +327,10 @@ fn decode_charset(bytes: &[u8], _charset: &str) -> String {
 /// 旧実装は`parsed.subparts`を1階層しか見ておらず、multipart/mixed > multipart/alternative >
 /// text/plain のようにtext/plainが2階層以上ネストしている場合や、HTMLのみ（text/plain無し）の
 /// メールで本文が空になる不具合があった（2026-07-14、受信メール画面での実地確認で発覚）。
+///
+/// 入力は **ヘッダーを含むメール全文**（Content-Type / 文字コード / 転送エンコーディングの
+/// 指定がヘッダーにあるため）。IMAP の `BODY[TEXT]` のような本文のみを渡すと、
+/// base64 などが復号されず生のまま返るので、呼び出し側は `extract_body_text_from_parts` を使う。
 pub fn extract_body_text(body_bytes: &[u8]) -> String {
     if let Ok(parsed) = mailparse::parse_mail(body_bytes) {
         if let Some(text) = find_text_part(&parsed, "text/plain") {
@@ -315,6 +346,40 @@ pub fn extract_body_text(body_bytes: &[u8]) -> String {
         }
     }
     String::from_utf8_lossy(body_bytes).chars().take(5000).collect()
+}
+
+/// ヘッダー部と本文部を別々に持っている場合の本文抽出（IMAP の HEADER / TEXT 取得結果用）
+pub fn extract_body_text_from_parts(header_bytes: &[u8], body_bytes: &[u8]) -> String {
+    extract_body_text(&[header_bytes, body_bytes].concat())
+}
+
+/// 過去の不具合（本文のみを解析していた）で、MIMEの生データのまま保存された本文を読める形に直す。
+///
+/// 本文が `--<boundary>` で始まるマルチパートの生データのときだけ、境界線から
+/// ヘッダーを補って復号する。それ以外（通常の本文）はそのまま返す。
+/// 保存時に5000文字で切り詰められているため、末尾が欠けていても復号できた範囲を返す。
+pub fn repair_raw_mime_body(stored: &str) -> String {
+    let trimmed = stored.trim_start();
+    let Some(first_line) = trimmed.lines().next() else {
+        return stored.to_string();
+    };
+    let boundary = first_line.trim_end();
+    if !boundary.starts_with("--") || boundary.len() < 4 || boundary.contains(' ') {
+        return stored.to_string();
+    }
+    if !trimmed.contains("Content-Type:") {
+        return stored.to_string();
+    }
+    let header = format!(
+        "Content-Type: multipart/mixed; boundary=\"{}\"\r\n\r\n",
+        &boundary[2..]
+    );
+    let repaired = extract_body_text_from_parts(header.as_bytes(), trimmed.as_bytes());
+    // 復号できず生のままなら、元の文字列を返す（かえって悪化させない）
+    if repaired.trim().is_empty() || repaired.contains("Content-Transfer-Encoding") {
+        return stored.to_string();
+    }
+    repaired
 }
 
 /// 指定MIMEタイプのパートを再帰的に探す（最初に見つかった非空の本文を返す）
@@ -445,6 +510,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn strip_nul_removes_nul_characters() {
+        assert_eq!(strip_nul("請求\0書\0"), "請求書");
+        assert_eq!(strip_nul("no nul"), "no nul");
+        assert_eq!(strip_nul(""), "");
+    }
+
+    #[test]
     fn parse_from_header_extracts_name_and_email() {
         let (name, email) = parse_from_header("山田太郎 <yamada@example.com>");
         assert_eq!(name, "山田太郎");
@@ -481,6 +553,54 @@ mod tests {
         );
         let result = extract_body_text(raw.as_bytes());
         assert_eq!(result, "こんにちは。テスト本文です。");
+    }
+
+    #[test]
+    fn extract_body_text_from_parts_decodes_base64_body_without_headers_in_body() {
+        // 2026-09-30: BODY[TEXT] のみを解析していたため、base64 のまま画面に出ていた不具合の再現
+        let header = "Content-Type: multipart/mixed; boundary=\"outer\"\r\n\r\n";
+        let body_b64 = base64_encode("勝沼です。ご連絡ありがとうございます。");
+        let body = format!(
+            "--outer\r\n\
+             Content-Type: text/plain; charset=\"utf-8\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n\
+             {body_b64}\r\n\
+             --outer--\r\n"
+        );
+        assert_eq!(
+            extract_body_text_from_parts(header.as_bytes(), body.as_bytes()),
+            "勝沼です。ご連絡ありがとうございます。"
+        );
+        // 本文だけを渡す従来の呼び方では復号できない（呼び出し側の誤用を防ぐための記録）
+        assert_ne!(
+            extract_body_text(body.as_bytes()),
+            "勝沼です。ご連絡ありがとうございます。"
+        );
+    }
+
+    #[test]
+    fn repair_raw_mime_body_decodes_stored_raw_body() {
+        let b64 = base64_encode("勝沼です。ご連絡ありがとうございます。");
+        let stored = format!(
+            "--_000_ABC_\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{b64}\r\n--_000_ABC_--\r\n"
+        );
+        assert_eq!(repair_raw_mime_body(&stored), "勝沼です。ご連絡ありがとうございます。");
+    }
+
+    #[test]
+    fn repair_raw_mime_body_leaves_normal_text_and_truncated_garbage_alone() {
+        assert_eq!(repair_raw_mime_body("普通の本文です。"), "普通の本文です。");
+        assert_eq!(repair_raw_mime_body(""), "");
+        // 5000文字で切れて、複数パートの途中までしか無い場合も panic せず何かしら返す
+        let b64 = base64_encode(&"あ".repeat(300));
+        let stored = format!(
+            "--_000_ABC_\r\nContent-Type: text/plain; charset=\"utf-8\"\r\n\
+             Content-Transfer-Encoding: base64\r\n\r\n{}",
+            &b64[..b64.len() / 2]
+        );
+        let out = repair_raw_mime_body(&stored);
+        assert!(!out.contains("Content-Transfer-Encoding"), "{out}");
     }
 
     #[test]

@@ -231,7 +231,7 @@ export default function UserDetailPage({ id: idProp, embedded = false, onDeleted
               onChange={(e) => setForm({ ...form, can_view_all_expenses: e.target.checked })}
               className="rounded border-border"
             />
-            全社員の経費申請を閲覧・承認・差戻しできるようにする
+            全社員の経費申請を閲覧・承認・差し戻しできるようにする
           </label>
           <p className="text-[11px] text-muted-foreground mt-1">
             管理者権限とは別の権限です。管理者であっても、これをONにしない限り他の社員の経費は見えません。

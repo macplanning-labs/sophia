@@ -1,5 +1,6 @@
 /// invoices/pdf.rs — 請求書PDFダウンロード
 
+use crate::infrastructure::db_tx::LogErr;
 use axum::extract::{Path, State};
 use sqlx::PgPool;
 
@@ -58,7 +59,7 @@ pub async fn download_pdf(
     use axum::http::{header, StatusCode};
     use crate::presentation::http_util;
 
-    let invoice = billing_repo::find_invoice(&pool, id).await.ok().flatten();
+    let invoice = billing_repo::find_invoice(&pool, id).await.log_err().ok().flatten();
 
     let invoice = match invoice {
         Some(inv) => inv,

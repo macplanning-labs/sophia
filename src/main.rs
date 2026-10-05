@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod custom;
 mod config;
 mod domain;
 mod infrastructure;
@@ -58,16 +59,6 @@ enum Commands {
     /// IMAPメール取得を手動実行する
     FetchEmails,
 
-    /// EDI-OASIS請求書を取り込む
-    ImportBillings {
-        /// 対象年
-        #[arg(long)]
-        year: i32,
-
-        /// 対象月
-        #[arg(long)]
-        month: i32,
-    },
 
     /// リマインドメールを送信する（注文書承諾・稼働報告・請求書承諾）
     SendReminders {
@@ -230,31 +221,13 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("✅ 検証完了");
         }
 
-        Commands::ImportBillings { year, month } => {
-            tracing::info!("📥 EDI-OASIS 請求取込開始: {}年{}月", year, month);
-
-            let pool = infrastructure::db::create_pool().await?;
-            run_migrations(&pool).await?;
-
-            let mut client = infrastructure::edi_oasis_client::EdiOasisClient::from_env()?;
-            let result = infrastructure::billing_importer::import_billings_for_month(
-                &pool, &mut client, year, month,
-            ).await;
-
-            tracing::info!("✅ {}", result);
-            if !result.errors.is_empty() {
-                for err in &result.errors {
-                    tracing::error!("  ❌ {}", err);
-                }
-            }
-        }
         Commands::FetchEmails => {
             tracing::info!("📨 メール自動取込パイプラインを手動実行します...");
 
             let pool = infrastructure::db::create_pool().await?;
             run_migrations(&pool).await?;
 
-            let result = infrastructure::mail_pipeline::run_pipeline(&pool, None).await;
+            let result = infrastructure::mail_pipeline::run_pipeline(&pool).await;
             tracing::info!("✅ パイプライン完了: {result}");
 
             if result.has_errors() {
@@ -395,6 +368,9 @@ async fn run_migrations(pool: &sqlx::PgPool) -> anyhow::Result<()> {
 
     // sqlx 標準 Migrator を使用
     let migrator = sqlx::migrate!("./migrations");
+    // 公開版で書き換えたマイグレーション（旧版を適用済みの DB）のチェックサムを読み替える。社内版では何もしない
+    infrastructure::migration_compat::accept_rewritten(pool, &migrator).await
+        .map_err(|e| anyhow::anyhow!("マイグレーションのチェックサムの読み替えに失敗: {e}"))?;
     migrator.run(pool).await
         .map_err(|e| anyhow::anyhow!("Migration failed: {}", e))?;
 

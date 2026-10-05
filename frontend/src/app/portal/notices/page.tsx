@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { FileText, Receipt, Download, CheckCircle } from "lucide-react";
 import { toast } from "sonner";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { fetchPortalNotices, confirmPortalNotice } from "@/lib/api";
 
 interface Notice {
@@ -24,6 +25,7 @@ export default function PortalNoticesPage() {
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pdfType, setPdfType] = useState<"payment-notice" | "invoice">("payment-notice");
+  const [confirmReceipt, setConfirmReceipt] = useState(false);
 
   const { data, isLoading } = useQuery({
     queryKey: ["portal-notices"],
@@ -48,7 +50,12 @@ export default function PortalNoticesPage() {
 
   const handleConfirm = useCallback(() => {
     if (!selected) return;
-    if (!window.confirm(`請求書 ${selected.notice_id} を承諾しますか？\n\nこの操作により、当社が代理作成した請求書を「貴社が発行した請求書」として正式に受理します。\n一度承諾すると取り消しできません。`)) return;
+    setConfirmReceipt(true);
+  }, [selected]);
+
+  const doConfirm = useCallback(() => {
+    if (!selected) return;
+    setConfirmReceipt(false);
     confirmMutation.mutate(selected.notice_id);
   }, [selected, confirmMutation]);
 
@@ -174,6 +181,21 @@ export default function PortalNoticesPage() {
           <iframe src={pdfUrl} className="w-full h-[600px]" title="PDF Preview" />
         </div>
       )}
+
+      <ConfirmSheet
+        open={confirmReceipt && selected !== undefined}
+        title="支払通知を承諾"
+        facts={selected ? [
+          { label: "通知番号", value: selected.notice_id },
+          { label: "対象年月", value: selected.target_month },
+          { label: "金額(税込)", value: `¥${selected.total.toLocaleString()}` },
+        ] : undefined}
+        description="この操作により、当社が代理作成した請求書を「貴社が発行した請求書」として正式に受理します。一度承諾すると取り消しできません。"
+        confirmLabel="承諾"
+        loading={confirmMutation.isPending}
+        onConfirm={doConfirm}
+        onCancel={() => setConfirmReceipt(false)}
+      />
     </div>
   );
 }

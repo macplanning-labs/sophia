@@ -1,6 +1,6 @@
 /// infrastructure/attachment_parsers/payment_notice_pdf_parser.rs — 支払通知書・請求書PDF自動パーサー
 ///
-/// EDI_MP `billing/services/payment_notice_pdf_parser.py`（イービジネスEDI-OASIS形式）を
+/// EDI_MP `billing/services/payment_notice_pdf_parser.py`（取引先 EDI の支払通知書の形式）を
 /// Rustへ移植したもの。テキスト抽出は呼び出し元(mod.rs)がpdf-extractで行う。
 
 use chrono::NaiveDate;

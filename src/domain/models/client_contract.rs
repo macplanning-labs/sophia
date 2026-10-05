@@ -13,16 +13,36 @@ pub enum ReceivedOrderStatus {
     ReportReceived,
     ReportSent,
     Invoiced,
+    InvoiceSent,
+    InvoiceConfirmed,
     Paid,
 }
 
 impl ReceivedOrderStatus {
+    /// 受注書の状態(進行順)。許可リスト・画面の選択肢は、ここを唯一の正とする
+    pub const ALL: [Self; 7] = [
+        Self::Registered,
+        Self::ReportReceived,
+        Self::ReportSent,
+        Self::Invoiced,
+        Self::InvoiceSent,
+        Self::InvoiceConfirmed,
+        Self::Paid,
+    ];
+
+    /// 厳密に解釈する(未知の値は None)。`from_str` は未知を Registered にするので、入力の検証には使わない
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Registered => "REGISTERED",
             Self::ReportReceived => "REPORT_RECEIVED",
             Self::ReportSent => "REPORT_SENT",
             Self::Invoiced => "INVOICED",
+            Self::InvoiceSent => "INVOICE_SENT",
+            Self::InvoiceConfirmed => "INVOICE_CONFIRMED",
             Self::Paid => "PAID",
         }
     }
@@ -33,6 +53,8 @@ impl ReceivedOrderStatus {
             Self::ReportReceived => "勤怠受領",
             Self::ReportSent => "報告書送付",
             Self::Invoiced => "請求書処理",
+            Self::InvoiceSent => "請求送付",
+            Self::InvoiceConfirmed => "受諾",
             Self::Paid => "入金済",
         }
     }
@@ -43,6 +65,8 @@ impl ReceivedOrderStatus {
             "REPORT_RECEIVED" => Self::ReportReceived,
             "REPORT_SENT" => Self::ReportSent,
             "INVOICED" => Self::Invoiced,
+            "INVOICE_SENT" => Self::InvoiceSent,
+            "INVOICE_CONFIRMED" => Self::InvoiceConfirmed,
             "PAID" => Self::Paid,
             _ => Self::Registered,
         }
@@ -54,6 +78,8 @@ impl ReceivedOrderStatus {
             Self::ReportReceived => "bg-warning text-dark",
             Self::ReportSent => "bg-info",
             Self::Invoiced => "bg-primary",
+            Self::InvoiceSent => "bg-blue-600",
+            Self::InvoiceConfirmed => "bg-emerald-600",
             Self::Paid => "bg-success",
         }
     }
@@ -225,4 +251,29 @@ pub struct ClientContractWithNames {
     pub project_name: String,
     pub client_name: String,
     pub engineer_name: String,
+}
+
+#[cfg(test)]
+mod received_order_status_tests {
+    use super::ReceivedOrderStatus;
+
+    #[test]
+    fn all_has_seven_distinct_statuses_and_parse_roundtrips() {
+        let names: Vec<&str> = ReceivedOrderStatus::ALL.iter().map(|s| s.as_str()).collect();
+        assert_eq!(names.len(), 7);
+        let mut dedup = names.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(dedup.len(), 7, "重複なし");
+        for s in ReceivedOrderStatus::ALL {
+            assert_eq!(ReceivedOrderStatus::parse(s.as_str()), Some(s));
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unknown_values() {
+        for bad in ["", "ACCEPTED", "invoice_sent", "CANCELLED", "SENT"] {
+            assert_eq!(ReceivedOrderStatus::parse(bad), None, "{bad}");
+        }
+    }
 }

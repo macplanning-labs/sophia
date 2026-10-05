@@ -9,6 +9,7 @@
 /// 3. POST /invite/{uuid}/register/begin    — パスキー登録開始（JSON）
 /// 4. POST /invite/{uuid}/register/complete — パスキー登録完了（JSON）→ ユーザー作成
 
+use crate::infrastructure::db_tx::LogErr;
 use crate::presentation::cookie_util;
 use axum::{
     extract::{Path, State},
@@ -95,7 +96,7 @@ pub async fn api_invite_status(
         }
     };
 
-    let invitation = invite_repo::find_invitation_by_token(&state.pool, token).await.ok().flatten();
+    let invitation = invite_repo::find_invitation_by_token(&state.pool, token).await.log_err().ok().flatten();
     let Some(inv) = invitation else {
         return Json(serde_json::json!({ "valid": false, "error": "招待が見つかりません" })).into_response();
     };
@@ -154,7 +155,7 @@ pub async fn api_invite_accept(
         }
     };
 
-    let invitation = invite_repo::find_invitation_by_token(&state.pool, token).await.ok().flatten();
+    let invitation = invite_repo::find_invitation_by_token(&state.pool, token).await.log_err().ok().flatten();
     let Some(inv) = invitation else {
         return (
             StatusCode::NOT_FOUND,
@@ -244,7 +245,7 @@ pub async fn accept_form(
     };
 
     // 招待情報取得
-    let invitation = invite_repo::find_invitation_by_token(&state.pool, token).await.ok().flatten();
+    let invitation = invite_repo::find_invitation_by_token(&state.pool, token).await.log_err().ok().flatten();
 
     let invite_repo::InvitationRow { id: inv_id, partner_id, email, display_name, is_used, expires_at } = match invitation {
         Some(inv) => inv,
@@ -255,7 +256,7 @@ pub async fn accept_form(
 
     if is_used {
         // 使用済みでも、エンジニアが存在すればログインさせる
-        let engineer = invite_repo::find_active_engineer_id(&state.pool, &email, &partner_id).await.ok().flatten();
+        let engineer = invite_repo::find_active_engineer_id(&state.pool, &email, &partner_id).await.log_err().ok().flatten();
 
         if let Some(engineer_id) = engineer {
             return create_engineer_session_and_redirect(&state.pool, engineer_id).await;
@@ -272,7 +273,7 @@ pub async fn accept_form(
     }
 
     // エンジニアを特定
-    let engineer = invite_repo::find_active_engineer_id(&state.pool, &email, &partner_id).await.ok().flatten();
+    let engineer = invite_repo::find_active_engineer_id(&state.pool, &email, &partner_id).await.log_err().ok().flatten();
 
     let Some(engineer_id) = engineer else {
         return axum::response::Html(format!(

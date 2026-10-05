@@ -50,14 +50,35 @@ export function getInvoiceReadinessChecks(
     ];
   }
 
-  if (r.client_edi_system_type === "EDI_OASIS") {
+  if (r.client_invoice_by_client) {
     checks.push({
       id: "edi",
       label: "請求方法",
       status: "na",
-      detail: "EDI連携クライアント（Sophiaからの発行対象外）",
+      detail: "請求書は先方が作る取引先（Sophiaからの発行対象外）",
     });
     return checks;
+  }
+
+  // 請求書は注文書が正本。注文書が無い月は発行できない
+  if (r.received_order_id == null) {
+    checks.push({
+      id: "received_order",
+      label: "注文書",
+      status: "missing",
+      detail: `${monthLabel}分の注文書がありません`,
+      linkPath: "/received-orders",
+      linkLabel: "受注書一覧を開く",
+    });
+  } else {
+    checks.push({
+      id: "received_order",
+      label: "注文書",
+      status: "ok",
+      detail: "登録済み",
+      linkPath: `/received-orders/${r.received_order_id}`,
+      linkLabel: "注文書を確認",
+    });
   }
 
   if (!r.timesheet_id) {

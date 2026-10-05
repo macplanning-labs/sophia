@@ -2,6 +2,7 @@ use axum::{
     extract::{Extension, Path, State},
     response::IntoResponse,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use crate::infrastructure::repositories::order_repo;
 use crate::presentation::middleware::role::AuthUser;
@@ -19,7 +20,7 @@ pub async fn api_notices(
 ) -> impl IntoResponse {
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
 
-    let rows = order_repo::list_portal_notices(&pool, partner_id).await.unwrap_or_default();
+    let rows = order_repo::list_portal_notices(&pool, partner_id).await.log_err().unwrap_or_default();
 
     let notices: Vec<serde_json::Value> = rows.into_iter().map(|(notice_id, project_name, target_month, notice_date, total, partner_accepted_at, uuid)| {
         serde_json::json!({
@@ -117,7 +118,7 @@ pub async fn api_invoice_pdf(
     use crate::presentation::http_util;
 
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
-    let notice = order_repo::find_payment_notice_for_partner(&pool, &notice_id, partner_id).await.ok().flatten();
+    let notice = order_repo::find_payment_notice_for_partner(&pool, &notice_id, partner_id).await.log_err().ok().flatten();
 
     let notice = match notice {
         Some(n) => n,
@@ -154,7 +155,7 @@ pub async fn api_payment_notice_pdf(
     use crate::presentation::http_util;
 
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
-    let notice = order_repo::find_payment_notice_for_partner(&pool, &notice_id, partner_id).await.ok().flatten();
+    let notice = order_repo::find_payment_notice_for_partner(&pool, &notice_id, partner_id).await.log_err().ok().flatten();
 
     let notice = match notice {
         Some(n) => n,
@@ -188,7 +189,7 @@ async fn send_invoice_approve_notification(pool: &PgPool, notice_id: &str, partn
     use crate::domain::services::email_service::{EmailService, compose_invoice_approve_email};
 
     let partner_name: String = order_repo::find_partner_name_email(pool, partner_id)
-        .await.ok().flatten().map(|(name, _email)| name).unwrap_or_default();
+        .await.log_err().ok().flatten().map(|(name, _email)| name).unwrap_or_default();
 
     let email_svc = EmailService::new(pool.clone());
     let notify_email = crate::domain::services::email_service::get_notify_email(pool).await;

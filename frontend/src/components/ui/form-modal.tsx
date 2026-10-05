@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback } from "react";
+import { DateInput } from "@/components/ui/date-input";
 import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
 
@@ -126,12 +127,13 @@ interface FormInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
 }
 
 export function FormInput({ className, ...props }: FormInputProps) {
-  return (
-    <input
-      className={`w-full px-3 py-2 bg-muted border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary disabled:opacity-50 ${className ?? ""}`}
-      {...props}
-    />
-  );
+  const cls = `w-full px-3 py-2 bg-muted border border-border rounded-md text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50 focus:border-primary disabled:opacity-50 ${className ?? ""}`;
+  if (props.type === "date") {
+    const { type: _type, ...rest } = props;
+    void _type;
+    return <DateInput className={cls} {...rest} />;
+  }
+  return <input className={cls} {...props} />;
 }
 
 interface FormSelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {

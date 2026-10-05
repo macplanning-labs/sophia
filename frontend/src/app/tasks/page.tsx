@@ -63,6 +63,8 @@ export default function TasksPage() {
             className="bg-muted border border-border text-sm text-foreground rounded-md px-2 py-1.5"
           />
           <button
+            // タスク画面は撤去予定(UI刷新フェーズ4)のため、confirm のまま残す
+            // eslint-disable-next-line no-restricted-globals
             onClick={() => { if (confirm(`${genMonth}のタスクを自動生成しますか？`)) generateMut.mutate(genMonth); }}
             disabled={generateMut.isPending}
             className="px-3 py-1.5 text-xs font-medium rounded-md bg-teal-500/10 text-teal-400 border border-teal-500/30 hover:bg-teal-500/20 transition-colors disabled:opacity-50"

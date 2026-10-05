@@ -5,7 +5,8 @@ import { fetchDashboard } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Clock } from "lucide-react";
-import { EdiPanel, MailPanel } from "@/components/dashboard/operations-panel";
+import { MailPanel } from "@/components/dashboard/operations-panel";
+import { custom } from "@/custom";
 import { ProjectSection } from "@/components/dashboard/project-section";
 import { MailThreadCards } from "@/components/dashboard/mail-thread-cards";
 import { PageHeader } from "@/components/ui/page-header";
@@ -48,7 +49,7 @@ export default function DashboardPage() {
 
       {/* EDI操作 + メール */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <EdiPanel />
+        {custom.EdiPanel && <custom.EdiPanel />}
         <MailPanel mailLogs={data?.mail_logs ?? []} />
       </div>
     </div>

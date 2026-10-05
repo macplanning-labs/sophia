@@ -5,8 +5,9 @@
 /// （JpPintInvoice / JpPintSelfBillingInvoice）をそのままPOSTする実装とし、
 /// 実プロバイダーのAPI形式が判明した時点でリクエスト整形部分のみ調整する。
 ///
-/// エラー分類・from_env()での設定読込は edi_oasis_client.rs と同じパターン。
+/// エラー分類・from_env()での設定読込は、取引先 EDI のクライアント（crate::custom）と同じパターン。
 
+use crate::infrastructure::db_tx::LogErr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::services::jp_pint_mapper::{JpPintInvoice, JpPintSelfBillingInvoice};
@@ -97,7 +98,7 @@ impl PeppolClient {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp.text().await.log_err().unwrap_or_default();
             return Err(classify_api_error(status, body, "Peppol文書送信失敗"));
         }
 

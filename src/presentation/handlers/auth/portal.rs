@@ -1,3 +1,4 @@
+use crate::infrastructure::db_tx::LogErr;
 use crate::presentation::cookie_util;
 use crate::presentation::auth_messages::{client_ip, LOCKED_MSG};
 use crate::config::AppState;
@@ -66,7 +67,7 @@ pub async fn api_portal_login(
     }
 
     // m_engineer からメールアドレスで検索
-    let engineer = auth_repo::find_engineer_by_email(&pool, email).await.ok().flatten();
+    let engineer = auth_repo::find_engineer_by_email(&pool, email).await.log_err().ok().flatten();
 
     let Some((engineer_id, engineer_name)) = engineer else {
         // セキュリティ: メールが存在しなくても同じレスポンスを返す
@@ -126,7 +127,7 @@ pub async fn api_portal_link_status(
                 .into_response();
         }
     };
-    let exists = auth_repo::engineer_login_token_valid(&pool, token).await.unwrap_or(false);
+    let exists = auth_repo::engineer_login_token_valid(&pool, token).await.log_err().unwrap_or(false);
     if !exists {
         return axum::Json(serde_json::json!({
             "valid": false,
@@ -153,7 +154,7 @@ pub async fn api_portal_link_confirm(
         }
     };
 
-    let login_token = auth_repo::find_valid_engineer_login_token(&pool, token).await.ok().flatten();
+    let login_token = auth_repo::find_valid_engineer_login_token(&pool, token).await.log_err().ok().flatten();
     let Some((token_id, engineer_id)) = login_token else {
         return (
             axum::http::StatusCode::GONE,
@@ -212,7 +213,7 @@ pub async fn portal_auth_verify(
     };
 
     // トークン有効性チェック（消費はしない）
-    let exists = auth_repo::engineer_login_token_valid(&pool, token).await.unwrap_or(false);
+    let exists = auth_repo::engineer_login_token_valid(&pool, token).await.log_err().unwrap_or(false);
 
     if !exists {
         return axum::response::Html(
@@ -263,7 +264,7 @@ pub async fn portal_auth_confirm(
     };
 
     // トークン検証
-    let login_token = auth_repo::find_valid_engineer_login_token(&pool, token).await.ok().flatten();
+    let login_token = auth_repo::find_valid_engineer_login_token(&pool, token).await.log_err().ok().flatten();
 
     let Some((token_id, engineer_id)) = login_token else {
         return axum::response::Html(

@@ -31,6 +31,18 @@ pub async fn api_update(
     State(pool): State<PgPool>,
     Json(form): Json<CompanyInfoUpdate>,
 ) -> impl IntoResponse {
+    // 利益の目安の検証（0〜100の整数）
+    if let Some(Err(e)) = form.target_margin_direct.map(company_info_repo::validate_margin_target) {
+        return (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false, "error": format!("利益の目安(直受け): {}", e)
+        }))).into_response();
+    }
+    if let Some(Err(e)) = form.target_margin_subcontract.map(company_info_repo::validate_margin_target) {
+        return (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false, "error": format!("利益の目安(下請け): {}", e)
+        }))).into_response();
+    }
+
     let existing = match company_info_repo::get_company_info(&pool).await {
         Ok(Some(info)) => info,
         Ok(None) => return (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({

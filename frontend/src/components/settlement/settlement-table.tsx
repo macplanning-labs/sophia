@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { CreatedNotice, SettlementViewRow } from "@/lib/types";
+import type { CreatedInvoice, CreatedNotice, SettlementViewRow } from "@/lib/types";
 import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
   isReadyForIssue,
 } from "@/lib/guidance/settlement-readiness";
 import { CreatedNoticesInline } from "@/components/settlement/created-notices-inline";
+import { CreatedInvoicesInline } from "@/components/settlement/created-invoices-inline";
 import { IssueReadinessChips } from "@/components/settlement/issue-readiness-chips";
 
 export type SettlementViewMode = "billing" | "payment";
@@ -47,6 +48,9 @@ interface Props {
   /** 一括発行直後に表示する支払通知（パートナー行の下にインライン表示） */
   createdNotices?: CreatedNotice[];
   onDismissCreatedNotices?: (partnerId: string) => void;
+  /** 一括発行直後に表示する請求書（クライアント行の下にインライン表示） */
+  createdInvoices?: CreatedInvoice[];
+  onDismissCreatedInvoices?: (clientId: number) => void;
 }
 
 interface Group {
@@ -223,6 +227,8 @@ export function SettlementTable({
   partners,
   createdNotices = [],
   onDismissCreatedNotices,
+  createdInvoices = [],
+  onDismissCreatedInvoices,
 }: Props) {
   const monthLabel = formatMonthLabel(month);
   const groups = useMemo(() => buildGroups(rows, viewMode, monthLabel), [rows, viewMode, monthLabel]);
@@ -238,6 +244,31 @@ export function SettlementTable({
     }
     return map;
   }, [createdNotices]);
+
+  const invoicesByClient = useMemo(() => {
+    const map = new Map<number, CreatedInvoice[]>();
+    for (const inv of createdInvoices) {
+      const list = map.get(inv.client_id);
+      if (list) list.push(inv);
+      else map.set(inv.client_id, [inv]);
+    }
+    return map;
+  }, [createdInvoices]);
+
+  useEffect(() => {
+    if (createdInvoices.length === 0) return;
+    const keysToExpand = new Set<string>();
+    for (const g of groups) {
+      const cid = g.rows[0]?.row.client_id;
+      if (cid != null && invoicesByClient.has(cid)) keysToExpand.add(g.key);
+    }
+    if (keysToExpand.size === 0) return;
+    setExpanded((prev) => {
+      const current = prev ?? new Set(groups.map((gr) => gr.key));
+      for (const k of keysToExpand) current.add(k);
+      return new Set(current);
+    });
+  }, [createdInvoices, groups, invoicesByClient]);
 
   useEffect(() => {
     if (createdNotices.length === 0) return;
@@ -442,6 +473,16 @@ export function SettlementTable({
                         ? () => onDismissCreatedNotices(partnerIdForGroup)
                         : undefined
                     }
+                    createdInvoices={
+                      viewMode === "billing" && g.rows[0]?.row.client_id != null
+                        ? invoicesByClient.get(g.rows[0].row.client_id) ?? []
+                        : []
+                    }
+                    onDismissCreatedInvoices={
+                      g.rows[0]?.row.client_id != null && onDismissCreatedInvoices
+                        ? () => onDismissCreatedInvoices(g.rows[0].row.client_id)
+                        : undefined
+                    }
                     onToggleExpand={() => toggleExpand(g.key)}
                     onToggleGroup={() => toggleGroup(g)}
                   />
@@ -508,6 +549,8 @@ function GroupRows({
   monthLabel,
   createdNotices = [],
   onDismissCreatedNotices,
+  createdInvoices = [],
+  onDismissCreatedInvoices,
   onToggleExpand,
   onToggleGroup,
 }: {
@@ -521,6 +564,8 @@ function GroupRows({
   monthLabel: string;
   createdNotices?: CreatedNotice[];
   onDismissCreatedNotices?: () => void;
+  createdInvoices?: CreatedInvoice[];
+  onDismissCreatedInvoices?: () => void;
   onToggleExpand: () => void;
   onToggleGroup: () => void;
 }) {
@@ -692,6 +737,14 @@ function GroupRows({
             </tr>
           );
         })}
+
+      {open && viewMode === "billing" && createdInvoices.length > 0 && onDismissCreatedInvoices && (
+        <tr className="border-b border-border">
+          <td colSpan={COLUMN_COUNT} className="p-0 bg-sky-500/[0.02]">
+            <CreatedInvoicesInline invoices={createdInvoices} onDismiss={onDismissCreatedInvoices} />
+          </td>
+        </tr>
+      )}
 
       {open && viewMode === "payment" && createdNotices.length > 0 && onDismissCreatedNotices && (
         <tr className="border-b border-border">

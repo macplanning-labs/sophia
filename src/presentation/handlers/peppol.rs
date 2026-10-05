@@ -11,6 +11,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::domain::services::jp_pint_mapper;
@@ -29,7 +30,7 @@ pub async fn send_invoice(State(pool): State<PgPool>, Path(id): Path<i64>) -> im
         Ok(None) => return (axum::http::StatusCode::NOT_FOUND, err_json("請求書が見つかりません")).into_response(),
         Err(e) => { tracing::error!("peppol send_invoice: find_invoice failed: {:?}", e); return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, err_json("内部エラー")).into_response(); }
     };
-    let items = billing_repo::list_invoice_items(&pool, id).await.unwrap_or_default();
+    let items = billing_repo::list_invoice_items(&pool, id).await.log_err().unwrap_or_default();
     let client = match client_repo::find_by_id(&pool, invoice.client_id).await {
         Ok(Some(c)) => c,
         _ => return (axum::http::StatusCode::UNPROCESSABLE_ENTITY, err_json("クライアント情報が見つかりません")).into_response(),
@@ -81,12 +82,12 @@ pub async fn send_notice(State(pool): State<PgPool>, Path(id): Path<String>) -> 
         Ok(None) => return (axum::http::StatusCode::NOT_FOUND, err_json("支払通知書が見つかりません")).into_response(),
         Err(e) => { tracing::error!("peppol send_notice: find_payment_notice failed: {:?}", e); return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, err_json("内部エラー")).into_response(); }
     };
-    let items = order_repo::list_payment_notice_items(&pool, &id).await.unwrap_or_default();
+    let items = order_repo::list_payment_notice_items(&pool, &id).await.log_err().unwrap_or_default();
 
     let mut item_names = Vec::with_capacity(items.len());
     for item in &items {
         let name = order_repo::find_engineer_name_for_partner_contract(&pool, item.partner_contract_id)
-            .await.ok().flatten().unwrap_or_default();
+            .await.log_err().ok().flatten().unwrap_or_default();
         item_names.push(name);
     }
 

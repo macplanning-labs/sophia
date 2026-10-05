@@ -1,6 +1,6 @@
 /// infrastructure/peppol_importer.rs — Peppol受信文書の取込・自動照合
 ///
-/// billing_importer.rs（EDI-OASISからの請求データ取込）と同じ構造。
+/// 取引先 EDI からの請求データ取込と同じ構造。
 /// 受信した自己発行請求書（クライアントが自社に代わって発行したセルフビリング文書）を
 /// t_peppol_transmissionにRECEIVEDとして記録し、送信元 + 対象月 + 金額でt_billing_invoiceを
 /// 検索して自動突合する。完全一致しない場合はUNMATCHEDのまま残し、確定処理は行わない（雛形）。
@@ -173,7 +173,7 @@ pub async fn import_inbound_order(
         ).await.map_err(|e| format!("t_received_order_item作成失敗: {e}"))?;
     }
 
-    tx.commit().await.map_err(|e| format!("Commit error: {e}"))?;
+    crate::infrastructure::db_tx::commit_checked(tx).await.map_err(|e| format!("Commit error: {e}"))?;
 
     peppol_repo::mark_matched(pool, log_id, "t_received_order", &order_id.to_string())
         .await

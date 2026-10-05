@@ -111,6 +111,23 @@ interface PartnerContractRow {
   fields: ContractFields;
 }
 
+interface ClientContractRow {
+  key: string;
+  engineer: SelectOrCreateValue;
+  fields: ContractFields;
+}
+
+function newClientContractRow(): ClientContractRow {
+  return { key: crypto.randomUUID(), engineer: emptySelectOrCreate(), fields: { ...EMPTY_CONTRACT_FIELDS } };
+}
+
+// 1行1名の入力行（列幅を行ごとにそろえ、横並びで比べられるようにする）
+const CELL = "!px-2 !py-1.5 !text-xs whitespace-nowrap text-ellipsis";
+const CELL_DATE = "!pl-2 !pr-8 !py-1.5 !text-xs whitespace-nowrap";
+const ROW_HEAD = "grid gap-2 text-[11px] font-medium text-muted-foreground px-0.5 whitespace-nowrap [&>span]:overflow-hidden [&>span]:text-ellipsis";
+const CLIENT_COLS = "minmax(200px,1.6fr) 150px 150px 100px 100px 70px 70px 64px minmax(120px,1fr) 32px";
+const PARTNER_COLS = "minmax(150px,1fr) minmax(200px,1.4fr) minmax(150px,1fr) 150px 150px 100px 100px 70px 70px 64px 32px";
+
 const DEFAULT_WORK_LOCATION = "弊社指定場所";
 
 function defaultWorkLocation(options: { value: number | string; label: string }[]): SelectOrCreateValue {
@@ -152,10 +169,10 @@ export function ProjectWizard() {
 
   // ② クライアント契約(スキップ可能)
   const [skipClientContract, setSkipClientContract] = useState(false);
-  const [ccEngineer, setCcEngineer] = useState<SelectOrCreateValue>(emptySelectOrCreate());
-  const [ccFields, setCcFields] = useState<ContractFields>({ ...EMPTY_CONTRACT_FIELDS });
+  // 受注契約は技術者ごとに1件。複数人分を入力できる
+  const [clientRows, setClientRows] = useState<ClientContractRow[]>([newClientContractRow()]);
 
-  // ③ パートナー契約(0件以上)
+  // ③ パートナー契約(スキップ可能。自社社員のみの場合は「スキップして作成」)
   const [partnerRows, setPartnerRows] = useState<PartnerContractRow[]>([]);
 
   const engineerNewFields = (partnerOptions: { value: string; label: string }[]): NewFieldDef[] => [
@@ -174,7 +191,7 @@ export function ProjectWizard() {
   const clientOptions = formData?.clients ?? [];
 
   const createMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: (skipPartners: boolean) => {
       const body = {
         project: {
           client_id: Number(clientId),
@@ -185,11 +202,11 @@ export function ProjectWizard() {
           report_deadline_holiday_rule: reportDeadlineHolidayRule || null,
           report_request_day: reportRequestDay ? Number(reportRequestDay) : null,
         },
-        client_contract: skipClientContract ? null : {
-          engineer: selectOrCreateToRef(ccEngineer),
-          ...contractFieldsToPayload(ccFields),
-        },
-        partner_contracts: partnerRows.map((row) => ({
+        client_contracts: skipClientContract ? [] : clientRows.map((row) => ({
+          engineer: selectOrCreateToRef(row.engineer),
+          ...contractFieldsToPayload(row.fields),
+        })),
+        partner_contracts: (skipPartners ? [] : partnerRows).map((row) => ({
           partner_id: row.partner_id,
           engineer: selectOrCreateToRef(row.engineer),
           work_location: selectOrCreateToRef(row.work_location),
@@ -211,9 +228,24 @@ export function ProjectWizard() {
   });
 
   const canProceedStep1 = clientId !== "" && name.trim() !== "";
-  const canProceedStep2 = skipClientContract || (
-    (ccEngineer.kind === "existing" ? ccEngineer.id !== "" : (ccEngineer.fields.name ?? "").trim() !== "")
-    && ccFields.start_date !== "" && ccFields.end_date !== "" && Number(ccFields.base_rate) > 0
+  const canProceedStep2 = (
+    clientRows.length > 0 && clientRows.every((r) =>
+      (r.engineer.kind === "existing" ? r.engineer.id !== "" : (r.engineer.fields.name ?? "").trim() !== "")
+      && r.fields.start_date !== "" && r.fields.end_date !== "" && Number(r.fields.base_rate) > 0
+    )
+  );
+
+  const addClientRow = () => setClientRows((rows) => [...rows, newClientContractRow()]);
+  const removeClientRow = (key: string) => setClientRows((rows) => rows.filter((r) => r.key !== key));
+  const updateClientRow = (key: string, patch: Partial<ClientContractRow>) =>
+    setClientRows((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+
+  const canCreate = (
+    partnerRows.length > 0 && partnerRows.every((r) =>
+      r.partner_id !== ""
+      && (r.engineer.kind === "existing" ? r.engineer.id !== "" : (r.engineer.fields.name ?? "").trim() !== "")
+      && r.fields.start_date !== "" && r.fields.end_date !== "" && Number(r.fields.base_rate) > 0
+    )
   );
 
   const addPartnerRow = () =>
@@ -223,18 +255,18 @@ export function ProjectWizard() {
     setPartnerRows((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
 
   return (
-    <div className="max-w-3xl mx-auto p-6 space-y-6">
+    <div className={`${step === 1 ? "max-w-3xl" : "max-w-[1400px]"} mx-auto p-6 space-y-6`}>
       <div>
         <h1 className="text-xl font-bold text-foreground">案件 新規作成</h1>
-        <p className="text-xs text-muted-foreground mt-1">案件情報 → クライアント契約 → パートナー契約の順に入力します</p>
+        <p className="text-xs text-muted-foreground mt-1">案件情報 → 受注契約 → 発注契約の順に入力します。受注契約・発注契約は、技術者ごとに1行ずつ入力します</p>
       </div>
 
       {/* ステップインジケータ */}
       <div className="flex items-center gap-2 text-xs">
         {[
           { n: 1, label: "案件情報" },
-          { n: 2, label: "クライアント契約" },
-          { n: 3, label: "パートナー契約" },
+          { n: 2, label: "受注契約" },
+          { n: 3, label: "発注契約(パートナー)" },
         ].map((s, i) => (
           <div key={s.n} className="flex items-center gap-2">
             <span
@@ -282,115 +314,86 @@ export function ProjectWizard() {
         )}
 
         {step === 2 && (
-          <>
-            <label className="flex items-center gap-2 text-sm text-foreground">
-              <input type="checkbox" checked={skipClientContract} onChange={(e) => setSkipClientContract(e.target.checked)} />
-              この案件にはクライアント契約を今は登録しない(後で受注契約ページから登録します)
-            </label>
-            {!skipClientContract && (
-              <div className="space-y-4 pt-2">
-                <FormField label="エンジニア(自社社員)" required>
-                  <SelectOrCreate
-                    options={engineerOptions.map((e: { value: number; label: string }) => ({ value: String(e.value), label: e.label }))}
-                    value={ccEngineer}
-                    onChange={setCcEngineer}
-                    newFields={engineerNewFields(partnerOptions.map((p: { value: string; label: string }) => ({ value: p.value, label: p.label })))}
-                  />
-                </FormField>
-                <div className="grid grid-cols-2 gap-4">
-                  <FormField label="開始日" required>
-                    <FormInput type="date" value={ccFields.start_date} onChange={(e) => setCcFields({ ...ccFields, start_date: e.target.value })} />
-                  </FormField>
-                  <FormField label="終了日" required>
-                    <FormInput type="date" value={ccFields.end_date} onChange={(e) => setCcFields({ ...ccFields, end_date: e.target.value })} />
-                  </FormField>
+          <div className="space-y-3">
+            <div className="overflow-x-auto">
+              <div className="min-w-[1100px] space-y-2">
+                <div className={ROW_HEAD} style={{ gridTemplateColumns: CLIENT_COLS }}>
+                  <span>技術者 *</span><span>開始日 *</span><span>終了日 *</span><span>精算方式 *</span>
+                  <span>単金 *</span><span>下限</span><span>上限</span><span>工数</span><span>備考</span><span />
                 </div>
-                <div className="grid grid-cols-4 gap-4">
-                  <FormField label="精算方式" required>
-                    <FormSelect options={SETTLEMENT_TYPES} value={ccFields.settlement_type} onChange={(e) => setCcFields(calcRates({ ...ccFields, settlement_type: e.target.value }))} />
-                  </FormField>
-                  <FormField label="単金" required>
-                    <FormInput type="number" value={ccFields.base_rate} onChange={(e) => setCcFields(calcRates({ ...ccFields, base_rate: e.target.value }))} />
-                  </FormField>
-                  <FormField label="下限時間">
-                    <FormInput type="number" value={ccFields.lower_limit_hours} onChange={(e) => setCcFields(calcRates({ ...ccFields, lower_limit_hours: e.target.value }))} />
-                  </FormField>
-                  <FormField label="上限時間">
-                    <FormInput type="number" value={ccFields.upper_limit_hours} onChange={(e) => setCcFields(calcRates({ ...ccFields, upper_limit_hours: e.target.value }))} />
-                  </FormField>
-                </div>
-                <FormField label="工数">
-                  <FormInput type="number" step="0.1" value={ccFields.effort} onChange={(e) => setCcFields({ ...ccFields, effort: e.target.value })} />
-                </FormField>
-                <FormField label="備考">
-                  <FormInput value={ccFields.remarks} onChange={(e) => setCcFields({ ...ccFields, remarks: e.target.value })} />
-                </FormField>
+                {clientRows.map((row) => (
+                  <div key={row.key} className="grid gap-2 items-start" style={{ gridTemplateColumns: CLIENT_COLS }}>
+                    <SelectOrCreate
+                      options={engineerOptions.map((e: { value: number; label: string }) => ({ value: String(e.value), label: e.label }))}
+                      value={row.engineer}
+                      onChange={(v) => updateClientRow(row.key, { engineer: v })}
+                      newFields={engineerNewFields(partnerOptions.map((p: { value: string; label: string }) => ({ value: p.value, label: p.label })))}
+                    />
+                    <FormInput className={CELL_DATE} type="date" value={row.fields.start_date} onChange={(e) => updateClientRow(row.key, { fields: { ...row.fields, start_date: e.target.value } })} />
+                    <FormInput className={CELL_DATE} type="date" value={row.fields.end_date} onChange={(e) => updateClientRow(row.key, { fields: { ...row.fields, end_date: e.target.value } })} />
+                    <FormSelect className={CELL} options={SETTLEMENT_TYPES} value={row.fields.settlement_type} onChange={(e) => updateClientRow(row.key, { fields: calcRates({ ...row.fields, settlement_type: e.target.value }) })} />
+                    <FormInput className={CELL} type="number" value={row.fields.base_rate} onChange={(e) => updateClientRow(row.key, { fields: calcRates({ ...row.fields, base_rate: e.target.value }) })} />
+                    <FormInput className={CELL} type="number" value={row.fields.lower_limit_hours} onChange={(e) => updateClientRow(row.key, { fields: calcRates({ ...row.fields, lower_limit_hours: e.target.value }) })} />
+                    <FormInput className={CELL} type="number" value={row.fields.upper_limit_hours} onChange={(e) => updateClientRow(row.key, { fields: calcRates({ ...row.fields, upper_limit_hours: e.target.value }) })} />
+                    <FormInput className={CELL} type="number" step="0.1" value={row.fields.effort} onChange={(e) => updateClientRow(row.key, { fields: { ...row.fields, effort: e.target.value } })} />
+                    <FormInput className={CELL} value={row.fields.remarks} onChange={(e) => updateClientRow(row.key, { fields: { ...row.fields, remarks: e.target.value } })} />
+                    <button type="button" onClick={() => removeClientRow(row.key)} className="p-1.5 text-muted-foreground hover:text-red-400" aria-label="この行を削除">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
               </div>
-            )}
-          </>
+            </div>
+            <Button variant="outline" size="sm" onClick={addClientRow} className="gap-1 border-border">
+              <Plus className="w-4 h-4" /> 受注契約を追加(1行 = 1名)
+            </Button>
+          </div>
         )}
 
         {step === 3 && (
-          <div className="space-y-6">
+          <div className="space-y-3">
             {partnerRows.length === 0 && (
-              <p className="text-sm text-muted-foreground">パートナー契約はまだ追加されていません。自社エンジニアのみで回す案件の場合はそのまま作成できます。</p>
+              <p className="text-sm text-muted-foreground">発注契約を追加してください。自社社員のみの場合は「スキップして作成」を押してください。</p>
             )}
-            {partnerRows.map((row, idx) => (
-              <div key={row.key} className="border border-border rounded-lg p-4 space-y-4 relative">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-muted-foreground">パートナー契約 #{idx + 1}</span>
-                  <button type="button" onClick={() => removePartnerRow(row.key)} className="text-muted-foreground hover:text-red-400">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+            {partnerRows.length > 0 && (
+              <div className="overflow-x-auto">
+                <div className="min-w-[1300px] space-y-2">
+                  <div className={ROW_HEAD} style={{ gridTemplateColumns: PARTNER_COLS }}>
+                    <span>パートナー *</span><span>技術者 *</span><span>作業場所</span><span>開始日 *</span><span>終了日 *</span>
+                    <span>精算方式 *</span><span>単金 *</span><span>下限</span><span>上限</span><span>工数</span><span />
+                  </div>
+                  {partnerRows.map((row) => (
+                    <div key={row.key} className="grid gap-2 items-start" style={{ gridTemplateColumns: PARTNER_COLS }}>
+                      <FormSelect className={CELL} options={partnerOptions.map((p: { value: string; label: string }) => ({ value: p.value, label: p.label }))} placeholder="選択..." value={row.partner_id} onChange={(e) => updatePartnerRow(row.key, { partner_id: e.target.value })} />
+                      <SelectOrCreate
+                        options={engineerOptions.map((e: { value: number; label: string }) => ({ value: String(e.value), label: e.label }))}
+                        value={row.engineer}
+                        onChange={(v) => updatePartnerRow(row.key, { engineer: v })}
+                        newFields={engineerNewFields(partnerOptions.map((p: { value: string; label: string }) => ({ value: p.value, label: p.label })))}
+                      />
+                      <SelectOrCreate
+                        options={workLocationOptions.map((w: { value: number; label: string }) => ({ value: String(w.value), label: w.label }))}
+                        value={row.work_location}
+                        onChange={(v) => updatePartnerRow(row.key, { work_location: v })}
+                        newFields={workLocationNewFields}
+                      />
+                      <FormInput className={CELL_DATE} type="date" value={row.fields.start_date} onChange={(e) => updatePartnerRow(row.key, { fields: { ...row.fields, start_date: e.target.value } })} />
+                      <FormInput className={CELL_DATE} type="date" value={row.fields.end_date} onChange={(e) => updatePartnerRow(row.key, { fields: { ...row.fields, end_date: e.target.value } })} />
+                      <FormSelect className={CELL} options={SETTLEMENT_TYPES} value={row.fields.settlement_type} onChange={(e) => updatePartnerRow(row.key, { fields: calcRates({ ...row.fields, settlement_type: e.target.value }) })} />
+                      <FormInput className={CELL} type="number" value={row.fields.base_rate} onChange={(e) => updatePartnerRow(row.key, { fields: calcRates({ ...row.fields, base_rate: e.target.value }) })} />
+                      <FormInput className={CELL} type="number" value={row.fields.lower_limit_hours} onChange={(e) => updatePartnerRow(row.key, { fields: calcRates({ ...row.fields, lower_limit_hours: e.target.value }) })} />
+                      <FormInput className={CELL} type="number" value={row.fields.upper_limit_hours} onChange={(e) => updatePartnerRow(row.key, { fields: calcRates({ ...row.fields, upper_limit_hours: e.target.value }) })} />
+                      <FormInput className={CELL} type="number" step="0.1" value={row.fields.effort} onChange={(e) => updatePartnerRow(row.key, { fields: { ...row.fields, effort: e.target.value } })} />
+                      <button type="button" onClick={() => removePartnerRow(row.key)} className="p-1.5 text-muted-foreground hover:text-red-400" aria-label="この行を削除">
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
                 </div>
-                <FormField label="パートナー" required>
-                  <FormSelect options={partnerOptions.map((p: { value: string; label: string }) => ({ value: p.value, label: p.label }))} placeholder="選択..." value={row.partner_id} onChange={(e) => updatePartnerRow(row.key, { partner_id: e.target.value })} />
-                </FormField>
-                <FormField label="技術者" required>
-                  <SelectOrCreate
-                    options={engineerOptions.map((e: { value: number; label: string }) => ({ value: String(e.value), label: e.label }))}
-                    value={row.engineer}
-                    onChange={(v) => updatePartnerRow(row.key, { engineer: v })}
-                    newFields={engineerNewFields(partnerOptions.map((p: { value: string; label: string }) => ({ value: p.value, label: p.label })))}
-                  />
-                </FormField>
-                <FormField label="作業場所">
-                  <SelectOrCreate
-                    options={workLocationOptions.map((w: { value: number; label: string }) => ({ value: String(w.value), label: w.label }))}
-                    value={row.work_location}
-                    onChange={(v) => updatePartnerRow(row.key, { work_location: v })}
-                    newFields={workLocationNewFields}
-                  />
-                </FormField>
-                <div className="grid grid-cols-2 gap-4">
-                  <FormField label="開始日" required>
-                    <FormInput type="date" value={row.fields.start_date} onChange={(e) => updatePartnerRow(row.key, { fields: { ...row.fields, start_date: e.target.value } })} />
-                  </FormField>
-                  <FormField label="終了日" required>
-                    <FormInput type="date" value={row.fields.end_date} onChange={(e) => updatePartnerRow(row.key, { fields: { ...row.fields, end_date: e.target.value } })} />
-                  </FormField>
-                </div>
-                <div className="grid grid-cols-4 gap-4">
-                  <FormField label="精算方式" required>
-                    <FormSelect options={SETTLEMENT_TYPES} value={row.fields.settlement_type} onChange={(e) => updatePartnerRow(row.key, { fields: calcRates({ ...row.fields, settlement_type: e.target.value }) })} />
-                  </FormField>
-                  <FormField label="単金" required>
-                    <FormInput type="number" value={row.fields.base_rate} onChange={(e) => updatePartnerRow(row.key, { fields: calcRates({ ...row.fields, base_rate: e.target.value }) })} />
-                  </FormField>
-                  <FormField label="下限時間">
-                    <FormInput type="number" value={row.fields.lower_limit_hours} onChange={(e) => updatePartnerRow(row.key, { fields: calcRates({ ...row.fields, lower_limit_hours: e.target.value }) })} />
-                  </FormField>
-                  <FormField label="上限時間">
-                    <FormInput type="number" value={row.fields.upper_limit_hours} onChange={(e) => updatePartnerRow(row.key, { fields: calcRates({ ...row.fields, upper_limit_hours: e.target.value }) })} />
-                  </FormField>
-                </div>
-                <FormField label="工数">
-                  <FormInput type="number" step="0.1" value={row.fields.effort} onChange={(e) => updatePartnerRow(row.key, { fields: { ...row.fields, effort: e.target.value } })} />
-                </FormField>
               </div>
-            ))}
+            )}
             <Button variant="outline" size="sm" onClick={addPartnerRow} className="gap-1 border-border">
-              <Plus className="w-4 h-4" /> パートナー契約を追加
+              <Plus className="w-4 h-4" /> 発注契約を追加(1行 = 1名)
             </Button>
           </div>
         )}
@@ -401,22 +404,39 @@ export function ProjectWizard() {
       </div>
 
       <div className="flex justify-between">
-        <Button variant="outline" className="border-border" disabled={step === 1} onClick={() => setStep((s) => (s - 1) as 1 | 2 | 3)}>
+        <Button
+          variant="outline"
+          className="border-border"
+          disabled={step === 1}
+          onClick={() => { setSkipClientContract(false); setStep((s) => (s - 1) as 1 | 2 | 3); }}
+        >
           戻る
         </Button>
-        {step < 3 ? (
-          <Button
-            className="bg-blue-600 hover:bg-blue-700"
-            disabled={(step === 1 && !canProceedStep1) || (step === 2 && !canProceedStep2)}
-            onClick={() => setStep((s) => (s + 1) as 1 | 2 | 3)}
-          >
-            次へ
-          </Button>
-        ) : (
-          <Button className="bg-blue-600 hover:bg-blue-700" disabled={createMutation.isPending} onClick={() => createMutation.mutate()}>
-            {createMutation.isPending ? "作成中..." : "作成する"}
-          </Button>
-        )}
+        <div className="flex gap-2">
+          {step === 2 && (
+            <Button variant="outline" className="border-border" onClick={() => { setSkipClientContract(true); setStep(3); }}>
+              スキップ
+            </Button>
+          )}
+          {step === 3 && (
+            <Button variant="outline" className="border-border" disabled={createMutation.isPending} onClick={() => createMutation.mutate(true)}>
+              スキップして作成
+            </Button>
+          )}
+          {step < 3 ? (
+            <Button
+              className="bg-blue-600 hover:bg-blue-700"
+              disabled={(step === 1 && !canProceedStep1) || (step === 2 && !canProceedStep2)}
+              onClick={() => { setSkipClientContract(false); setStep((s) => (s + 1) as 1 | 2 | 3); }}
+            >
+              次へ
+            </Button>
+          ) : (
+            <Button className="bg-blue-600 hover:bg-blue-700" disabled={createMutation.isPending || !canCreate} onClick={() => createMutation.mutate(false)}>
+              {createMutation.isPending ? "作成中..." : "作成する"}
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );

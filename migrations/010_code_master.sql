@@ -7,8 +7,8 @@
 CREATE TABLE IF NOT EXISTS m_code (
     id          SERIAL PRIMARY KEY,
     category    VARCHAR(50)  NOT NULL,  -- 選択肢カテゴリ（例: EDI_METHOD, SETTLEMENT_TYPE）
-    code        VARCHAR(50)  NOT NULL,  -- 値（例: EDI_OASIS, RANGE）
-    label       VARCHAR(100) NOT NULL,  -- 表示名（例: EDI-OASIS, 上下割）
+    code        VARCHAR(50)  NOT NULL,  -- 値（例: EMAIL, RANGE）
+    label       VARCHAR(100) NOT NULL,  -- 表示名（例: メール, 上下割）
     sort_order  INT          NOT NULL DEFAULT 0,
     is_active   BOOLEAN      NOT NULL DEFAULT TRUE,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS m_code (
 INSERT INTO m_code (category, code, label, sort_order) VALUES
     -- EDI方式
     ('EDI_METHOD', '',           'なし',         0),
-    ('EDI_METHOD', 'EDI_OASIS', 'EDI-OASIS',    1),
     ('EDI_METHOD', 'EMAIL',     'メール',        2),
     -- 雇用形態
     ('EMPLOYMENT_TYPE', 'FULL_TIME', '正社員',    0),

@@ -252,6 +252,7 @@ mod tests {
             hours,
             start: start.to_string(),
             end: end.to_string(),
+            ..Default::default()
         }
     }
 

@@ -4,6 +4,7 @@ use axum::{
     extract::{Extension, Path, State},
     response::IntoResponse,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::domain::models::expense::{ExpenseRequestCreateForm, ExpenseStatus};
@@ -28,7 +29,7 @@ async fn run_expense_transition(
     id: i64,
     action: WorkflowAction,
 ) -> Result<document_workflow::TransitionPlan, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
-    let Some(exp) = expense_repo::find_by_id(pool, id).await.ok().flatten() else {
+    let Some(exp) = expense_repo::find_by_id(pool, id).await.log_err().ok().flatten() else {
         return Err((
             axum::http::StatusCode::NOT_FOUND,
             axum::Json(serde_json::json!({"success": false, "error": "経費申請が見つかりません"})),
@@ -107,7 +108,7 @@ async fn run_expense_transition(
         ));
     }
 
-    if let Err(e) = tx.commit().await {
+    if let Err(e) = crate::infrastructure::db_tx::commit_checked(tx).await {
         return Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(serde_json::json!({"success": false, "error": format!("コミットに失敗しました: {e}")})),
@@ -140,7 +141,7 @@ pub async fn api_detail(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let expense = expense_repo::find_by_id(&pool, id).await.ok().flatten();
+    let expense = expense_repo::find_by_id(&pool, id).await.log_err().ok().flatten();
 
     match expense {
         Some(exp) => {
@@ -150,10 +151,10 @@ pub async fn api_detail(
             }
 
             let employee_name = expense_repo::find_employee_full_name(&pool, exp.employee_id)
-                .await.unwrap_or_default();
+                .await.log_err().unwrap_or_default();
 
-            let items = expense_repo::list_items(&pool, id).await.unwrap_or_default();
-            let categories = expense_repo::list_category_options(&pool).await.unwrap_or_default();
+            let items = expense_repo::list_items(&pool, id).await.log_err().unwrap_or_default();
+            let categories = expense_repo::list_category_options(&pool).await.log_err().unwrap_or_default();
 
             let items_json: Vec<serde_json::Value> = items.iter().map(|item| {
                 let category_display = categories.iter()
@@ -221,7 +222,7 @@ pub async fn api_update(
             axum::Json(serde_json::json!({"success": false, "error": "申請者を選択してください"}))).into_response();
     }
 
-    let Some(exp) = expense_repo::find_by_id(&pool, id).await.ok().flatten() else {
+    let Some(exp) = expense_repo::find_by_id(&pool, id).await.log_err().ok().flatten() else {
         return (axum::http::StatusCode::NOT_FOUND,
             axum::Json(serde_json::json!({"success": false, "error": "経費申請が見つかりません"}))).into_response();
     };
@@ -332,7 +333,7 @@ pub async fn api_employee_options(
     State(pool): State<PgPool>,
 ) -> impl IntoResponse {
     let options = expense_repo::list_employee_options(&pool)
-        .await.unwrap_or_else(|e| { tracing::warn!("employee options: {:?}", e); vec![] });
+        .await.log_err().unwrap_or_else(|e| { tracing::warn!("employee options: {:?}", e); vec![] });
     axum::Json(options)
 }
 
@@ -341,6 +342,6 @@ pub async fn api_category_options(
     State(pool): State<PgPool>,
 ) -> impl IntoResponse {
     let options: Vec<ExpenseCategoryOption> = expense_repo::list_category_options(&pool)
-        .await.unwrap_or_else(|e| { tracing::warn!("expense category options: {:?}", e); vec![] });
+        .await.log_err().unwrap_or_else(|e| { tracing::warn!("expense category options: {:?}", e); vec![] });
     axum::Json(options)
 }

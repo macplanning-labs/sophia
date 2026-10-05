@@ -15,7 +15,9 @@ export type LucideIconName =
   | "UserCircle"
   | "ReceiptText"
   | "Users"
-  | "Globe";
+  | "Globe"
+  | "Building2"
+  | "Receipt";
 
 export interface PageTitleMeta {
   /** pathname がこのプレフィックスで始まる（"/" は完全一致） */
@@ -82,11 +84,25 @@ const RULES: PageTitleMeta[] = [
     iconColor: "text-indigo-400",
   },
   {
+    prefix: "/timesheet-matching",
+    title: "勤務表の取り込み",
+    subtitle: "届いた勤務表を受注に結び付けて、稼働報告に取り込む",
+    emoji: "📥",
+    iconColor: "text-sky-400",
+  },
+  {
     prefix: "/timesheets",
     title: "稼働報告",
     subtitle: "エンジニアの稼働時間報告一覧",
     emoji: "⏱",
     iconColor: "text-amber-400",
+  },
+  {
+    prefix: "/billing",
+    title: "請求書・支払通知",
+    subtitle: "請求書の確認と確定",
+    lucideIcon: "Receipt",
+    iconColor: "text-blue-400",
   },
   {
     prefix: "/settlement",
@@ -98,7 +114,7 @@ const RULES: PageTitleMeta[] = [
   {
     prefix: "/projects",
     title: "案件",
-    subtitle: "行をクリックして案件情報を編集。新規作成はウィザードから",
+    subtitle: "行をクリックして案件詳細を開く。新規作成はウィザードから",
     emoji: "📁",
     iconColor: "text-emerald-400",
   },
@@ -117,6 +133,13 @@ const RULES: PageTitleMeta[] = [
     iconColor: "text-pink-400",
   },
   {
+    prefix: "/members",
+    title: "要員",
+    subtitle: "自社社員とパートナー要員の管理",
+    emoji: "👥",
+    iconColor: "text-blue-400",
+  },
+  {
     prefix: "/expenses",
     title: "経費",
     subtitle: "経費精算申請一覧",
@@ -129,6 +152,20 @@ const RULES: PageTitleMeta[] = [
     subtitle: "システムユーザー一覧",
     emoji: "👥",
     iconColor: "text-indigo-400",
+  },
+  {
+    prefix: "/parties",
+    title: "取引先",
+    subtitle: "クライアント・パートナーの管理",
+    lucideIcon: "Building2",
+    iconColor: "text-blue-400",
+  },
+  {
+    prefix: "/assignments",
+    title: "アサイン",
+    subtitle: "要員を案件へ編成し、利益を確認しながらアサインを作成",
+    lucideIcon: "Briefcase",
+    iconColor: "text-teal-400",
   },
   {
     prefix: "/masters",

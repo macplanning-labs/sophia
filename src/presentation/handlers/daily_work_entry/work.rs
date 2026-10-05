@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use crate::infrastructure::db_tx::LogErr;
 use chrono::{Datelike, NaiveDate};
 use sqlx::PgPool;
 use crate::infrastructure::repositories::{order_repo, timesheet_repo};
@@ -36,12 +37,12 @@ pub async fn list_work_entries(
 
     let entries = timesheet_repo::list_work_entries(&pool, params.engineer_id, start_date, end_date)
         .await
-        .unwrap_or_default();
+        .log_err().unwrap_or_default();
 
     // ロック状態チェック（t_monthly_timesheetのlocked_at）
     let locked = timesheet_repo::is_timesheet_locked(&pool, params.engineer_id, start_date)
         .await
-        .unwrap_or(false);
+        .log_err().unwrap_or(false);
 
     Json(serde_json::json!({
         "entries": entries,
@@ -72,7 +73,7 @@ pub async fn save_work_entries(
         if let Some(ms) = month_start {
             let is_locked = timesheet_repo::is_timesheet_locked(&pool, body.engineer_id, ms)
                 .await
-                .unwrap_or(false);
+                .log_err().unwrap_or(false);
 
             if is_locked {
                 return (StatusCode::CONFLICT, Json(serde_json::json!({
@@ -142,7 +143,7 @@ pub async fn work_entries_summary(
         // エンジニアが自社所属か確認
         let belongs = order_repo::engineer_belongs_to_partner(&pool, params.engineer_id, &partner_id)
             .await
-            .unwrap_or(false);
+            .log_err().unwrap_or(false);
 
         if !belongs {
             return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "このエンジニアへのアクセス権がありません"}))).into_response();
@@ -166,7 +167,7 @@ pub async fn work_entries_summary(
     // 入力済み日付リスト
     let entered_dates = timesheet_repo::list_entered_dates(&pool, params.engineer_id, start_date, end_date)
         .await
-        .unwrap_or_default();
+        .log_err().unwrap_or_default();
 
     // 平日（月〜金）の未入力日を計算
     let today = chrono::Local::now().date_naive();

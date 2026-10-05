@@ -105,7 +105,7 @@ pub async fn rollforward_order(pool: &PgPool, source_order_id: i64) -> Result<i6
         .await?;
     }
 
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
 
     info!(
         "ロールフォワード完了: order_id={} → new_id={}",

@@ -15,6 +15,7 @@ const emptyForm = {
   stamp_image: "", logo_image: "",
   email_host: "", email_port: "", email_use_tls: true, email_host_user: "", email_host_password: "",
   default_from_email: "", notice_approval_threshold: "", token_expiry_days: "",
+  target_margin_direct: "", target_margin_subcontract: "",
 };
 
 /** マスタメンテ画面内の「自社情報」タブ用パネル。s_company_infoは単一行+機密情報(SMTPパスワード)を
@@ -45,6 +46,8 @@ export function CompanyInfoPanel() {
       default_from_email: info.default_from_email,
       notice_approval_threshold: info.notice_approval_threshold != null ? String(info.notice_approval_threshold) : "",
       token_expiry_days: info.token_expiry_days != null ? String(info.token_expiry_days) : "",
+      target_margin_direct: String(info.target_margin_direct),
+      target_margin_subcontract: String(info.target_margin_subcontract),
     });
     setChangePassword(false);
   }, [data]);
@@ -58,6 +61,8 @@ export function CompanyInfoPanel() {
       email_port: form.email_port ? Number(form.email_port) : null,
       notice_approval_threshold: form.notice_approval_threshold ? Number(form.notice_approval_threshold) : null,
       token_expiry_days: form.token_expiry_days ? Number(form.token_expiry_days) : null,
+      target_margin_direct: Number(form.target_margin_direct) || 0,
+      target_margin_subcontract: Number(form.target_margin_subcontract) || 0,
     }),
     onSuccess: (res) => {
       if (!res.success) { toast.error(res.error || "保存に失敗しました"); return; }
@@ -119,6 +124,14 @@ export function CompanyInfoPanel() {
           <FormField label="口座種別"><FormInput value={form.account_type} onChange={set("account_type")} /></FormField>
           <FormField label="口座番号"><FormInput value={form.account_number} onChange={set("account_number")} /></FormField>
           <FormField label="口座名義" className="col-span-2"><FormInput value={form.account_name} onChange={set("account_name")} /></FormField>
+        </div>
+      </section>
+
+      <section className="bg-card border border-border rounded-lg p-4">
+        <h3 className="text-sm font-medium text-foreground mb-3">利益の目安</h3>
+        <div className="grid grid-cols-2 gap-4">
+          <FormField label="利益の目安(直受け %)"><FormInput type="number" min="0" max="100" value={form.target_margin_direct} onChange={set("target_margin_direct")} placeholder="20" /></FormField>
+          <FormField label="利益の目安(下請け %)"><FormInput type="number" min="0" max="100" value={form.target_margin_subcontract} onChange={set("target_margin_subcontract")} placeholder="8" /></FormField>
         </div>
       </section>
 

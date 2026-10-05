@@ -1,10 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchPayrollDetail, recalculatePayrollDeductions } from "@/lib/api";
 import { DetailLayout } from "@/components/detail-layout";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { getStatus } from "@/lib/status";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -56,6 +58,7 @@ export default function PayrollDetailPage({ id: idProp, embedded = false }: Prop
   const id = idProp || dynamicId;
   const queryClient = useQueryClient();
   const { canViewAllPayroll } = useCurrentUser();
+  const [confirmAction, setConfirmAction] = useState<"recalcDeductions" | "markPaid" | null>(null);
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ["payroll", id],
     queryFn: () => fetchPayrollDetail(id),
@@ -96,11 +99,7 @@ export default function PayrollDetailPage({ id: idProp, embedded = false }: Prop
       {canViewAllPayroll && (
         <button
           type="button"
-          onClick={() => {
-            if (confirm("支給額はそのままに、社会保険・所得税・住民税を社員マスタと料率表から再計算し、明細に保存します。よろしいですか？")) {
-              recalcDeductions.mutate();
-            }
-          }}
+          onClick={() => setConfirmAction("recalcDeductions")}
           disabled={recalcDeductions.isPending}
           className="px-3 py-1.5 text-xs font-medium rounded-md bg-sky-500/10 text-sky-400 border border-sky-500/30 hover:bg-sky-500/20 transition-colors disabled:opacity-50"
         >
@@ -110,7 +109,7 @@ export default function PayrollDetailPage({ id: idProp, embedded = false }: Prop
       {canViewAllPayroll && pay?.status !== "PAID" && (
         <button
           type="button"
-          onClick={() => { if (confirm("支払済みにしますか？")) markPaid.mutate(); }}
+          onClick={() => setConfirmAction("markPaid")}
           disabled={markPaid.isPending}
           className="px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
         >
@@ -127,6 +126,7 @@ export default function PayrollDetailPage({ id: idProp, embedded = false }: Prop
     : undefined;
 
   return (
+    <>
     <DetailLayout title={`給与明細 #${id}`} icon="💰" backHref="/payroll" backLabel="一覧に戻る" isLoading={isLoading} actions={layoutActions} embedded={embedded}>
       {isError && (
         <Card className="border-red-500/30 bg-red-500/5">
@@ -228,5 +228,33 @@ export default function PayrollDetailPage({ id: idProp, embedded = false }: Prop
         </div>
       )}
     </DetailLayout>
+
+    <ConfirmSheet
+      open={confirmAction === "recalcDeductions"}
+      title="社保・税を再計算"
+      facts={pay ? [{ label: "対象月", value: formatYearMonth(pay.year_month) }] : undefined}
+      description="支給額はそのままに、社会保険・所得税・住民税を社員マスタと料率表から再計算し、明細に保存します。"
+      confirmLabel="再計算"
+      loading={recalcDeductions.isPending}
+      onConfirm={() => {
+        setConfirmAction(null);
+        recalcDeductions.mutate();
+      }}
+      onCancel={() => setConfirmAction(null)}
+    />
+
+    <ConfirmSheet
+      open={confirmAction === "markPaid"}
+      title="支払済に変更"
+      facts={pay ? [{ label: "対象月", value: formatYearMonth(pay.year_month) }] : undefined}
+      confirmLabel="変更"
+      loading={markPaid.isPending}
+      onConfirm={() => {
+        setConfirmAction(null);
+        markPaid.mutate();
+      }}
+      onCancel={() => setConfirmAction(null)}
+    />
+    </>
   );
 }

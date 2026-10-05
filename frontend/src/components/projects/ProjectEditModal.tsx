@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchProjectDetail, fetchProjectWizardFormData, updateProject, deleteProject } from "@/lib/api";
 import { FormModal, FormField, FormInput, FormSelect } from "@/components/ui/form-modal";
 import { Button } from "@/components/ui/button";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { toast } from "sonner";
 
 const REPORT_DEADLINE_TYPES = [
@@ -47,6 +48,7 @@ function derivePeriod(
 export function ProjectEditModal({ projectId, open, onClose }: Props) {
   const qc = useQueryClient();
   const [form, setForm] = useState<EditForm | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const { data: detail, isLoading: detailLoading } = useQuery({
     queryKey: ["projects", projectId],
@@ -135,6 +137,7 @@ export function ProjectEditModal({ projectId, open, onClose }: Props) {
   const canDelete = !!project && project.is_active === false;
 
   return (
+    <>
     <FormModal
       open={open}
       title="案件の編集"
@@ -150,10 +153,7 @@ export function ProjectEditModal({ projectId, open, onClose }: Props) {
             size="sm"
             className="border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
             disabled={deleteMutation.isPending || updateMutation.isPending}
-            onClick={() => {
-              if (!confirm(`案件「${project?.name ?? projectId}」を削除しますか？この操作は取り消せません。`)) return;
-              deleteMutation.mutate();
-            }}
+            onClick={() => setConfirmDelete(true)}
           >
             {deleteMutation.isPending ? "削除中…" : "削除"}
           </Button>
@@ -310,5 +310,21 @@ export function ProjectEditModal({ projectId, open, onClose }: Props) {
         </>
       )}
     </FormModal>
+
+    <ConfirmSheet
+      open={confirmDelete}
+      title="案件を削除"
+      facts={[{ label: "案件名", value: project?.name ?? projectId }]}
+      description="この操作は取り消せません。"
+      variant="danger"
+      confirmLabel="削除"
+      loading={deleteMutation.isPending}
+      onConfirm={() => {
+        setConfirmDelete(false);
+        deleteMutation.mutate();
+      }}
+      onCancel={() => setConfirmDelete(false)}
+    />
+    </>
   );
 }

@@ -9,6 +9,7 @@ pub mod base;
 pub mod client_repo;
 pub mod partner_repo;
 pub mod project_repo;
+pub mod assignment_repo;
 pub mod order_repo;
 pub mod billing_repo;
 pub mod timesheet_repo;
@@ -37,6 +38,7 @@ pub mod reminder_repo;
 pub mod email_template_repo;
 pub mod api_key_repo;
 pub mod api_access_log_repo;
+pub mod documents_search_repo;
 
 #[cfg(test)]
 pub(crate) mod test_support;

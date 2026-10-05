@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     Form,
 };
+use crate::infrastructure::db_tx::LogErr;
 use chrono::Datelike;
 use sqlx::PgPool;
 
@@ -94,7 +95,7 @@ pub async fn calculate(
         }
 
         // 稼働報告を取得（あれば）
-        let timesheet = payroll_repo::find_timesheet_for_payroll(&pool, emp.id, year_month).await.ok().flatten();
+        let timesheet = payroll_repo::find_timesheet_for_payroll(&pool, emp.id, year_month).await.log_err().ok().flatten();
 
         let result = calculator.calculate(emp, year_month, timesheet.as_ref()).await;
 
@@ -191,7 +192,7 @@ pub async fn api_detail(
     Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let pay = payroll_repo::find_payroll(&pool, id).await.ok().flatten();
+    let pay = payroll_repo::find_payroll(&pool, id).await.log_err().ok().flatten();
 
     match pay {
         Some(pay) => {
@@ -201,12 +202,12 @@ pub async fn api_detail(
                     axum::Json(serde_json::json!({"error": "他の社員の給与明細は閲覧できません"}))).into_response();
             }
 
-            let employee_name = payroll_repo::find_employee_full_name(&pool, pay.employee_id).await.unwrap_or_default();
-            let employee_code = payroll_repo::find_employee(&pool, pay.employee_id).await.ok().flatten()
+            let employee_name = payroll_repo::find_employee_full_name(&pool, pay.employee_id).await.log_err().unwrap_or_default();
+            let employee_code = payroll_repo::find_employee(&pool, pay.employee_id).await.log_err().ok().flatten()
                 .map(|e| e.employee_id).unwrap_or_default();
-            let company_name = crate::infrastructure::repositories::company_info_repo::get_company_info(&pool).await.ok().flatten()
+            let company_name = crate::infrastructure::repositories::company_info_repo::get_company_info(&pool).await.log_err().ok().flatten()
                 .map(|c| c.name).unwrap_or_default();
-            let nearest_expiring = paid_leave_repo::nearest_expiring_grant(&pool, pay.employee_id).await.ok().flatten();
+            let nearest_expiring = paid_leave_repo::nearest_expiring_grant(&pool, pay.employee_id).await.log_err().ok().flatten();
 
             let status = crate::domain::models::payroll::PayrollStatus::from_str(&pay.status);
 

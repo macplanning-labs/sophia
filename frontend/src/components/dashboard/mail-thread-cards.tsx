@@ -54,6 +54,12 @@ export function MailThreadCards({ projectId }: Props) {
   );
 }
 
+const TIMESHEET_STATUS_LABEL: Record<string, string> = {
+  UPLOADED: "取込済（承認待ち）",
+  PARSED: "解析済（承認待ち）",
+  APPROVED: "承認済",
+};
+
 interface MailThreadCardProps {
   brief: MailThreadBrief;
 }
@@ -119,15 +125,25 @@ function MailThreadCard({ brief }: MailThreadCardProps) {
             <div key={idx} className="text-xs text-muted-foreground">
               <span className="font-mono truncate block">{att.filename}</span>
               {att.hours_label && <span className="text-foreground">時間: {att.hours_label}</span>}
-              {att.timesheet_status && <span className="text-foreground ml-2">状態: {att.timesheet_status}</span>}
+              {att.timesheet_status && <span className="text-foreground ml-2">状態: {TIMESHEET_STATUS_LABEL[att.timesheet_status] ?? att.timesheet_status}</span>}
+              {(att.kind === "final" || att.kind === "timesheet") && att.timesheet_status !== "APPROVED" && (
+                <Link href="/timesheet-matching" className="ml-3 text-primary hover:underline">
+                  受注と結び付けて取り込む →
+                </Link>
+              )}
             </div>
           ))}
           <Link
-            href="/received-emails"
+            href={`/received-emails?from=${encodeURIComponent(brief.from_email)}`}
             className="inline-block text-xs text-primary hover:underline mt-2"
           >
             受信メールを見る →
           </Link>
+          {brief.attachments.some((a) => a.timesheet_status) && (
+            <Link href="/timesheets" className="inline-block text-xs text-primary hover:underline mt-2 ml-4">
+              稼働報告を見る →
+            </Link>
+          )}
         </div>
       )}
     </div>

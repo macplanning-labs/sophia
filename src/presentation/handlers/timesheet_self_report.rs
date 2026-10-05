@@ -14,6 +14,7 @@ use axum::{
     extract::{Extension, Query, State},
     response::IntoResponse,
 };
+use crate::infrastructure::db_tx::LogErr;
 use chrono::{Datelike, NaiveDate, Weekday};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -273,7 +274,7 @@ pub async fn api_sheets_submit(
             axum::Json(serde_json::json!({"success": false, "error": "対象月の形式が不正です（YYYY-MM）"}))).into_response();
     };
 
-    let existing = timesheet_repo::find_self_report(&pool, employee_id, target_month).await.ok().flatten();
+    let existing = timesheet_repo::find_self_report(&pool, employee_id, target_month).await.log_err().ok().flatten();
     let Some(existing) = existing else {
         return (axum::http::StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({"success": false, "error": "先にスプレッドシートを開いて作成してください"}))).into_response();

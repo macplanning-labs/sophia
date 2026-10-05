@@ -56,8 +56,9 @@ impl fmt::Display for PipelineStatus {
 /// Phase1がメールを分類する際に付与し、Phase2がどの取得経路を使うかの分岐に使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceType {
-    /// m_client.edi_system_type が設定済みのクライアント宛て
-    /// → Phase2はメール本文を解析せず、EDI-OASIS APIを年月ポーリングする
+    /// 取引先マスタの「EDI通知メール」欄に登録したアドレスから届いた通知メール
+    /// → Phase2 が件名・本文から、取りに行く書類（1件）を決める。Phase2 が取得した書類の行
+    ///   （message_id が `edi-order:` / `edi-invoice:`）もこの種別になる
     EdiApi,
     /// 添付ファイル付き（PDF/Excel等）
     Attachment,
@@ -119,7 +120,7 @@ impl std::error::Error for PhaseError {}
 
 /// 指定フェーズ名を付与したエラーメッセージを組み立てる（error_message列に保存する形式）
 ///
-/// 例: "[Phase2] OASIS認証エラー: セッション切れ"
+/// 例: "[Phase2] 取引先EDIの認証エラー: セッション切れ"
 pub fn tag_phase_error(phase: &str, err: &PhaseError) -> String {
     format!("[{phase}] {}", err.message())
 }

@@ -18,6 +18,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     Json,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
@@ -157,8 +158,8 @@ pub async fn view(
 async fn render_invoice_page(pool: &PgPool, invoice: &crate::domain::models::billing::BillingInvoice, uuid: &str) -> String {
     use chrono::Datelike;
 
-    let client_name = order_repo::find_client_name(pool, invoice.client_id).await.unwrap_or_default();
-    let company_name = order_repo::find_company_name_setting(pool).await.unwrap_or_else(|_| "有限会社マックプランニング".into());
+    let client_name = order_repo::find_client_name(pool, invoice.client_id).await.log_err().unwrap_or_default();
+    let company_name = order_repo::find_company_name_setting(pool).await.log_err().unwrap_or_else(|_| "有限会社マックプランニング".into());
     let target_month = format!("{}年{:02}月", invoice.target_month.year(), invoice.target_month.month());
     let due_date = invoice.due_date.map(|d| d.format("%Y年%m月%d日").to_string()).unwrap_or_default();
 
@@ -210,10 +211,10 @@ async fn render_invoice_page(pool: &PgPool, invoice: &crate::domain::models::bil
 /// 支払通知書・代理請求書の確認ページ
 async fn render_notice_page(pool: &PgPool, notice: &PaymentNotice, uuid: &str) -> String {
     let partner_name = order_repo::find_partner_name_email(pool, &notice.partner_id)
-        .await.ok().flatten().map(|(n, _)| n).unwrap_or_default();
-    let company_name = order_repo::find_company_name_setting(pool).await.unwrap_or_else(|_| "有限会社マックプランニング".into());
+        .await.log_err().ok().flatten().map(|(n, _)| n).unwrap_or_default();
+    let company_name = order_repo::find_company_name_setting(pool).await.log_err().unwrap_or_else(|_| "有限会社マックプランニング".into());
     let project_name = order_repo::find_project_name_by_purchase_order(pool, &notice.purchase_order_id)
-        .await.ok().flatten().unwrap_or_default();
+        .await.log_err().ok().flatten().unwrap_or_default();
     let target_month = notice.target_month.format("%Y年%m月").to_string();
 
     let status_and_actions = if notice.partner_accepted_at.is_none() {
@@ -271,12 +272,12 @@ async fn render_order_page(
     upload_message: Option<(bool, String)>,
 ) -> String {
     let partner_name = order_repo::find_partner_name_email(pool, &order.partner_id)
-        .await.ok().flatten().map(|(n, _)| n).unwrap_or_default();
+        .await.log_err().ok().flatten().map(|(n, _)| n).unwrap_or_default();
     let project_name = order_repo::find_project_name(pool, &order.project_id)
-        .await.ok().flatten().unwrap_or_default();
-    let company_name = order_repo::find_company_name_setting(pool).await.unwrap_or_else(|_| "有限会社マックプランニング".into());
+        .await.log_err().ok().flatten().unwrap_or_default();
+    let company_name = order_repo::find_company_name_setting(pool).await.log_err().unwrap_or_else(|_| "有限会社マックプランニング".into());
 
-    let items = order_repo::list_order_items_with_engineer(pool, &order.order_id).await.unwrap_or_default();
+    let items = order_repo::list_order_items_with_engineer(pool, &order.order_id).await.log_err().unwrap_or_default();
 
     let mut items_html = String::new();
     let mut total: i64 = 0;
@@ -443,7 +444,7 @@ pub async fn accept(
             if notice.partner_accepted_at.is_none() {
                 use sha2::{Digest, Sha256};
 
-                let pdf_bytes = super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await.unwrap_or_default();
+                let pdf_bytes = super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await.log_err().unwrap_or_default();
                 let mut hasher = Sha256::new();
                 hasher.update(&pdf_bytes);
                 let document_hash = format!("{:x}", hasher.finalize());
@@ -482,7 +483,7 @@ pub async fn accept(
                 use sha2::{Digest, Sha256};
                 use crate::domain::services::pdf_generator::PdfGenerator;
 
-                let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.unwrap_or_default();
+                let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.log_err().unwrap_or_default();
                 let pdf_data = super::invoices::build_client_invoice_pdf_data(&pool, &invoice, &client_name).await;
                 let gen = PdfGenerator::new();
                 let pdf_bytes = gen.generate_invoice_pdf(&pdf_data).unwrap_or_default();
@@ -613,7 +614,7 @@ fn extract_error_message(e: &timesheet_upload_common::TimesheetUploadError) -> S
 async fn send_order_approve_notification(pool: &PgPool, uuid: uuid::Uuid) {
     use crate::domain::services::email_service::{EmailService, compose_order_approve_email};
 
-    let order_info = order_repo::find_order_id_partner_info_by_uuid(pool, &uuid).await.ok().flatten();
+    let order_info = order_repo::find_order_id_partner_info_by_uuid(pool, &uuid).await.log_err().ok().flatten();
 
     let (order_id, partner_name, _partner_email, project_name, _work_start, _work_end) = match order_info {
         Some(info) => info,
@@ -635,7 +636,7 @@ async fn send_order_approve_notification(pool: &PgPool, uuid: uuid::Uuid) {
 async fn send_invoice_approve_notification(pool: &PgPool, uuid: uuid::Uuid) {
     use crate::domain::services::email_service::{EmailService, compose_invoice_approve_email};
 
-    let notice_info = order_repo::find_notice_id_partner_name_by_uuid(pool, &uuid).await.ok().flatten();
+    let notice_info = order_repo::find_notice_id_partner_name_by_uuid(pool, &uuid).await.log_err().ok().flatten();
 
     let (notice_id, partner_name, target_month, total) = match notice_info {
         Some(info) => info,
@@ -744,7 +745,7 @@ pub async fn download_pdf(
             if is_token_expired(&pool, invoice.sent_at).await {
                 return StatusCode::FORBIDDEN.into_response();
             }
-            let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.unwrap_or_default();
+            let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.log_err().unwrap_or_default();
             let pdf_data = super::invoices::build_client_invoice_pdf_data(&pool, &invoice, &client_name).await;
             return match PdfGenerator::new().generate_invoice_pdf(&pdf_data) {
                 Ok(bytes) => http_util::build_response(
@@ -876,11 +877,11 @@ pub async fn api_view(
                     .into_response();
             }
             let partner_name = order_repo::find_partner_name_email(&pool, &order.partner_id)
-                .await.ok().flatten().map(|(n, _)| n).unwrap_or_default();
+                .await.log_err().ok().flatten().map(|(n, _)| n).unwrap_or_default();
             let project_name = order_repo::find_project_name(&pool, &order.project_id)
-                .await.ok().flatten().unwrap_or_default();
-            let company_name = order_repo::find_company_name_setting(&pool).await.unwrap_or_else(|_| "有限会社マックプランニング".into());
-            let items = order_repo::list_order_items_with_engineer(&pool, &order.order_id).await.unwrap_or_default();
+                .await.log_err().ok().flatten().unwrap_or_default();
+            let company_name = order_repo::find_company_name_setting(&pool).await.log_err().unwrap_or_else(|_| "有限会社マックプランニング".into());
+            let items = order_repo::list_order_items_with_engineer(&pool, &order.order_id).await.log_err().unwrap_or_default();
             let items_json: Vec<_> = items.iter().map(|item| serde_json::json!({
                 "engineer_name": item.engineer_name,
                 "base_fee": item.base_fee,
@@ -923,10 +924,10 @@ pub async fn api_view(
     match order_repo::find_payment_notice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(notice)) => {
             let partner_name = order_repo::find_partner_name_email(&pool, &notice.partner_id)
-                .await.ok().flatten().map(|(n, _)| n).unwrap_or_default();
-            let company_name = order_repo::find_company_name_setting(&pool).await.unwrap_or_else(|_| "有限会社マックプランニング".into());
+                .await.log_err().ok().flatten().map(|(n, _)| n).unwrap_or_default();
+            let company_name = order_repo::find_company_name_setting(&pool).await.log_err().unwrap_or_else(|_| "有限会社マックプランニング".into());
             let project_name = order_repo::find_project_name_by_purchase_order(&pool, &notice.purchase_order_id)
-                .await.ok().flatten().unwrap_or_default();
+                .await.log_err().ok().flatten().unwrap_or_default();
             let accepted = notice.partner_accepted_at.is_some();
             return Json(serde_json::json!({
                 "kind": "notice",
@@ -965,8 +966,8 @@ pub async fn api_view(
                     .into_response();
             }
             use chrono::Datelike;
-            let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.unwrap_or_default();
-            let company_name = order_repo::find_company_name_setting(&pool).await.unwrap_or_else(|_| "有限会社マックプランニング".into());
+            let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.log_err().unwrap_or_default();
+            let company_name = order_repo::find_company_name_setting(&pool).await.log_err().unwrap_or_else(|_| "有限会社マックプランニング".into());
             let accepted = invoice.client_accepted_at.is_some();
             return Json(serde_json::json!({
                 "kind": "invoice",
@@ -1025,7 +1026,7 @@ pub async fn api_accept(
         Ok(Some(notice)) => {
             if notice.partner_accepted_at.is_none() {
                 use sha2::{Digest, Sha256};
-                let pdf_bytes = super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await.unwrap_or_default();
+                let pdf_bytes = super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await.log_err().unwrap_or_default();
                 let mut hasher = Sha256::new();
                 hasher.update(&pdf_bytes);
                 let document_hash = format!("{:x}", hasher.finalize());
@@ -1063,7 +1064,7 @@ pub async fn api_accept(
                 use sha2::{Digest, Sha256};
                 use crate::domain::services::pdf_generator::PdfGenerator;
 
-                let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.unwrap_or_default();
+                let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.log_err().unwrap_or_default();
                 let pdf_data = super::invoices::build_client_invoice_pdf_data(&pool, &invoice, &client_name).await;
                 let gen = PdfGenerator::new();
                 let pdf_bytes = gen.generate_invoice_pdf(&pdf_data).unwrap_or_default();

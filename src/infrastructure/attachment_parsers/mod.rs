@@ -3,7 +3,7 @@
 /// PDFバイト列からテキストを抽出し(pdf-extract crate)、書類種別(注文書 / 支払通知書・請求書)に
 /// 応じて order_pdf_parser / payment_notice_pdf_parser のいずれかへディスパッチする。
 /// Excel・勤務表PDF(稼働報告書)は既存の `domain::services::excel_parser::auto_detect_and_parse`
-/// （PDF時は `timesheet_pdf_parser` へディスパッチ）をPhase3が直接呼ぶため、ここでは扱わない。
+/// （PDF時は取引先ごとのカスタマイズ `crate::custom::parse_timesheet_pdf` へディスパッチ）をPhase3が直接呼ぶため、ここでは扱わない。
 ///
 /// 正規表現パースで必須項目(注文番号/単価、または合計金額)が一切取れなかった場合は
 /// `PhaseError::Permanent` を返し、呼び出し元(Phase3)が needs_manual_review へ倒す。

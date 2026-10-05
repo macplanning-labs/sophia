@@ -8,6 +8,7 @@ import { useDynamicId } from "@/lib/utils";
 import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { FormModal, FormField, FormInput, FormSelect } from "@/components/ui/form-modal";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -123,6 +124,7 @@ export default function OrderDetailPage({
   };
 
   // ── 訂正再送付（SENT/ACCEPTED時） ──
+  const [confirmRepublishOpen, setConfirmRepublishOpen] = useState(false);
   const republishMutation = useMutation({
     mutationFn: () => apiPost<{ success: boolean; message?: string }>(`/api/v1/orders/${id}/republish`, {}),
     onSuccess: (res) => {
@@ -307,8 +309,28 @@ export default function OrderDetailPage({
   const taxAmount = Math.floor(subtotal * 0.1);
   const total = subtotal + taxAmount;
 
+  const republishFacts = order && data ? [
+    { label: "発注書番号", value: id },
+    { label: "送付先", value: data.partner_name },
+    { label: "案件名", value: data.project_name },
+  ].filter(f => f.value) : [];
+
   return (
     <DetailLayout title={`発注書 ${id}`} icon="🧾" backHref="/" backLabel="ダッシュボードに戻る" isLoading={isLoading} embedded={embedded}>
+      <ConfirmSheet
+        open={confirmRepublishOpen}
+        title="訂正版を再送付"
+        facts={republishFacts}
+        description="パートナーに再度メールが送信されます"
+        confirmLabel="再送付"
+        cancelLabel="キャンセル"
+        loading={republishMutation.isPending}
+        onConfirm={() => {
+          setConfirmRepublishOpen(false);
+          republishMutation.mutate();
+        }}
+        onCancel={() => setConfirmRepublishOpen(false)}
+      />
       {order && (
         <>
           {(() => {
@@ -339,7 +361,7 @@ export default function OrderDetailPage({
                 variant="outline"
                 size="sm"
                 className="border-amber-700/50 text-amber-400 hover:text-amber-300 hover:border-amber-600 gap-1"
-                onClick={() => { if (confirm("内容を訂正して再送付しますか？パートナーに再度メールが送信されます。")) republishMutation.mutate(); }}
+                onClick={() => setConfirmRepublishOpen(true)}
                 disabled={republishMutation.isPending}
               >
                 <Send className="w-3.5 h-3.5" /> 訂正再送付

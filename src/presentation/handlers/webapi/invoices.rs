@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use crate::infrastructure::db_tx::LogErr;
 use serde::Deserialize;
 use sqlx::PgPool;
 use chrono::NaiveDate;
@@ -225,7 +226,7 @@ pub async fn get_invoice(
         ))?;
 
     let items = billing_repo::list_invoice_items(&pool, invoice.id).await
-        .unwrap_or_default();
+        .log_err().unwrap_or_default();
     let client = client_repo::find_by_id(&pool, invoice.client_id).await
         .ok()
         .flatten()
@@ -349,7 +350,7 @@ pub async fn accept_invoice(
     }
 
     let client_name = order_repo::find_client_name(&pool, invoice.client_id).await
-        .unwrap_or_default();
+        .log_err().unwrap_or_default();
     let pdf_data = crate::presentation::handlers::invoices::pdf::build_client_invoice_pdf_data(&pool, &invoice, &client_name).await;
     let gen = PdfGenerator::new();
     let pdf_bytes = gen.generate_invoice_pdf(&pdf_data).unwrap_or_default();

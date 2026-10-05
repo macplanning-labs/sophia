@@ -2,11 +2,12 @@
 
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchReceivedOrderDetail, linkReceivedOrderContract, apiDelete } from "@/lib/api";
+import { fetchReceivedOrderDetail, linkReceivedOrderContract, createContractFromReceivedOrder, apiDelete } from "@/lib/api";
 import { useDynamicId } from "@/lib/utils";
 import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { FormModal, FormField, FormInput, FormSelect } from "@/components/ui/form-modal";
@@ -71,6 +72,8 @@ export default function ReceivedOrderDetailPage({
   const [selectedStatus, setSelectedStatus] = useState("");
   const [linkContractId, setLinkContractId] = useState("");
   const [showEdit, setShowEdit] = useState(false);
+  const [confirmRollforwardOpen, setConfirmRollforwardOpen] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [headerForm, setHeaderForm] = useState({
     project_name: "",
     target_month: "",
@@ -129,6 +132,19 @@ export default function ReceivedOrderDetailPage({
     }
   }, [needsContractLink, linkCandidates]);
 
+  const createContract = useMutation({
+    mutationFn: () => createContractFromReceivedOrder(id),
+    onSuccess: (res) => {
+      if (res.success === false) {
+        toast.error(res.error ?? "契約の作成に失敗しました");
+        return;
+      }
+      invalidateViews();
+      toast.success(res.message ?? "受注契約を作成して紐付けました");
+    },
+    onError: (e: Error) => toast.error(`契約の作成エラー: ${e.message}`),
+  });
+
   const linkContract = useMutation({
     mutationFn: () => linkReceivedOrderContract(id, Number(linkContractId)),
     onSuccess: (res) => {
@@ -179,10 +195,22 @@ export default function ReceivedOrderDetailPage({
   });
 
   const updateStatus = useMutation({
-    mutationFn: async (status: string) => { const r = await fetch(`/api/v1/received-orders/${id}/update-status`, {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: `status=${status}`,
-    }); if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.error || "ステータス変更に失敗しました"); } return r; },
+    mutationFn: async (status: string) => {
+      const r = await fetch(`/api/v1/received-orders/${id}/update-status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `status=${status}`,
+      });
+      if (!r.ok) {
+        const b = await r.json().catch(() => ({}));
+        throw new Error(b.error || "ステータス変更に失敗しました");
+      }
+      const body = await r.json();
+      if (body.success === false) {
+        throw new Error(body.error || "ステータス変更に失敗しました");
+      }
+      return body;
+    },
     onSuccess: () => { invalidateViews(); toast.success("ステータス更新完了"); },
     onError: (e: Error) => toast.error(`ステータス変更に失敗しました: ${e.message}`),
   });
@@ -246,6 +274,18 @@ export default function ReceivedOrderDetailPage({
     setItemForms((prev) => prev.map((f, i) => (i === idx ? { ...f, [key]: value } : f)));
   };
 
+  const rollforwardFacts = order && items.length > 0 ? [
+    { label: "受注書番号", value: order.received_order_no || `#${id}` },
+    { label: "要員名", value: items[0].engineer_name },
+    { label: "対象月", value: order.target_month?.slice(0, 7) },
+  ].filter(f => f.value) : [];
+
+  const deleteFacts = order && items.length > 0 ? [
+    { label: "受注書番号", value: order.received_order_no || `#${id}` },
+    { label: "要員名", value: items[0].engineer_name },
+    { label: "対象月", value: order.target_month?.slice(0, 7) },
+  ].filter(f => f.value) : [];
+
   const actions = (
     <div className="flex items-center gap-2 flex-wrap">
       <button
@@ -255,7 +295,7 @@ export default function ReceivedOrderDetailPage({
         ✏️ 編集
       </button>
       <button
-        onClick={() => { if (confirm("翌月にロールフォワードしますか？")) rollforward.mutate(); }}
+        onClick={() => setConfirmRollforwardOpen(true)}
         disabled={rollforward.isPending}
         className="px-3 py-1.5 text-xs font-medium rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/30 hover:bg-amber-500/20 transition-colors disabled:opacity-50"
       >
@@ -270,7 +310,7 @@ export default function ReceivedOrderDetailPage({
       </button>
       {isRegistered && (
         <button
-          onClick={() => { if (confirm("この受注を削除しますか？この操作は取り消せません。")) deleteOrder.mutate(); }}
+          onClick={() => setConfirmDeleteOpen(true)}
           disabled={deleteOrder.isPending}
           className="px-3 py-1.5 text-xs font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors disabled:opacity-50"
         >
@@ -282,6 +322,34 @@ export default function ReceivedOrderDetailPage({
 
   return (
     <DetailLayout title={`受注書 #${id}`} icon="📊" backHref="/" backLabel="ダッシュボードに戻る" isLoading={isLoading} actions={actions} embedded={embedded}>
+      <ConfirmSheet
+        open={confirmRollforwardOpen}
+        title="翌月の受注書を作成"
+        facts={rollforwardFacts}
+        confirmLabel="作成"
+        cancelLabel="キャンセル"
+        loading={rollforward.isPending}
+        onConfirm={() => {
+          setConfirmRollforwardOpen(false);
+          rollforward.mutate();
+        }}
+        onCancel={() => setConfirmRollforwardOpen(false)}
+      />
+      <ConfirmSheet
+        open={confirmDeleteOpen}
+        title="受注書を削除"
+        facts={deleteFacts}
+        description="この操作は取り消せません"
+        variant="danger"
+        confirmLabel="削除"
+        cancelLabel="キャンセル"
+        loading={deleteOrder.isPending}
+        onConfirm={() => {
+          setConfirmDeleteOpen(false);
+          deleteOrder.mutate();
+        }}
+        onCancel={() => setConfirmDeleteOpen(false)}
+      />
       {order && (
         <>
           {needsContractLink && (
@@ -291,9 +359,18 @@ export default function ReceivedOrderDetailPage({
               </p>
               <p className="text-xs text-amber-200/90">
                 EDI・クロス等の注文書には案件IDがなく、取込時に受注契約を一意に特定できないことがあります。
-                稼働報告・進捗連携のため、該当する受注契約を紐付けてください。
+                稼働報告・進捗連携のため、受注契約が1つ必要です。契約書がないクライアントの場合は、
+                この注文書の内容から、受注契約を自動で作成できます（案件名と技術者名から特定します）。
                 件名がマスタ正式名と違う場合は、案件マスタの「EDI案件別名」も設定してください。
               </p>
+              <button
+                type="button"
+                disabled={createContract.isPending}
+                onClick={() => createContract.mutate()}
+                className="px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/20 disabled:opacity-50"
+              >
+                {createContract.isPending ? "作成中…" : "この注文書から受注契約を作成"}
+              </button>
               {linkCandidates.length === 0 ? (
                 <p className="text-xs text-amber-200/80">
                   紐付け候補の受注契約がありません。受注契約画面で期間・技術者を確認してください。

@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     Extension, Form,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::infrastructure::repositories::user_repo::{self, UserRow};
@@ -140,7 +141,7 @@ pub async fn api_detail(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let user = user_repo::find_user_detail(&pool, id).await.ok().flatten();
+    let user = user_repo::find_user_detail(&pool, id).await.log_err().ok().flatten();
 
     match user {
         Some(u) => axum::Json(serde_json::json!(u)).into_response(),
@@ -176,7 +177,7 @@ pub async fn api_create(
     }
 
     // メール重複チェック
-    let exists = user_repo::count_by_email(&pool, &form.email).await.unwrap_or(0);
+    let exists = user_repo::count_by_email(&pool, &form.email).await.log_err().unwrap_or(0);
     if exists > 0 {
         return (axum::http::StatusCode::CONFLICT,
             axum::Json(serde_json::json!({"error": "このメールアドレスは既に登録されています"}))).into_response();
@@ -241,7 +242,7 @@ pub async fn api_update(
     }
 
     // メール重複チェック（自分以外）
-    let exists = user_repo::count_by_email_excluding(&pool, &form.email, id).await.unwrap_or(0);
+    let exists = user_repo::count_by_email_excluding(&pool, &form.email, id).await.log_err().unwrap_or(0);
     if exists > 0 {
         return (axum::http::StatusCode::CONFLICT,
             axum::Json(serde_json::json!({"error": "このメールアドレスは既に使用されています"}))).into_response();

@@ -136,7 +136,7 @@ pub async fn insert_engineer_session(pool: &PgPool, session_id: &str, engineer_i
 /// パートナーユーザーをパスワード方式で作成する（招待受諾。旧フロー互換）
 ///
 /// トランザクション内で ①ユーザー作成 ②プロフィール作成 ③招待を使用済みに更新 を行う。
-/// ②③の失敗はログのみ（ユーザー作成自体は継続・コミットする＝既存挙動を踏襲）。
+/// ②③を含むすべての操作が成功するか、すべてが取り消される（部分成功はない）。
 pub async fn create_partner_user_with_password(
     pool: &PgPool,
     email: &str,
@@ -156,31 +156,29 @@ pub async fn create_partner_user_with_password(
     .fetch_one(&mut *tx)
     .await?;
 
-    if let Err(e) = sqlx::query(
+    sqlx::query(
         "INSERT INTO s_user_profile (user_id, partner_id, is_first_login) VALUES ($1, $2, false)"
     )
     .bind(user_id)
     .bind(partner_id)
     .execute(&mut *tx)
-    .await {
-        tracing::error!("プロフィール作成エラー: {}", e);
-    }
+    .await
+    .map_err(|e| { tracing::error!("プロフィール作成エラー: {:?}", e); e })?;
 
-    if let Err(e) = sqlx::query("UPDATE s_partner_invitation SET is_used = true WHERE id = $1")
+    sqlx::query("UPDATE s_partner_invitation SET is_used = true WHERE id = $1")
         .bind(invitation_id)
         .execute(&mut *tx)
-        .await {
-        tracing::error!("招待更新エラー: {}", e);
-    }
+        .await
+        .map_err(|e| { tracing::error!("招待更新エラー: {:?}", e); e })?;
 
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
     Ok(user_id)
 }
 
 /// パートナーユーザーをパスキー方式で作成する（招待受諾）
 ///
 /// トランザクション内で ①ユーザー作成 ②プロフィール作成 ③パスキー保存 ④招待を使用済みに更新 を行う。
-/// ②③④の失敗はログのみ（ユーザー作成自体は継続・コミットする＝既存挙動を踏襲）。
+/// ②③④を含むすべての操作が成功するか、すべてが取り消される（部分成功はない）。
 pub async fn create_partner_user_with_passkey(
     pool: &PgPool,
     email: &str,
@@ -201,15 +199,16 @@ pub async fn create_partner_user_with_passkey(
     .fetch_one(&mut *tx)
     .await?;
 
-    if let Err(e) = sqlx::query(
+    sqlx::query(
         "INSERT INTO s_user_profile (user_id, partner_id, is_first_login) VALUES ($1, $2, false)"
     )
     .bind(user_id)
     .bind(partner_id)
     .execute(&mut *tx)
-    .await { tracing::error!("DB error: {:?}", e); }
+    .await
+    .map_err(|e| { tracing::error!("プロフィール作成エラー: {:?}", e); e })?;
 
-    if let Err(e) = sqlx::query(
+    sqlx::query(
         "INSERT INTO s_webauthn_credential (user_id, credential_id, passkey_json, name) VALUES ($1, $2, $3, $4)"
     )
     .bind(user_id)
@@ -217,13 +216,15 @@ pub async fn create_partner_user_with_passkey(
     .bind(passkey_json)
     .bind("パスキー")
     .execute(&mut *tx)
-    .await { tracing::error!("DB error: {:?}", e); }
+    .await
+    .map_err(|e| { tracing::error!("パスキー保存エラー: {:?}", e); e })?;
 
-    if let Err(e) = sqlx::query("UPDATE s_partner_invitation SET is_used = true WHERE id = $1")
+    sqlx::query("UPDATE s_partner_invitation SET is_used = true WHERE id = $1")
         .bind(invitation_id)
         .execute(&mut *tx)
-        .await { tracing::error!("DB error: {:?}", e); }
+        .await
+        .map_err(|e| { tracing::error!("招待更新エラー: {:?}", e); e })?;
 
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
     Ok(user_id)
 }

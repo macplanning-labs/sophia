@@ -57,6 +57,35 @@ pub struct AppConfig {
     pub imap_password: String,
 }
 
+/// 公開されている(=誰でも知っている)SECRET_KEY の値。以前、見本(.env.example / .env.rust.example)と
+/// コードの既定値に書いていたもの。これが設定されていたら、未設定と同じく起動を止める(DEMO-000097)。
+const KNOWN_PUBLIC_SECRET_KEYS: &[&str] = &[
+    // secret-default-ok: 拒否するための一覧。この値を使うことは無い
+    "change-me",
+    "change-me-in-production",
+    "change-me-to-a-long-random-string",
+];
+
+/// SECRET_KEY はログインの証明(JWT)の署名と、二段階認証の秘密の暗号化に使う。
+/// 既定値を持たせると、公開された時点で誰でも知っている鍵になる(GHSA-hp9g-vf5r-43wq と同じ種類)。
+/// 未設定・空・公開済みの値なら、起動を止める。
+fn require_secret_key(value: Option<String>) -> anyhow::Result<String> {
+    let v = value.unwrap_or_default();
+    if v.trim().is_empty() {
+        anyhow::bail!(
+            "SECRET_KEY が未設定です。ログインの証明の署名と二段階認証の暗号化に使うため必須です。\
+             .env.<ENV_NAME> に、openssl rand -hex 32 などで作った値を設定してください"
+        );
+    }
+    if KNOWN_PUBLIC_SECRET_KEYS.contains(&v.as_str()) {
+        anyhow::bail!(
+            "SECRET_KEY に、公開されている見本の値が設定されています。誰でも知っている値なので使えません。\
+             openssl rand -hex 32 などで作った値に替えてください(替えると、全員がいったんログアウトします)"
+        );
+    }
+    Ok(v)
+}
+
 impl AppConfig {
     pub fn from_env() -> anyhow::Result<Self> {
         let base_url = std::env::var("BASE_URL")
@@ -69,8 +98,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "8111".to_string())
                 .parse()?,
             base_url,
-            secret_key: std::env::var("SECRET_KEY")
-                .unwrap_or_else(|_| "change-me-in-production".to_string()),
+            secret_key: require_secret_key(std::env::var("SECRET_KEY").ok())?,
             email_host: std::env::var("EMAIL_HOST")
                 .unwrap_or_else(|_| "smtp.gmail.com".to_string()),
             email_port: std::env::var("EMAIL_PORT")
@@ -101,5 +129,33 @@ impl AppConfig {
                 .or_else(|_| std::env::var("EMAIL_HOST_PASSWORD"))
                 .unwrap_or_default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod secret_key_tests {
+    use super::*;
+
+    #[test]
+    fn missing_or_empty_secret_key_stops_startup() {
+        assert!(require_secret_key(None).is_err());
+        assert!(require_secret_key(Some(String::new())).is_err());
+        assert!(require_secret_key(Some("   ".to_string())).is_err());
+    }
+
+    #[test]
+    fn publicly_known_secret_keys_are_rejected() {
+        for k in KNOWN_PUBLIC_SECRET_KEYS {
+            assert!(
+                require_secret_key(Some((*k).to_string())).is_err(),
+                "公開済みの値が通ってしまう"
+            );
+        }
+    }
+
+    #[test]
+    fn a_proper_secret_key_is_accepted() {
+        let k = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; // secret-default-ok: テスト用の値
+        assert_eq!(require_secret_key(Some(k.to_string())).unwrap(), k);
     }
 }

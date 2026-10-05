@@ -10,6 +10,7 @@
 /// sync.run(true).await?;   // 全件再同期
 /// ```
 
+use crate::infrastructure::db_tx::LogErr;
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -199,7 +200,7 @@ impl EdiSync {
                 .bind(format!("C{:04}", r.id))
                 .fetch_one(&self.sophia)
                 .await
-                .unwrap_or(false);
+                .log_err().unwrap_or(false);
 
             if exists {
                 if let Err(e) = sqlx::query(
@@ -258,7 +259,7 @@ impl EdiSync {
                 .bind(&r.partner_id)
                 .fetch_one(&self.sophia)
                 .await
-                .unwrap_or(false);
+                .log_err().unwrap_or(false);
 
             if exists {
                 if let Err(e) = sqlx::query(
@@ -311,7 +312,7 @@ impl EdiSync {
                 .bind(&r.project_id)
                 .fetch_one(&self.sophia)
                 .await
-                .unwrap_or(false);
+                .log_err().unwrap_or(false);
 
             if exists {
                 if let Err(e) = sqlx::query("UPDATE m_project SET name = $1 WHERE project_id = $2")
@@ -423,7 +424,7 @@ impl EdiSync {
             .bind(&r.partner_id).bind(&r.project_id).bind(eng_id)
             .fetch_one(&self.sophia)
             .await
-            .unwrap_or(false);
+            .log_err().unwrap_or(false);
 
             if exists {
                 updated += 1;
@@ -486,7 +487,7 @@ impl EdiSync {
             .bind(&r.order_id)
             .fetch_one(&self.sophia)
             .await
-            .unwrap_or(false);
+            .log_err().unwrap_or(false);
 
             if exists {
                 updated += 1;
@@ -551,7 +552,7 @@ impl EdiSync {
             .bind(&r.received_order_no)
             .fetch_one(&self.sophia)
             .await
-            .unwrap_or(false);
+            .log_err().unwrap_or(false);
 
             if exists {
                 updated += 1;
@@ -611,7 +612,7 @@ impl EdiSync {
             .bind(&r.code)
             .fetch_one(&self.sophia)
             .await
-            .unwrap_or(false);
+            .log_err().unwrap_or(false);
 
             if exists {
                 if let Err(e) = sqlx::query(

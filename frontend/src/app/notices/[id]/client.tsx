@@ -2,26 +2,33 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { fetchNoticeDetail, fetchNoticeEmailPreview, sendNoticeMail, sendNoticePeppol, downloadBlob, apiPut } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { fetchNoticeDetail, deleteNotice, approveNotice, rejectNotice, fetchNoticeEmailPreview, sendNoticeMail, sendNoticePeppol, downloadBlob, apiPut } from "@/lib/api";
 import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { FormModal, FormField, FormInput, FormTextarea } from "@/components/ui/form-modal";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { FileText, Receipt, Download, Send, X, Globe } from "lucide-react";
 import { useDynamicId, cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { useCurrentUser } from "@/lib/useCurrentUser";
 
 export default function NoticeDetailPage({
   noticeId,
   embedded = false,
+  onDeleted,
 }: {
   noticeId?: string;
   embedded?: boolean;
+  onDeleted?: () => void;
 } = {}) {
   const routeId = useDynamicId();
   const id = noticeId || routeId;
   const qc = useQueryClient();
+  const router = useRouter();
+  const [confirmTarget, setConfirmTarget] = useState<"reject" | "delete" | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["notices", id],
@@ -64,7 +71,7 @@ export default function NoticeDetailPage({
   };
 
   // ── PDFプレビュー（支払通知書 / 代理請求書） ──
-  const [pdfOpen, setPdfOpen] = useState(false);
+  const [pdfOpen, setPdfOpen] = useState(embedded);
   const [pdfType, setPdfType] = useState<"payment-notice" | "invoice">("payment-notice");
 
   const pdfUrl = pdfOpen
@@ -85,6 +92,39 @@ export default function NoticeDetailPage({
       toast.error(`PDFダウンロードに失敗しました: ${e instanceof Error ? e.message : e}`);
     }
   };
+
+  const deleteMut = useMutation({
+    mutationFn: () => deleteNotice(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["notices"] });
+      qc.invalidateQueries({ queryKey: ["settlement"] });
+      qc.invalidateQueries({ queryKey: ["dashboard"] });
+      toast.success("削除しました");
+      if (onDeleted) onDeleted();
+      else if (!embedded) router.push("/");
+    },
+    onError: (e: Error) => toast.error(`削除に失敗しました: ${e.message}`),
+  });
+
+  // ── 承認 / 差戻し（請求書と同じ操作） ──
+  const { isAdmin } = useCurrentUser();
+  const approvalStatus: string | undefined = data?.notice?.approval_status ?? undefined;
+  const notBeforeApproval = approvalStatus === "PENDING_APPROVAL" || approvalStatus === "REJECTED";
+  const refreshAfterApproval = () => {
+    qc.invalidateQueries({ queryKey: ["notices", id] });
+    qc.invalidateQueries({ queryKey: ["notices"] });
+    qc.invalidateQueries({ queryKey: ["dashboard"] });
+  };
+  const approveMut = useMutation({
+    mutationFn: () => approveNotice(id),
+    onSuccess: () => { refreshAfterApproval(); toast.success("承認しました"); },
+    onError: (e: Error) => toast.error(`承認に失敗しました: ${e.message}`),
+  });
+  const rejectMut = useMutation({
+    mutationFn: () => rejectNotice(id),
+    onSuccess: () => { refreshAfterApproval(); toast.success("差し戻しました"); },
+    onError: (e: Error) => toast.error(`差し戻しに失敗しました: ${e.message}`),
+  });
 
   // ── メール送信 ──
   const [sendOpen, setSendOpen] = useState(false);
@@ -146,10 +186,32 @@ export default function NoticeDetailPage({
             >
               <FileText className="w-3.5 h-3.5" /> PDF
             </Button>
+            {isAdmin && (approvalStatus === "PENDING_APPROVAL" || approvalStatus === "REJECTED") && (
+              <Button
+                variant="outline" size="sm"
+                className="border-emerald-600/50 text-emerald-400 hover:text-emerald-300 gap-1"
+                onClick={() => approveMut.mutate()}
+                disabled={approveMut.isPending}
+              >
+                ✅ 承認
+              </Button>
+            )}
+            {isAdmin && (approvalStatus === "PENDING_APPROVAL" || approvalStatus === "APPROVED") && !notice.confirmed && (
+              <Button
+                variant="outline" size="sm"
+                className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
+                onClick={() => setConfirmTarget("reject")}
+                disabled={rejectMut.isPending}
+              >
+                ↩ 差し戻し
+              </Button>
+            )}
             <Button
               variant="outline" size="sm"
               className="border-blue-600/50 text-blue-400 hover:text-blue-300 gap-1"
               onClick={openSendModal}
+              disabled={notBeforeApproval}
+              title={notBeforeApproval ? "承認後に送信できます" : undefined}
             >
               <Send className="w-3.5 h-3.5" /> {notice.mail_sent_at ? "再送信" : "メール送信"}
             </Button>
@@ -157,7 +219,7 @@ export default function NoticeDetailPage({
               variant="outline" size="sm"
               className="border-indigo-600/50 text-indigo-400 hover:text-indigo-300 gap-1"
               onClick={() => peppolSendMut.mutate()}
-              disabled={peppolSendMut.isPending}
+              disabled={peppolSendMut.isPending || notBeforeApproval}
             >
               <Globe className="w-3.5 h-3.5" /> Peppol送信
             </Button>
@@ -169,6 +231,17 @@ export default function NoticeDetailPage({
                 onClick={openEditModal}
               >
                 ✏️ 編集
+              </Button>
+            )}
+            {!notice.confirmed && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
+                onClick={() => setConfirmTarget("delete")}
+                disabled={deleteMut.isPending}
+              >
+                🗑 削除
               </Button>
             )}
             {notice.mail_sent_at && (
@@ -390,6 +463,45 @@ export default function NoticeDetailPage({
               <p className="text-sm text-red-400">エラー: {(sendMutation.error as Error).message}</p>
             )}
           </FormModal>
+
+          <ConfirmSheet
+            open={confirmTarget === "reject"}
+            title="支払通知を差し戻し"
+            facts={[
+              ...(id ? [{ label: "通知番号", value: id }] : []),
+              ...(data?.partner_name ? [{ label: "パートナー", value: data.partner_name }] : []),
+              ...(data?.total ? [{ label: "金額（税込）", value: `¥${Number(data.total).toLocaleString()}` }] : []),
+            ]}
+            variant="danger"
+            confirmLabel="差し戻し"
+            cancelLabel="キャンセル"
+            loading={rejectMut.isPending}
+            onConfirm={() => {
+              setConfirmTarget(null);
+              rejectMut.mutate();
+            }}
+            onCancel={() => setConfirmTarget(null)}
+          />
+
+          <ConfirmSheet
+            open={confirmTarget === "delete"}
+            title="支払通知を削除"
+            facts={[
+              ...(id ? [{ label: "通知番号", value: id }] : []),
+              ...(data?.partner_name ? [{ label: "パートナー", value: data.partner_name }] : []),
+              ...(data?.total ? [{ label: "金額（税込）", value: `¥${Number(data.total).toLocaleString()}` }] : []),
+            ]}
+            description="この操作は取り消せません"
+            variant="danger"
+            confirmLabel="削除"
+            cancelLabel="キャンセル"
+            loading={deleteMut.isPending}
+            onConfirm={() => {
+              setConfirmTarget(null);
+              deleteMut.mutate();
+            }}
+            onCancel={() => setConfirmTarget(null)}
+          />
         </>
       )}
     </DetailLayout>

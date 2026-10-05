@@ -5,11 +5,13 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use sqlx::PgPool;
+use crate::infrastructure::db_tx::LogErr;
+use sqlx::{PgPool, Acquire};
 
 use crate::domain::models::partner_contract::PurchaseOrderStatus;
 use crate::infrastructure::repositories::order_repo::{self, OrderRow};
 use crate::infrastructure::repositories::task_repo;
+use crate::infrastructure::db_tx;
 use crate::presentation::api_response::AppError;
 
 use super::{generate_order_id, StatusForm};
@@ -47,18 +49,18 @@ pub async fn api_detail(
     State(pool): State<PgPool>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let order = order_repo::find_purchase_order(&pool, &id).await.ok().flatten();
+    let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     match order {
         Some(order) => {
             let items = order_repo::list_order_items_with_engineer(&pool, &id).await
                 .unwrap_or_else(|e| { tracing::warn!("orders: {:?}", e); vec![] });
 
-            let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.ok().flatten();
+            let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.log_err().ok().flatten();
             let (partner_name, partner_email) = partner_info.unwrap_or_default();
 
             let project_name = order_repo::find_project_name(&pool, &order.project_id).await
-                .ok().flatten().unwrap_or_default();
+                .log_err().ok().flatten().unwrap_or_default();
 
             let status_enum = PurchaseOrderStatus::from_str(&order.status);
             let total_amount: i64 = items.iter().map(|i| i.amount as i64).sum();
@@ -109,7 +111,7 @@ pub async fn api_delete(
 ) -> Result<impl IntoResponse, AppError> {
     use crate::infrastructure::repositories::order_repo::{find_purchase_order_status, delete_purchase_order};
 
-    let status = find_purchase_order_status(&pool, &id).await.ok().flatten();
+    let status = find_purchase_order_status(&pool, &id).await.log_err().ok().flatten();
 
     match status.as_deref() {
         Some("DRAFT") | None => {},
@@ -133,7 +135,7 @@ pub async fn api_update(
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, AppError> {
     // DRAFTチェック
-    let status = order_repo::find_purchase_order_status(&pool, &id).await.ok().flatten();
+    let status = order_repo::find_purchase_order_status(&pool, &id).await.log_err().ok().flatten();
 
     if status.as_deref() != Some("DRAFT") {
         return Ok((axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({
@@ -193,7 +195,7 @@ pub async fn api_rollforward(
     State(pool): State<PgPool>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let order = order_repo::find_purchase_order(&pool, &id).await.ok().flatten();
+    let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     match order {
         Some(o) => {
@@ -224,7 +226,7 @@ pub async fn api_rollforward(
             // 明細コピー（失敗時はロールバックし、明細なしの発注書が201で返らないようにする）
             order_repo::copy_order_items(&mut tx, &o.order_id, &new_order_id).await?;
 
-            tx.commit().await?;
+            crate::infrastructure::db_tx::commit_checked(tx).await?;
 
             Ok((axum::http::StatusCode::CREATED, Json(serde_json::json!({
                 "success": true, "order_id": new_order_id, "message": "翌月の発注書を作成しました"
@@ -289,55 +291,142 @@ pub async fn api_create(
 
     let mut created_order_ids = Vec::new();
     let mut skipped_partners = Vec::new();
+    let mut failed_partners: Vec<serde_json::Value> = Vec::new();
+    // このリクエストで、すでに採番した発注書番号（確定前のため、DBの最大値には反映されない）
+    let mut used_order_ids: Vec<String> = Vec::new();
 
-    // パートナーグループ単位の失敗は他グループの作成を妨げない意図的な部分成功扱い
-    // （失敗はログに残し、作成できたIDのみをレスポンスで返す）
+    // パートナーグループ単位で SAVEPOINT（ネストされたトランザクション）を使い、
+    // グループ内の失敗は他グループの作成を妨げない部分成功を実現する（PostgreSQL の失敗状態の性質を利用）
     for (partner_id, group) in &groups {
         let first = group[0];
 
-        let draft_exists = order_repo::draft_order_exists(
-            &mut *tx, partner_id, &first.project_id, first.id, work_start, work_end,
-        ).await.unwrap_or(false);
+        // グループごとの SAVEPOINT を開始
+        let mut sp = match (&mut tx).begin().await {
+            Ok(savepoint) => savepoint,
+            Err(e) => {
+                tracing::error!("[db_error] api_create: SAVEPOINT 開始失敗 ({}): {:?}", &first.partner_name, e);
+                failed_partners.push(serde_json::json!({
+                    "partner": &first.partner_name,
+                    "error": format!("トランザクション開始に失敗しました: {}", e)
+                }));
+                continue;
+            }
+        };
+
+        // グループ内の処理を実行
+        let draft_exists = match order_repo::draft_order_exists(
+            &mut *sp, partner_id, &first.project_id, first.id, work_start, work_end,
+        ).await {
+            Ok(exists) => exists,
+            Err(e) => {
+                tracing::error!("[db_error] api_create: 重複チェック失敗 ({}): {:?}", &first.partner_name, e);
+                if let Err(rb_err) = sp.rollback().await {
+                    tracing::error!("[db_error] api_create: SAVEPOINT ROLLBACK も失敗 ({}): {:?}", &first.partner_name, rb_err);
+                }
+                failed_partners.push(serde_json::json!({
+                    "partner": &first.partner_name,
+                    "error": format!("重複チェックに失敗しました: {}", e)
+                }));
+                continue;
+            }
+        };
 
         if draft_exists {
+            // 重複でスキップ
+            if let Err(e) = sp.rollback().await {
+                tracing::error!("[db_error] api_create: SAVEPOINT ROLLBACK 失敗 ({}): {:?}", &first.partner_name, e);
+            }
             skipped_partners.push(first.partner_name.clone());
             continue;
         }
 
-        let order_id = generate_order_id(&pool, work_start).await;
+        // 採番はDB（確定済みのデータ）の最大値から行うため、同じリクエストで先に作った発注書
+        // （SAVEPOINT 内で、まだ確定していない）の番号は反映されない。使った番号を飛ばして、重複を避ける
+        // （避けないと、2つ目以降のパートナーが主キー重複で失敗する）
+        let mut order_id = generate_order_id(&pool, work_start).await;
+        while used_order_ids.contains(&order_id) {
+            order_id = next_order_id(&order_id);
+        }
+        used_order_ids.push(order_id.clone());
 
+        // ヘッダーのINSERT
         if let Err(e) = order_repo::insert_purchase_order(
-            &mut *tx, &order_id, partner_id, &first.project_id, first.id, work_start, work_end,
+            &mut *sp, &order_id, partner_id, &first.project_id, first.id, work_start, work_end,
         ).await {
-            tracing::error!("api_create orders: ヘッダーINSERT失敗: {:?}", e);
+            tracing::error!("[db_error] api_create: ヘッダーINSERT失敗 ({}): {:?}", &first.partner_name, e);
+            if let Err(rb_err) = sp.rollback().await {
+                tracing::error!("[db_error] api_create: SAVEPOINT ROLLBACK も失敗 ({}): {:?}", &first.partner_name, rb_err);
+            }
+            failed_partners.push(serde_json::json!({
+                "partner": &first.partner_name,
+                "error": format!("ヘッダーの作成に失敗しました: {}", e)
+            }));
             continue;
         }
 
+        // 明細のINSERT
+        let mut items_error: Option<String> = None;
         for c in group {
             let price = (c.base_rate as f64 * rust_decimal::prelude::ToPrimitive::to_f64(&c.effort).unwrap_or(1.0)) as i32;
             if let Err(e) = order_repo::insert_purchase_order_item(
-                &mut *tx, &order_id, c.id, c.base_rate, c.effort, &c.settlement_type,
+                &mut *sp, &order_id, c.id, c.base_rate, c.effort, &c.settlement_type,
                 c.lower_limit_hours, c.upper_limit_hours, c.fixed_hours,
                 c.deduction_rate, c.overtime_rate, price,
             ).await {
-                tracing::error!("api_create orders: 明細INSERT失敗: {:?}", e);
+                tracing::error!("[db_error] api_create: 明細INSERT失敗 ({}): {:?}", &first.partner_name, e);
+                items_error = Some(format!("明細の作成に失敗しました: {}", e));
+                break;
             }
         }
 
-        created_order_ids.push(order_id);
+        if let Some(err_msg) = items_error {
+            // 明細作成失敗
+            if let Err(rb_err) = sp.rollback().await {
+                tracing::error!("[db_error] api_create: SAVEPOINT ROLLBACK も失敗 ({}): {:?}", &first.partner_name, rb_err);
+            }
+            failed_partners.push(serde_json::json!({
+                "partner": &first.partner_name,
+                "error": err_msg
+            }));
+            continue;
+        }
+
+        // 正常作成: SAVEPOINT をコミット
+        if let Err(e) = sp.commit().await {
+            tracing::error!("[db_error] api_create: SAVEPOINT COMMIT 失敗 ({}): {:?}", &first.partner_name, e);
+            failed_partners.push(serde_json::json!({
+                "partner": &first.partner_name,
+                "error": format!("トランザクション確定に失敗しました: {}", e)
+            }));
+        } else {
+            created_order_ids.push(order_id);
+        }
     }
 
-    tx.commit().await?;
+    // 外側のトランザクション確定。失敗状態を検出して、エラーを返す
+    db_tx::commit_checked(tx).await?;
 
-    if created_order_ids.is_empty() {
+    // レスポンス判定
+    if created_order_ids.is_empty() && !failed_partners.is_empty() {
+        // 1件も作成できず、失敗がある場合は 500
+        return Ok((axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "success": false,
+            "error": "発注書の作成に失敗しました",
+            "failed_partners": failed_partners
+        }))).into_response());
+    }
+
+    if created_order_ids.is_empty() && !skipped_partners.is_empty() {
+        // 重複だけで作成できなかった場合は従来どおり 409
         return Ok((axum::http::StatusCode::CONFLICT, Json(serde_json::json!({
             "success": false,
             "error": format!("同一条件のDRAFT発注書が既に存在するため作成しませんでした（{}）", skipped_partners.join(", "))
         }))).into_response());
     }
 
+    // 作成できた場合は 201（部分成功の場合も `failed_partners` を含める）
     Ok((axum::http::StatusCode::CREATED, Json(serde_json::json!({
-        "success": true, "order_ids": created_order_ids, "skipped_partners": skipped_partners
+        "success": true, "order_ids": created_order_ids, "skipped_partners": skipped_partners, "failed_partners": failed_partners
     }))).into_response())
 }
 
@@ -364,13 +453,13 @@ pub async fn api_email_preview(
 ) -> Result<impl IntoResponse, AppError> {
     use crate::domain::services::email_service::{EmailService, compose_order_publish_email};
 
-    let order = order_repo::find_purchase_order(&pool, &id).await.ok().flatten();
+    let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     let Some(order) = order else {
         return Ok((axum::http::StatusCode::NOT_FOUND, "発注書が見つかりません").into_response());
     };
 
-    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.ok().flatten();
+    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.log_err().ok().flatten();
     let (partner_name, _) = partner_info.unwrap_or_default();
 
     let base_url = std::env::var("BASE_URL").unwrap_or_default();
@@ -393,7 +482,7 @@ pub async fn api_publish(
     use crate::domain::services::email_service::EmailService;
 
     // 発注書取得
-    let order = order_repo::find_purchase_order(&pool, &id).await.ok().flatten();
+    let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     let order = match order {
         Some(o) => o,
@@ -410,7 +499,7 @@ pub async fn api_publish(
     }
 
     // パートナー情報
-    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.ok().flatten();
+    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.log_err().ok().flatten();
     let (partner_name, partner_email) = partner_info.unwrap_or_default();
 
     if partner_email.is_empty() {
@@ -456,7 +545,7 @@ pub async fn api_republish(
     use crate::domain::services::email_service::EmailService;
 
     // 発注書取得
-    let order = order_repo::find_purchase_order(&pool, &id).await.ok().flatten();
+    let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     let order = match order {
         Some(o) => o,
@@ -473,7 +562,7 @@ pub async fn api_republish(
     }
 
     // パートナー情報
-    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.ok().flatten();
+    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.log_err().ok().flatten();
     let (partner_name, partner_email) = partner_info.unwrap_or_default();
 
     if partner_email.is_empty() {
@@ -514,7 +603,7 @@ pub async fn api_request_timesheet_preview(
     use chrono::Datelike;
     use crate::domain::services::email_service::{EmailService, compose_work_report_request_email};
 
-    let order = match order_repo::find_purchase_order(&pool, &id).await.ok().flatten() {
+    let order = match order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten() {
         Some(o) => o,
         None => {
             return Ok((axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({
@@ -523,7 +612,7 @@ pub async fn api_request_timesheet_preview(
         }
     };
 
-    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.ok().flatten();
+    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.log_err().ok().flatten();
     let (partner_name, partner_email) = partner_info.unwrap_or_default();
     let month_label = order.work_start.format("%Y年%m月").to_string();
     let work_month = chrono::NaiveDate::from_ymd_opt(order.work_start.year(), order.work_start.month(), 1)
@@ -585,7 +674,7 @@ pub async fn api_request_timesheet(
 
     let (payload_subject, payload_body, attachment) = extract_request_timesheet_fields(&mut multipart).await;
 
-    let order = match order_repo::find_purchase_order(&pool, &id).await.ok().flatten() {
+    let order = match order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten() {
         Some(o) => o,
         None => {
             return Ok((axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({
@@ -603,7 +692,7 @@ pub async fn api_request_timesheet(
         }))).into_response());
     }
 
-    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.ok().flatten();
+    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.log_err().ok().flatten();
     let (partner_name, partner_email) = partner_info.unwrap_or_default();
 
     if partner_email.is_empty() {
@@ -648,4 +737,34 @@ pub async fn api_request_timesheet(
         "success": true,
         "message": format!("{} に {} 分の提出依頼メールを送信しました", partner_email, month_label),
     })).into_response())
+}
+
+
+/// 発注書番号の連番を1つ進める（例: `PO-202609-001` → `PO-202609-002`）。連番が読めなければ、そのまま返す
+fn next_order_id(order_id: &str) -> String {
+    match order_id.rsplit_once('-') {
+        Some((prefix, seq)) => match seq.parse::<u32>() {
+            Ok(n) => format!("{}-{:03}", prefix, n + 1),
+            Err(_) => order_id.to_string(),
+        },
+        None => order_id.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod order_id_tests {
+    use super::next_order_id;
+
+    #[test]
+    fn increments_the_sequence_part() {
+        assert_eq!(next_order_id("PO-202609-001"), "PO-202609-002");
+        assert_eq!(next_order_id("PO-202609-009"), "PO-202609-010");
+        assert_eq!(next_order_id("PO-202609-999"), "PO-202609-1000");
+    }
+
+    #[test]
+    fn leaves_unreadable_ids_unchanged() {
+        assert_eq!(next_order_id("PO-202609-abc"), "PO-202609-abc");
+        assert_eq!(next_order_id("nohyphen"), "nohyphen");
+    }
 }

@@ -3,6 +3,7 @@
 //! ルートと契約解決・初期ステータス（PARSED vs UPLOADED）はハンドラ側に残し、
 //! multipart 抽出・プレビュー JSON・月正規化・受注注文書確認・upsert を共通化する。
 
+use crate::infrastructure::db_tx::LogErr;
 use axum::extract::Multipart;
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -468,7 +469,7 @@ pub async fn resolve_admin_contract_id(
     if let Some(cid) = explicit_contract_id {
         let covers = timesheet_repo::client_contract_covers_month(pool, cid, target_month)
             .await
-            .unwrap_or(false);
+            .log_err().unwrap_or(false);
         if !covers {
             return Err(TimesheetUploadError::ContractMonthMismatch {
                 worker_name: worker_name.to_string(),
@@ -531,7 +532,7 @@ pub async fn resolve_partner_contract_id(
     if explicit_pk > 0 {
         let covers = timesheet_repo::client_contract_covers_month(pool, explicit_pk, target_month)
             .await
-            .unwrap_or(false);
+            .log_err().unwrap_or(false);
         if !covers {
             return Err(TimesheetUploadError::ContractMonthMismatch {
                 worker_name: worker_name.to_string(),

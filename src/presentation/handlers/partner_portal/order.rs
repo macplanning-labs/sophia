@@ -2,6 +2,7 @@ use axum::{
     extract::{Extension, Path, State},
     response::IntoResponse,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use crate::infrastructure::repositories::order_repo;
 use crate::presentation::middleware::role::AuthUser;
@@ -16,8 +17,8 @@ pub async fn api_dashboard(
     Extension(auth_user): Extension<AuthUser>,
 ) -> impl IntoResponse {
     let partner_id = auth_user.partner_id().unwrap_or("unknown").to_string();
-    let order_count = order_repo::count_orders_for_partner(&pool, &partner_id).await.unwrap_or(0);
-    let timesheet_count = order_repo::count_timesheets_for_partner(&pool, &partner_id).await.unwrap_or(0);
+    let order_count = order_repo::count_orders_for_partner(&pool, &partner_id).await.log_err().unwrap_or(0);
+    let timesheet_count = order_repo::count_timesheets_for_partner(&pool, &partner_id).await.log_err().unwrap_or(0);
     axum::Json(serde_json::json!({ "partner_id": partner_id, "order_count": order_count, "timesheet_count": timesheet_count }))
 }
 
@@ -34,7 +35,7 @@ pub async fn api_orders(
 ) -> impl IntoResponse {
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
 
-    let rows = order_repo::list_portal_orders(&pool, partner_id).await.unwrap_or_default();
+    let rows = order_repo::list_portal_orders(&pool, partner_id).await.log_err().unwrap_or_default();
 
     let orders: Vec<serde_json::Value> = rows.into_iter().map(|(order_id, project_name, engineer_name, work_start, order_date, total_amount, status, uuid)| {
         serde_json::json!({
@@ -139,7 +140,7 @@ pub async fn api_order_pdf(
     use crate::presentation::http_util;
 
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
-    let order = order_repo::find_purchase_order_for_partner(&pool, &order_id, partner_id).await.ok().flatten();
+    let order = order_repo::find_purchase_order_for_partner(&pool, &order_id, partner_id).await.log_err().ok().flatten();
 
     let order = match order {
         Some(o) => o,
@@ -186,7 +187,7 @@ pub async fn api_acceptance_pdf(
     use crate::presentation::http_util;
 
     let partner_id = auth_user.partner_id().unwrap_or("unknown");
-    let order = order_repo::find_purchase_order_for_partner(&pool, &order_id, partner_id).await.ok().flatten();
+    let order = order_repo::find_purchase_order_for_partner(&pool, &order_id, partner_id).await.log_err().ok().flatten();
 
     let order = match order {
         Some(o) => o,
@@ -229,9 +230,9 @@ async fn send_order_approve_notification(pool: &PgPool, order_id: &str, partner_
     use crate::domain::services::email_service::{EmailService, compose_order_approve_email};
 
     let partner_name: String = order_repo::find_partner_name_email(pool, partner_id)
-        .await.ok().flatten().map(|(name, _email)| name).unwrap_or_default();
+        .await.log_err().ok().flatten().map(|(name, _email)| name).unwrap_or_default();
     let project_name: String = order_repo::find_project_name(pool, project_id)
-        .await.ok().flatten().unwrap_or_default();
+        .await.log_err().ok().flatten().unwrap_or_default();
 
     let email_svc = EmailService::new(pool.clone());
     let notify_email = crate::domain::services::email_service::get_notify_email(pool).await;

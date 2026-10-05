@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { HelpTooltip } from "@/components/ui/help-tooltip";
 
 export type PipelineColor = "orange" | "emerald";
 export type PipelineFilterStatus = "" | "pending" | "overdue" | "active" | "done";
@@ -314,6 +315,9 @@ export function PipelineTable({
           <tbody>
             {filtered.map((row, i) => {
               const reportDone = row.steps[reportStepIndex]?.done ?? false;
+              const primaryAction = row.row_status !== "done"
+                ? (resolveActions?.(row) ?? [{ href: `${linkPrefix}/${row.order_id}`, label: linkLabel }])[0]
+                : undefined;
               return (
                 <tr
                   key={`${row.order_id}-${i}`}
@@ -349,7 +353,16 @@ export function PipelineTable({
                     );
                   })}
                   <td className="py-1.5 px-1 text-center align-middle">
-                    <RowStatusBadge status={row.row_status} />
+                    <div className="inline-flex items-center gap-1">
+                      <RowStatusBadge status={row.row_status} />
+                      {primaryAction && (
+                        <HelpTooltip
+                          message={`${row.engineer_name}さんの${row.month}分は「${row.action_text.replace(/\n/g, " ")}」の状態です。`}
+                          linkUrl={primaryAction.href}
+                          linkLabel={primaryAction.label}
+                        />
+                      )}
+                    </div>
                   </td>
                   <td className="py-1.5 px-1 align-middle">
                     {row.action_text && row.row_status !== "done" ? (

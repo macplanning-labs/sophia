@@ -69,7 +69,7 @@ pub async fn insert_pending(pool: &PgPool, employee_id: i64, items: &[ExpenseReq
     }
 
     recompute_total_tx(&mut tx, header_id).await?;
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
 
     Ok((header_id, item_ids))
 }
@@ -312,7 +312,7 @@ pub async fn add_item(pool: &PgPool, expense_request_id: i64, item: &ExpenseRequ
     .await?;
 
     recompute_total_tx(&mut tx, expense_request_id).await?;
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
 
     Ok(item_id)
 }
@@ -353,7 +353,7 @@ pub async fn update_item(pool: &PgPool, item_id: i64, item: &ExpenseRequestItemF
     .await?;
 
     recompute_total_tx(&mut tx, expense_request_id).await?;
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
 
     Ok(result.rows_affected())
 }
@@ -384,7 +384,7 @@ pub async fn delete_item(pool: &PgPool, item_id: i64) -> Result<u64> {
         .await?;
 
     recompute_total_tx(&mut tx, expense_request_id).await?;
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
 
     Ok(result.rows_affected())
 }
@@ -520,7 +520,7 @@ pub async fn insert_draft(pool: &PgPool, form: &ExpenseRequestForm) -> Result<i6
     .execute(&mut *tx)
     .await?;
 
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
     Ok(header_id)
 }
 

@@ -1,5 +1,6 @@
 /// orders/pdf.rs — 発注書PDFデータ構築（共通ロジック）
 
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::domain::models::partner_contract::PurchaseOrder;
@@ -77,7 +78,7 @@ pub async fn build_purchase_order_pdf_data(
             .cloned()
     });
 
-    let company = order_repo::find_company_info(pool).await.ok().flatten();
+    let company = order_repo::find_company_info(pool).await.log_err().ok().flatten();
     let (company_name, company_addr, company_tel, rep_name) = company.unwrap_or_default();
 
     let total: i64 = items.iter().map(|i| i.amount as i64).sum();

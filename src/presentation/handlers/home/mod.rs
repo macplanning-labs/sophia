@@ -6,7 +6,7 @@
 /// 機能単位でサブモジュールに分割（2026-07-13、P2-3続き）:
 /// - dashboard: 進捗集計・期限計算・ステータス変更・ダッシュボードAPI
 /// - mail: メールチェック・確認・Webhook受信
-/// - edi: EDI-OASIS連携（注文書/請求書取込・承諾・PDF生成）
+/// - edi: 取引先 EDI の通知メールの処理（手動）・PDF生成
 
 mod dashboard;
 mod mail;

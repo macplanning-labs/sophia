@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     Form,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::infrastructure::repositories::order_repo::{self, ContractForOrder};
@@ -80,7 +81,7 @@ pub async fn create(
         }
     }
 
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
 
     Ok(Redirect::to("/orders"))
 }
@@ -91,7 +92,7 @@ pub async fn rollforward(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     // 元の注文書を取得
-    let order = order_repo::find_purchase_order(&pool, &id).await.ok().flatten();
+    let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     match order {
         Some(o) => {
@@ -121,7 +122,7 @@ pub async fn rollforward(
             // 明細をコピー
             order_repo::copy_order_items(&mut tx, &id, &new_order_id).await?;
 
-            tx.commit().await?;
+            crate::infrastructure::db_tx::commit_checked(tx).await?;
             Ok(Redirect::to(&format!("/orders/{}", new_order_id)))
         }
         None => Ok(Redirect::to("/orders")),
@@ -136,7 +137,7 @@ pub async fn publish(
     use crate::domain::services::pdf_generator::{PdfGenerator, PurchaseOrderPdfData, OrderPdfItem};
     use crate::domain::services::email_service::EmailService;
 
-    let order = order_repo::find_purchase_order(&pool, &id).await.ok().flatten();
+    let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     let order = match order {
         Some(o) => o,
@@ -144,7 +145,7 @@ pub async fn publish(
     };
 
     // パートナー情報
-    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.ok().flatten();
+    let partner_info = order_repo::find_partner_name_email(&pool, &order.partner_id).await.log_err().ok().flatten();
     let (partner_name, partner_email) = partner_info.unwrap_or_default();
 
     let project_name = order_repo::find_project_name(&pool, &order.project_id).await?
@@ -153,7 +154,7 @@ pub async fn publish(
     let items = order_repo::list_order_items_ordered(&pool, &id).await?;
 
     // CompanyInfo 取得
-    let company = order_repo::find_company_info(&pool).await.ok().flatten();
+    let company = order_repo::find_company_info(&pool).await.log_err().ok().flatten();
     let (company_name, company_addr, company_tel, rep_name) = company.unwrap_or_default();
 
     let total: i64 = items.iter().map(|i| i.amount as i64).sum();
@@ -221,7 +222,7 @@ pub async fn download_pdf(
     use crate::domain::services::pdf_generator::PdfGenerator;
     use crate::presentation::http_util;
 
-    let order = order_repo::find_purchase_order(&pool, &id).await.ok().flatten();
+    let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     let order = match order {
         Some(o) => o,
@@ -274,7 +275,7 @@ pub async fn download_acceptance_pdf(
     use crate::domain::services::pdf_generator::PdfGenerator;
     use crate::presentation::http_util;
 
-    let order = order_repo::find_purchase_order(&pool, &id).await.ok().flatten();
+    let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     let order = match order {
         Some(o) => o,
@@ -426,7 +427,7 @@ pub async fn update(
     Form(form): Form<EditOrderForm>,
 ) -> Result<impl IntoResponse, AppError> {
     // DRAFTチェック
-    let status = order_repo::find_purchase_order_status(&pool, &id).await.ok().flatten();
+    let status = order_repo::find_purchase_order_status(&pool, &id).await.log_err().ok().flatten();
 
     if status.as_deref() != Some("DRAFT") {
         return Ok(Redirect::to(&format!("/orders/{}", id)));
@@ -479,7 +480,7 @@ pub async fn delete(
     State(pool): State<PgPool>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let status = order_repo::find_purchase_order_status(&pool, &id).await.ok().flatten();
+    let status = order_repo::find_purchase_order_status(&pool, &id).await.log_err().ok().flatten();
 
     if status.as_deref() == Some("DRAFT") {
         order_repo::delete_purchase_order(&pool, &id).await?;

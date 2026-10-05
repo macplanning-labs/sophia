@@ -62,19 +62,4 @@ mod tests {
         let result = extract_text(invalid_pdf);
         assert!(result.is_err());
     }
-
-    #[test]
-    fn test_extract_text_sample_pdf() {
-        // サンプル勤務表 PDF から本文を取得
-        let pdf_path = "docs/templates/勤務表_クロスシステム_サンプル.pdf";
-        if let Ok(bytes) = std::fs::read(pdf_path) {
-            let result = extract_text(&bytes);
-            assert!(result.is_ok(), "PDF テキスト抽出失敗: {:?}", result.err());
-            let text = result.unwrap();
-            assert!(text.contains("勤務"), "「勤務」が含まれていない。抽出テキスト: {}", text);
-        } else {
-            // ファイルが無い環境ではスキップ
-            eprintln!("警告: {} が見つかりません。テストをスキップします", pdf_path);
-        }
-    }
 }

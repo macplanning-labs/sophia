@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Key } from "lucide-react";
 import { fetchApiKeys, generateApiKey, revokeApiKey, fetchMastersData, type ApiKeyItem, type GeneratedApiKey } from "@/lib/api";
 import { FormField, FormSelect } from "@/components/ui/form-modal";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 
 export default function ApiKeysPage() {
   const [clientId, setClientId] = useState<string>("");
@@ -16,6 +17,7 @@ export default function ApiKeysPage() {
   const [keyScope, setKeyScope] = useState("READ");
   const [keyEnv, setKeyEnv] = useState("test");
   const [error, setError] = useState<string | null>(null);
+  const [revokeKeyId, setRevokeKeyId] = useState<string | null>(null);
 
   useEffect(() => {
     const loadClients = async () => {
@@ -81,8 +83,13 @@ export default function ApiKeysPage() {
   };
 
   const handleRevokeKey = async (id: string) => {
-    if (!confirm("Are you sure you want to revoke this key?")) return;
+    setRevokeKeyId(id);
+  };
 
+  const doRevokeKey = async () => {
+    if (!revokeKeyId) return;
+    const id = revokeKeyId;
+    setRevokeKeyId(null);
     setLoading(true);
     try {
       await revokeApiKey(id);
@@ -246,6 +253,20 @@ export default function ApiKeysPage() {
           </>
         )}
       </div>
+
+      <ConfirmSheet
+        open={revokeKeyId !== null}
+        title="APIキーを失効"
+        facts={revokeKeyId && keys.find((k) => k.id === revokeKeyId) ? [
+          { label: "キー名", value: keys.find((k) => k.id === revokeKeyId)?.name },
+        ] : undefined}
+        description="この操作は取り消せません。"
+        variant="danger"
+        confirmLabel="失効"
+        loading={loading}
+        onConfirm={doRevokeKey}
+        onCancel={() => setRevokeKeyId(null)}
+      />
     </div>
   );
 }

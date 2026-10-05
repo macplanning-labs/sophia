@@ -22,9 +22,9 @@ const STATUS_CONFIGS: Record<string, { label: string; className: string }> = {
   PAID:        { label: "支払済",     className: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30" },
   // 稼働報告
   PENDING:     { label: "未提出",     className: "border-border text-muted-foreground" },
-  UPLOADED:    { label: "アップ済",   className: "border-amber-500/30 text-amber-400" },
+  UPLOADED:    { label: "受領済",   className: "border-amber-500/30 text-amber-400" },
   APPROVED:    { label: "承認済",     className: "border-emerald-500/30 text-emerald-400" },
-  REJECTED:    { label: "差戻",       className: "border-red-500/30 text-red-400" },
+  REJECTED:    { label: "差し戻し",   className: "border-red-500/30 text-red-400" },
   SENT_TO_CLIENT: { label: "送付済", className: "border-blue-500/30 text-blue-400" },
   // 支払通知
   REPORT_RECEIVED: { label: "報告受領", className: "border-amber-500/30 text-amber-400" },

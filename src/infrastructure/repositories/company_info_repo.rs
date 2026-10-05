@@ -33,6 +33,8 @@ pub struct CompanyInfo {
     pub default_from_email: String,
     pub notice_approval_threshold: Option<i32>,
     pub token_expiry_days: Option<i32>,
+    pub target_margin_direct: i32,
+    pub target_margin_subcontract: i32,
     pub has_smtp_password: bool,
 }
 
@@ -65,6 +67,12 @@ pub struct CompanyInfoUpdate {
     pub default_from_email: String,
     pub notice_approval_threshold: Option<i32>,
     pub token_expiry_days: Option<i32>,
+    /// 利益の目安(直受け %)。未指定なら既存値を保持(古い画面からの更新で失敗させない)
+    #[serde(default)]
+    pub target_margin_direct: Option<i32>,
+    /// 利益の目安(下請け %)。未指定なら既存値を保持
+    #[serde(default)]
+    pub target_margin_subcontract: Option<i32>,
 }
 
 /// 自社情報を取得する（1行のみの前提。パスワード実値は含めない）
@@ -74,7 +82,7 @@ pub async fn get_company_info(pool: &PgPool) -> Result<Option<CompanyInfo>> {
                   registration_no, responsible_person, contact_person, bank_name, bank_branch,
                   account_type, account_number, account_name, stamp_image, logo_image,
                   email_host, email_port, email_use_tls, email_host_user, default_from_email,
-                  notice_approval_threshold, token_expiry_days,
+                  notice_approval_threshold, token_expiry_days, target_margin_direct, target_margin_subcontract,
                   (email_host_password <> '') AS has_smtp_password
            FROM s_company_info ORDER BY id LIMIT 1"#,
     )
@@ -95,7 +103,8 @@ pub async fn get_smtp_credentials(pool: &PgPool) -> Result<Option<(String, Strin
     Ok(row)
 }
 
-/// 自社情報を更新する（email_host_passwordは値が指定された場合のみ更新）
+/// 自社情報を更新する（email_host_passwordは値が指定された場合のみ更新。
+/// 利益の目安は値が指定されなければ既存値を保持）
 pub async fn update_company_info(pool: &PgPool, id: i64, form: &CompanyInfoUpdate) -> Result<()> {
     sqlx::query(
         r#"UPDATE s_company_info SET
@@ -105,7 +114,8 @@ pub async fn update_company_info(pool: &PgPool, id: i64, form: &CompanyInfoUpdat
             bank_name=$11, bank_branch=$12, account_type=$13, account_number=$14, account_name=$15,
             stamp_image=$16, logo_image=$17,
             email_host=$18, email_port=$19, email_use_tls=$20, email_host_user=$21, default_from_email=$22,
-            notice_approval_threshold=$23, token_expiry_days=$24
+            notice_approval_threshold=$23, token_expiry_days=$24,
+            target_margin_direct=COALESCE($26, target_margin_direct), target_margin_subcontract=COALESCE($27, target_margin_subcontract)
            WHERE id=$25"#,
     )
     .bind(&form.name)
@@ -133,6 +143,8 @@ pub async fn update_company_info(pool: &PgPool, id: i64, form: &CompanyInfoUpdat
     .bind(form.notice_approval_threshold)
     .bind(form.token_expiry_days)
     .bind(id)
+    .bind(form.target_margin_direct)
+    .bind(form.target_margin_subcontract)
     .execute(pool)
     .await?;
 
@@ -147,4 +159,42 @@ pub async fn update_company_info(pool: &PgPool, id: i64, form: &CompanyInfoUpdat
     }
 
     Ok(())
+}
+
+/// 利益の目安を検証する（0〜100の整数）
+pub fn validate_margin_target(value: i32) -> Result<()> {
+    if value < 0 || value > 100 {
+        anyhow::bail!("利益の目安は0〜100の整数である必要があります");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_margin_target_accepts_lower_bound() {
+        assert!(validate_margin_target(0).is_ok());
+    }
+
+    #[test]
+    fn validate_margin_target_accepts_upper_bound() {
+        assert!(validate_margin_target(100).is_ok());
+    }
+
+    #[test]
+    fn validate_margin_target_accepts_middle_value() {
+        assert!(validate_margin_target(50).is_ok());
+    }
+
+    #[test]
+    fn validate_margin_target_rejects_below_lower_bound() {
+        assert!(validate_margin_target(-1).is_err());
+    }
+
+    #[test]
+    fn validate_margin_target_rejects_above_upper_bound() {
+        assert!(validate_margin_target(101).is_err());
+    }
 }

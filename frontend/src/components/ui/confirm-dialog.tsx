@@ -1,13 +1,13 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
 
 interface ConfirmDialogProps {
   open: boolean;
   title: string;
-  description?: string;
+  description?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: "danger" | "default";
@@ -40,6 +40,9 @@ export function ConfirmDialog({
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={handleBackdrop}
+      role="alertdialog"
+      aria-modal="true"
+      aria-label={title}
     >
       <div className="bg-card border border-border rounded-xl shadow-2xl w-full max-w-md mx-4 animate-in fade-in zoom-in-95 duration-200">
         {/* Header */}
@@ -57,7 +60,7 @@ export function ConfirmDialog({
         {/* Body */}
         {description && (
           <div className="px-6 py-3">
-            <p className="text-sm text-muted-foreground">{description}</p>
+            <div className="text-sm text-muted-foreground">{description}</div>
           </div>
         )}
 

@@ -286,15 +286,45 @@ pub async fn api_logout(
     (jar, axum::Json(serde_json::json!({ "success": true }))).into_response()
 }
 
+/// 画面に出す氏名。`username` に氏名が入っている(例: 佐藤次郎)。前後の空白を除き、空・メールアドレスと同じなら None
+pub fn display_name_of(username: &str, email: &str) -> Option<String> {
+    let name = username.trim();
+    if name.is_empty() || name == email.trim() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 /// GET /api/auth/me
 pub async fn api_me(Extension(auth_user): Extension<AuthUser>) -> impl IntoResponse {
     axum::Json(serde_json::json!({
         "user_id": auth_user.user.id,
         "role": auth_user.role().as_str(),
         "email": auth_user.user.email,
+        "display_name": display_name_of(&auth_user.user.username, &auth_user.user.email),
         "can_view_all_expenses": auth_user.can_view_all_expenses(),
         "can_view_all_payroll": auth_user.can_view_all_payroll(),
         "mfa_enabled": auth_user.user.mfa_enabled,
         "mfa_setup_required": auth_user.requires_mfa_enrollment(),
     }))
 }
+
+#[cfg(test)]
+mod display_name_tests {
+    use super::display_name_of;
+
+    #[test]
+    fn trims_and_returns_the_name() {
+        assert_eq!(display_name_of(" 佐藤次郎", "y@example.com"), Some("佐藤次郎".to_string()));
+        assert_eq!(display_name_of("管理者", "a@example.com"), Some("管理者".to_string()));
+    }
+
+    #[test]
+    fn empty_or_same_as_email_is_none() {
+        assert_eq!(display_name_of("", "a@example.com"), None);
+        assert_eq!(display_name_of("   ", "a@example.com"), None);
+        assert_eq!(display_name_of("a@example.com", "a@example.com"), None);
+    }
+}
+

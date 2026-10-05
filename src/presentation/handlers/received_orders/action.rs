@@ -3,6 +3,7 @@ use axum::{
     response::IntoResponse,
     response::Redirect,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use crate::domain::services::rollforward;
 use crate::infrastructure::repositories::order_repo;
@@ -48,11 +49,11 @@ pub async fn send_report(
     use crate::domain::services::email_service::{EmailService, compose_work_report_share_email};
 
     // 受注情報を取得
-    let order = order_repo::find_received_order(&pool, id).await.ok().flatten();
+    let order = order_repo::find_received_order(&pool, id).await.log_err().ok().flatten();
 
     if let Some(order) = order {
         // クライアント情報を取得（メールアドレス含む）
-        let client_info = order_repo::find_client_name_email(&pool, order.client_id).await.ok().flatten();
+        let client_info = order_repo::find_client_name_email(&pool, order.client_id).await.log_err().ok().flatten();
 
         if let Some((client_name, client_email)) = client_info {
             if !client_email.is_empty() {

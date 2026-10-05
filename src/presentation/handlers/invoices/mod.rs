@@ -28,10 +28,11 @@ pub use mail::*;
 pub use pdf::*;
 pub use api::*;
 
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use crate::infrastructure::repositories::billing_repo;
 
 /// s_company_info テーブルからPDF用データを取得する
 async fn get_company_info(pool: &PgPool) -> billing_repo::CompanyInvoiceInfo {
-    billing_repo::find_company_invoice_info(pool).await.ok().flatten().unwrap_or_default()
+    billing_repo::find_company_invoice_info(pool).await.log_err().ok().flatten().unwrap_or_default()
 }

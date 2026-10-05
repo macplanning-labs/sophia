@@ -18,6 +18,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     Extension, Json,
 };
+use crate::infrastructure::db_tx::LogErr;
 use axum::extract::Path;
 use axum_extra::extract::CookieJar;
 use sqlx::PgPool;
@@ -126,7 +127,7 @@ pub async fn totp_disable(
         crate::presentation::middleware::role::Role::Admin
             | crate::presentation::middleware::role::Role::Employee
     );
-    let passkey_count = security_repo::count_passkeys(&pool, user_id).await.unwrap_or(0);
+    let passkey_count = security_repo::count_passkeys(&pool, user_id).await.log_err().unwrap_or(0);
 
     // P5-1e: 社員は最後の MFA 要素を外せない
     if is_staff_role && passkey_count == 0 {
@@ -143,7 +144,7 @@ pub async fn totp_disable(
     }
 
     // パスキーが残っていない場合は mfa_enabled を false に
-    let passkey_count = security_repo::count_passkeys(&pool, user_id).await.unwrap_or(0);
+    let passkey_count = security_repo::count_passkeys(&pool, user_id).await.log_err().unwrap_or(0);
 
     if passkey_count == 0 {
         if let Err(e) = security_repo::set_mfa_enabled(&pool, user_id, false).await {
@@ -228,7 +229,7 @@ pub async fn passkey_register_complete(
 
     let challenge_id = jar.get("passkey_reg_challenge").map(|c| c.value().to_string());
     let reg_json: Option<String> = if let Some(ref cid) = challenge_id {
-        auth_repo::find_passkey_login_challenge(&state.pool, cid).await.ok().flatten()
+        auth_repo::find_passkey_login_challenge(&state.pool, cid).await.log_err().ok().flatten()
     } else {
         None
     };
@@ -296,8 +297,8 @@ pub async fn passkey_delete(
             | crate::presentation::middleware::role::Role::Employee
     );
 
-    let totp_count = security_repo::count_active_totp_devices(&pool, user_id).await.unwrap_or(0);
-    let passkey_count = security_repo::count_passkeys(&pool, user_id).await.unwrap_or(0);
+    let totp_count = security_repo::count_active_totp_devices(&pool, user_id).await.log_err().unwrap_or(0);
+    let passkey_count = security_repo::count_passkeys(&pool, user_id).await.log_err().unwrap_or(0);
     // 最後の1本を消すと MFA 無効になる場合、社員は拒否
     if is_staff_role && totp_count == 0 && passkey_count <= 1 {
         return (
@@ -313,8 +314,8 @@ pub async fn passkey_delete(
     }
 
     // TOTP もパスキーも無い場合は mfa_enabled を false に
-    let totp_count = security_repo::count_active_totp_devices(&pool, user_id).await.unwrap_or(0);
-    let passkey_count = security_repo::count_passkeys(&pool, user_id).await.unwrap_or(0);
+    let totp_count = security_repo::count_active_totp_devices(&pool, user_id).await.log_err().unwrap_or(0);
+    let passkey_count = security_repo::count_passkeys(&pool, user_id).await.log_err().unwrap_or(0);
 
     if totp_count == 0 && passkey_count == 0 {
         if let Err(e) = security_repo::set_mfa_enabled(&pool, user_id, false).await {
@@ -354,7 +355,7 @@ pub async fn api_index(
 ) -> impl IntoResponse {
     let user_id = auth_user.user.id;
 
-    let totp_active = security_repo::count_active_totp_devices(&pool, user_id).await.unwrap_or(0) > 0;
+    let totp_active = security_repo::count_active_totp_devices(&pool, user_id).await.log_err().unwrap_or(0) > 0;
 
     let rows = security_repo::list_passkey_summaries(&pool, user_id)
         .await

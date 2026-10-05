@@ -7,13 +7,13 @@
 
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
 use serde::Serialize;
 use sqlx::{PgPool, FromRow};
 
 use crate::domain::models::partner_contract::ApprovalStatus;
 use crate::domain::models::actionable_error::ActionBlocker;
 use crate::infrastructure::repositories::settlement_repo;
+use crate::infrastructure::db_tx::commit_checked;
 
 /// ダッシュボード1行分のビューモデル（JOINクエリの結果）
 #[derive(Debug, Clone, FromRow, Serialize)]
@@ -25,17 +25,19 @@ pub struct SettlementRow {
     pub partner_name: Option<String>,
     pub client_name: String,
     pub client_id: i64,
-    /// クライアント自身が保有するEDIシステムの種別（例: "EDI_OASIS"）。空文字ならEDIシステムなし。
-    /// Sophia自身も広義にはEDIシステムだが、ここでは「先方が別途外部EDIシステム(OASIS等)を
-    /// 保有しているか」を表す。保有している場合、請求書は先方のEDI経由で受け取る（Sophiaから
-    /// 新規発行しない）
+    /// クライアントの EDI 方式（取引先マスタ「EDI方式」の値）。表示用。請求書の発行対象かの判定には使わない
     pub client_edi_system_type: String,
+    /// この取引先の請求書は、先方のシステムで作る（作成代行）か（取引先マスタ `invoice_issued_by_client`）。
+    /// TRUE なら、請求書は先方の EDI 経由で受け取る（Sophia から新規発行しない）
+    pub client_invoice_by_client: bool,
     // 稼働報告
     pub timesheet_id: Option<i64>,
     pub total_hours: Option<Decimal>,
     pub timesheet_status: Option<String>,
     // 請求（売上）側
     pub client_contract_id: i64,
+    /// 対象月の注文書（受注）。請求の条件・金額はここから取る。NULL = 注文書なし（請求書は作れない）
+    pub received_order_id: Option<i64>,
     pub billing_base_rate: i32,
     pub billing_settlement_type: String,
     pub billing_lower_limit: Decimal,
@@ -130,7 +132,8 @@ pub fn calculate_preview(rows: Vec<SettlementRow>) -> (Vec<SettlementViewRow>, S
         let ts_approved = row.timesheet_status.as_deref() == Some("APPROVED");
 
         // 請求金額（売上）
-        let billing_amount = if ts_approved {
+        // 注文書が無い月は、請求金額を 0 とし、請求の対象にしない
+        let billing_amount = if ts_approved && row.received_order_id.is_some() {
             let terms = SettlementTerms {
                 lower_limit_hours: row.billing_lower_limit,
                 upper_limit_hours: row.billing_upper_limit,
@@ -226,13 +229,20 @@ pub async fn get_token_expiry_days(pool: &PgPool) -> i32 {
         .unwrap_or(14)
 }
 
-/// 支払通知書番号を自動採番する（PN-YYYYMM-001）
-pub async fn generate_notice_id(pool: &PgPool, target_month: NaiveDate) -> String {
+/// 支払通知書番号を自動採番する（PN-YYYYMM-001）。
+/// 発行と同じトランザクションの中で、月ごとの排他ロックを取ってから最大値を読む。
+/// (別の接続で読むと、同じ呼び出しで先に作った番号が見えず、同じ番号になってしまう)
+pub async fn generate_notice_id(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    target_month: NaiveDate,
+) -> Result<String, String> {
     let prefix = format!("PN-{}", target_month.format("%Y%m"));
-    let max_seq: Option<String> = settlement_repo::max_notice_id_with_prefix(pool, &prefix)
+    settlement_repo::lock_numbering(tx, &format!("notice_id:{}", target_month.format("%Y%m")))
         .await
-        .ok()
-        .flatten();
+        .map_err(|e| format!("採番のロックに失敗しました: {e}"))?;
+    let max_seq: Option<String> = settlement_repo::max_notice_id_with_prefix(tx, &prefix)
+        .await
+        .map_err(|e| format!("支払通知書番号の採番に失敗しました: {e}"))?;
 
     let next_seq = match max_seq {
         Some(max) => {
@@ -243,7 +253,7 @@ pub async fn generate_notice_id(pool: &PgPool, target_month: NaiveDate) -> Strin
         None => 1,
     };
 
-    format!("{}-{:03}", prefix, next_seq)
+    Ok(format!("{}-{:03}", prefix, next_seq))
 }
 
 /// パートナー単位で支払通知書を集約作成
@@ -272,7 +282,6 @@ pub async fn create_notices_by_partner(
         }
     }
 
-    let threshold = get_approval_threshold(pool).await;
     let mut results = Vec::new();
 
     let mut tx = pool.begin().await.map_err(|e| format!("TX error: {}", e))?;
@@ -302,6 +311,7 @@ pub async fn create_notices_by_partner(
                         "支払通知: 発注注文書検索エラー partner_contract_id={}: {:?}",
                         pc_id, e
                     );
+                    return Err(format!("発注注文書の検索に失敗しました: {}", e));
                 }
             }
         }
@@ -316,7 +326,7 @@ pub async fn create_notices_by_partner(
         // ヘッダ FK 用の代表発注（集約明細は複数契約可。確認時は代表＋下記で全発注を NOTICE_CREATED へ）
         let header_purchase_order_id = eligible_rows[0].1.clone();
 
-        let notice_id = generate_notice_id(pool, target_month).await;
+        let notice_id = generate_notice_id(&mut tx, target_month).await?;
         let subtotal: i32 = eligible_rows.iter().map(|(r, _)| r.payment_amount).sum();
         let tax_rate = crate::infrastructure::repositories::tax_rate_repo::find_effective_rate(pool, target_month)
             .await
@@ -324,7 +334,8 @@ pub async fn create_notices_by_partner(
         let breakdown = crate::domain::services::tax_calculation::calculate_tax_breakdown(&[(tax_rate, subtotal)]);
         let tax_amount = crate::domain::services::tax_calculation::total_tax_amount(&breakdown);
         let total = subtotal + tax_amount;
-        let needs_approval = total >= threshold;
+        // 支払通知は金額に関わらず常に承認が必要（請求書と同じ運用）
+        let needs_approval = true;
         let approval_status = if needs_approval {
             ApprovalStatus::PendingApproval
         } else {
@@ -346,7 +357,7 @@ pub async fn create_notices_by_partner(
         let payment_due_date = payment_due_date_from_terms(month_end, payment_terms);
 
         // 支払通知書ヘッダ作成
-        if let Err(e) = settlement_repo::insert_payment_notice(
+        settlement_repo::insert_payment_notice(
             &mut tx,
             &notice_id,
             &header_purchase_order_id,
@@ -357,14 +368,15 @@ pub async fn create_notices_by_partner(
             tax_amount,
             total,
             approval_status.as_str(),
-        ).await {
+        ).await
+        .map_err(|e| {
             tracing::error!("支払通知書作成エラー: {:?}", e);
-            continue;
-        }
+            format!("支払通知書ヘッダの登録に失敗しました: {}", e)
+        })?;
 
         // 明細作成
         for (vr, _) in &eligible_rows {
-            if let Err(e) = settlement_repo::insert_payment_notice_item(
+            settlement_repo::insert_payment_notice_item(
                 &mut tx,
                 &notice_id,
                 vr.row.partner_contract_id.unwrap_or(0),
@@ -379,32 +391,73 @@ pub async fn create_notices_by_partner(
                 vr.payment_amount - vr.row.payment_base_rate.unwrap_or(0),
                 vr.payment_amount,
                 tax_rate,
-            ).await {
+            ).await
+            .map_err(|e| {
                 tracing::error!("支払通知明細作成エラー: {:?}", e);
-            }
+                format!("支払通知書明細の登録に失敗しました: {}", e)
+            })?;
         }
 
         // 紐づく発注をすべて NOTICE_CREATED へ（個別 /notices 作成と同じ）
         for order_id in &purchase_order_ids {
-            if let Err(e) = settlement_repo::update_purchase_order_status_to_notice_created(&mut tx, order_id).await {
-                tracing::error!("発注ステータス更新エラー order_id={}: {:?}", order_id, e);
-            }
+            settlement_repo::update_purchase_order_status_to_notice_created(&mut tx, order_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!("発注ステータス更新エラー order_id={}: {:?}", order_id, e);
+                    format!("発注ステータス更新に失敗しました: {}", e)
+                })?;
         }
 
-        results.push(CreatedNotice {
-            notice_id,
-            partner_id: partner_id.clone(),
-            partner_name: eligible_rows.first().map(|(r, _)| r.row.partner_name.clone().unwrap_or_default()).unwrap_or_default(),
-            project_id: project_id.clone(),
-            project_name: eligible_rows.first().map(|(r, _)| r.row.project_name.clone()).unwrap_or_default(),
-            count: eligible_rows.len(),
-            total,
+        results.push((notice_id, partner_id.clone(), eligible_rows.first().map(|(r, _)| r.row.partner_name.clone().unwrap_or_default()).unwrap_or_default(), project_id.clone(), eligible_rows.first().map(|(r, _)| r.row.project_name.clone()).unwrap_or_default(), eligible_rows.len(), total, needs_approval));
+    }
+
+    commit_checked(tx).await.map_err(|e| format!("トランザクション確定エラー: {}", e))?;
+
+    // 支払通知の保存を確認（DBから読み直す）
+    let notice_ids: Vec<String> = results.iter().map(|(id, _, _, _, _, _, _, _)| id.clone()).collect();
+    if notice_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let notice_rows = settlement_repo::find_payment_notices_by_ids(pool, &notice_ids)
+        .await
+        .map_err(|e| format!("支払通知の読み直しに失敗しました: {}", e))?;
+
+    if notice_rows.len() != results.len() {
+        tracing::error!(
+            "支払通知の保存を確認できませんでした: 作成数={}, 読み直し数={}",
+            results.len(),
+            notice_rows.len()
+        );
+        return Err(format!(
+            "支払通知の保存を確認できませんでした: 作成数={}, 読み直し数={}",
+            results.len(),
+            notice_rows.len()
+        ));
+    }
+
+    // 読み直したデータでCreatedNoticeを作成する。
+    // 並び順は保証されないので、通知書IDで突き合わせる
+    let db_by_id: std::collections::HashMap<String, i32> = notice_rows.into_iter().collect();
+    let mut final_results = Vec::with_capacity(results.len());
+    for (created_id, partner_id, partner_name, project_id, project_name, count, _, needs_approval) in results {
+        let Some(db_total) = db_by_id.get(&created_id).copied() else {
+            tracing::error!("支払通知の保存を確認できませんでした: notice_id={} がDBに見つかりません", created_id);
+            return Err(format!("支払通知の保存を確認できませんでした: notice_id={created_id}"));
+        };
+        final_results.push(CreatedNotice {
+            notice_id: created_id,
+            partner_id,
+            partner_name,
+            project_id,
+            project_name,
+            count,
+            total: db_total,
             needs_approval,
         });
     }
 
-    tx.commit().await.map_err(|e| format!("Commit error: {}", e))?;
-    Ok(results)
+    Ok(final_results)
 }
 
 /// 作成結果
@@ -614,8 +667,8 @@ pub async fn diagnose_invoice_issue_blockers(
             continue;
         }
 
-        // EDI_OASIS クライアント（対象外）— 発行0件の理由としてカウント
-        if r.client_edi_system_type == "EDI_OASIS" {
+        // 請求書を先方が作る取引先（対象外）— 発行0件の理由としてカウント
+        if r.client_invoice_by_client {
             blockers.push(ActionBlocker {
                 subject: engineer.clone(),
                 context: format!("{} / {}", client, project),
@@ -666,13 +719,19 @@ pub async fn diagnose_invoice_issue_blockers(
     blockers
 }
 
-/// 請求書番号を自動採番する（INV-YYYYMM-001）
-pub async fn generate_invoice_no(pool: &PgPool, target_month: NaiveDate) -> String {
+/// 請求書番号を自動採番する（INV-YYYYMM-001）。
+/// 発行と同じトランザクションの中で、月ごとの排他ロックを取ってから最大値を読む(理由は generate_notice_id と同じ)。
+pub async fn generate_invoice_no(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    target_month: NaiveDate,
+) -> Result<String, String> {
     let prefix = format!("INV-{}", target_month.format("%Y%m"));
-    let max_seq: Option<String> = settlement_repo::max_invoice_no_with_prefix(pool, &prefix)
+    settlement_repo::lock_numbering(tx, &format!("invoice_no:{}", target_month.format("%Y%m")))
         .await
-        .ok()
-        .flatten();
+        .map_err(|e| format!("採番のロックに失敗しました: {e}"))?;
+    let max_seq: Option<String> = settlement_repo::max_invoice_no_with_prefix(tx, &prefix)
+        .await
+        .map_err(|e| format!("請求書番号の採番に失敗しました: {e}"))?;
 
     let next_seq = match max_seq {
         Some(max) => {
@@ -683,7 +742,7 @@ pub async fn generate_invoice_no(pool: &PgPool, target_month: NaiveDate) -> Stri
         None => 1,
     };
 
-    format!("{}-{:03}", prefix, next_seq)
+    Ok(format!("{}-{:03}", prefix, next_seq))
 }
 
 /// クライアント契約の支払条件テキストが空のときに使うデフォルト
@@ -738,7 +797,49 @@ pub fn payment_due_date_from_terms(work_end: NaiveDate, payment_terms: &str) -> 
     NaiveDate::from_ymd_opt(y, m, day).unwrap_or(work_end)
 }
 
+/// 請求書の単位(取引先ごとの設定 m_client.billing_unit)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BillingUnit {
+    /// 案件ごと(既定。同じ取引先でも案件ごとに1通)
+    Project,
+    /// 取引先まとめ(その月の全案件・全要員を1通)
+    Client,
+}
+
+impl BillingUnit {
+    /// DBの値から解釈する。'CLIENT' 以外(空・未知を含む)は、既定の案件ごと
+    pub fn from_db(s: &str) -> Self {
+        if s == "CLIENT" { Self::Client } else { Self::Project }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Project => "PROJECT",
+            Self::Client => "CLIENT",
+        }
+    }
+}
+
+/// 請求書の集約キー。案件ごと=(取引先, 案件)、取引先まとめ=(取引先, なし)
+pub fn invoice_group_key(unit: BillingUnit, client_id: i64, project_id: &str) -> (i64, Option<String>) {
+    match unit {
+        BillingUnit::Project => (client_id, Some(project_id.to_string())),
+        BillingUnit::Client => (client_id, None),
+    }
+}
+
+/// 請求書の件名。案件ごと=「{案件名} YYYY年MM月分 請求書」(従来どおり)、取引先まとめ=「{取引先名} YYYY年MM月分 請求書」
+pub fn invoice_subject(unit: BillingUnit, project_name: &str, client_name: &str, month: NaiveDate) -> String {
+    let head = match unit {
+        BillingUnit::Project => project_name,
+        BillingUnit::Client => client_name,
+    };
+    format!("{} {}年{:02}月分 請求書", head, month.year(), month.month())
+}
+
 /// クライアント単位で請求書を集約作成
+///
+/// 請求書の単位は取引先ごとの設定(`BillingUnit`)。既定は案件ごと。
 ///
 /// 支払通知書(`create_notices_by_partner`)と対になる、クライアント向け請求書の集約発行。
 /// パートナー有無に関わらず、承認済み(APPROVED)の行は全てクライアントへの請求対象になる
@@ -748,25 +849,80 @@ pub async fn create_invoices_by_client(
     view_rows: &[SettlementViewRow],
     target_month: NaiveDate,
 ) -> Result<Vec<CreatedInvoice>, String> {
+    let mut tx = pool.begin().await.map_err(|e| format!("TX error: {}", e))?;
+    let issued = issue_invoices_in_tx(pool, &mut tx, view_rows, target_month).await?;
+    commit_checked(tx).await.map_err(|e| format!("トランザクション確定エラー: {}", e))?;
+    verify_issued_invoices(pool, issued).await
+}
+
+/// 請求書の税額と税込合計。プレビューと発行で同じ計算を使う(金額がずれないように)
+pub fn invoice_totals(tax_rate: Decimal, subtotal: i32) -> (i32, i32) {
+    let breakdown = crate::domain::services::tax_calculation::calculate_tax_breakdown(&[(tax_rate, subtotal)]);
+    let tax_amount = crate::domain::services::tax_calculation::total_tax_amount(&breakdown);
+    (tax_amount, subtotal + tax_amount)
+}
+
+/// トランザクション内で発行した請求書(確定前)
+#[derive(Debug, Clone)]
+pub struct IssuedInvoice {
+    pub id: i64,
+    pub invoice_no: String,
+    pub client_id: i64,
+    pub total: i32,
+    pub client_name: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub count: usize,
+}
+
+/// 請求書を、渡されたトランザクションの中で発行する(確定は呼び出し側)。
+/// 取引先の請求単位に従って集約する。`create_invoices_by_client`(旧画面の一括発行)と、
+/// 確定API(`billing_confirm`)の両方がこれを使う。
+pub async fn issue_invoices_in_tx(
+    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    view_rows: &[SettlementViewRow],
+    target_month: NaiveDate,
+) -> Result<Vec<IssuedInvoice>, String> {
     use std::collections::HashMap;
 
-    // クライアント単位でグループ化（承認済み、かつ先方が外部EDIシステム(OASIS等)を
-    // 保有していない行のみ。EDI保有クライアントの請求書は先方のEDI経由で受け取るため、
-    // Sophiaから新規発行すると重複してしまう）
+    // クライアント単位でグループ化（承認済み、かつ請求書を先方が作る取引先でない行のみ。
+    // 先方が作る取引先の請求書は先方の EDI 経由で受け取るため、Sophia から新規発行すると重複してしまう）
     //
-    // 判定は edi_system_type の非空判定ではなく "EDI_OASIS" との完全一致で行う。
-    // 非空判定だと「メールで受け取っている」等の備考的な値を入れただけの非EDI連携
-    // クライアント（例: クロスシステム、edi_system_type='EMAIL'）まで誤って除外され、
-    // 本来Sophia側で発行すべき請求書が発行されなくなる不具合が実際に発生した。
-    let mut groups: HashMap<(i64, String), Vec<&SettlementViewRow>> = HashMap::new();
+    // 判定は取引先マスタの `invoice_issued_by_client` だけで行う。以前は EDI 方式の値で判定しており、
+    // 非空判定にした時期には「メールで受け取っている」（EMAIL）だけの取引先まで誤って除外され、
+    // 本来 Sophia 側で発行すべき請求書が発行されなくなる不具合が実際に発生した。
+    let mut candidates: Vec<&SettlementViewRow> = Vec::new();
     for vr in view_rows {
         if vr.row.timesheet_status.as_deref() != Some("APPROVED") {
             continue;
         }
-        if vr.row.client_edi_system_type == "EDI_OASIS" {
+        // 注文書が無い行は請求書を作らない（請求は注文書が正本）
+        if vr.row.received_order_id.is_none() {
             continue;
         }
-        groups.entry((vr.row.client_id, vr.row.project_id.clone())).or_default().push(vr);
+        if vr.row.client_invoice_by_client {
+            continue;
+        }
+        candidates.push(vr);
+    }
+
+    // 取引先ごとの請求単位(既定は案件ごと=従来どおり)
+    let mut client_ids: Vec<i64> = candidates.iter().map(|vr| vr.row.client_id).collect();
+    client_ids.sort_unstable();
+    client_ids.dedup();
+    let units: HashMap<i64, BillingUnit> = settlement_repo::client_billing_units(pool, &client_ids)
+        .await
+        .map_err(|e| format!("請求単位の取得に失敗しました: {e}"))?
+        .into_iter()
+        .map(|(id, s)| (id, BillingUnit::from_db(&s)))
+        .collect();
+    let unit_of = |client_id: i64| units.get(&client_id).copied().unwrap_or(BillingUnit::Project);
+
+    let mut groups: HashMap<(i64, Option<String>), Vec<&SettlementViewRow>> = HashMap::new();
+    for vr in candidates {
+        let key = invoice_group_key(unit_of(vr.row.client_id), vr.row.client_id, &vr.row.project_id);
+        groups.entry(key).or_default().push(vr);
     }
 
     let month_end = if target_month.month() == 12 {
@@ -777,23 +933,21 @@ pub async fn create_invoices_by_client(
     .and_then(|d| d.pred_opt())
     .unwrap_or(target_month);
 
-    let mut results = Vec::new();
-    let mut tx = pool.begin().await.map_err(|e| format!("TX error: {}", e))?;
+    let mut results: Vec<IssuedInvoice> = Vec::new();
 
-    for ((client_id, project_id), rows) in &groups {
+    for ((client_id, group_project_id), rows) in &groups {
         if rows.is_empty() { continue; }
+        let unit = unit_of(*client_id);
 
-        let invoice_no = generate_invoice_no(pool, target_month).await;
+        let invoice_no = generate_invoice_no(tx, target_month).await?;
         let subtotal: i32 = rows.iter().map(|r| r.billing_amount).sum();
         let tax_rate = crate::infrastructure::repositories::tax_rate_repo::find_effective_rate(pool, target_month)
             .await
             .unwrap_or(Decimal::from(10));
-        let breakdown = crate::domain::services::tax_calculation::calculate_tax_breakdown(&[(tax_rate, subtotal)]);
-        let tax_amount = crate::domain::services::tax_calculation::total_tax_amount(&breakdown);
-        let total = subtotal + tax_amount;
+        let (tax_amount, total) = invoice_totals(tax_rate, subtotal);
         let project_name = rows.first().map(|r| r.row.project_name.clone()).unwrap_or_default();
-        let subject = format!("{} {}年{:02}月分 請求書", project_name, target_month.year(), target_month.month());
         let client_name = rows.first().map(|r| r.row.client_name.clone()).unwrap_or_default();
+        let subject = invoice_subject(unit, &project_name, &client_name, target_month);
         // グループ内で非空の支払条件を優先。全て空ならカラムDEFAULT相当を適用。
         let payment_terms = rows.iter()
             .map(|r| r.row.billing_payment_terms.as_str())
@@ -803,7 +957,7 @@ pub async fn create_invoices_by_client(
 
         // 請求書ヘッダ作成
         let invoice_id: i64 = match settlement_repo::insert_invoice_header(
-            &mut tx,
+            tx,
             &invoice_no,
             *client_id,
             target_month,
@@ -813,23 +967,30 @@ pub async fn create_invoices_by_client(
             tax_amount,
             total,
             due_date,
+            group_project_id.as_deref(),
+            unit.as_str(),
         ).await {
             Ok(id) => id,
             Err(e) => {
+                // 1件でも失敗したら全体を取り消して、失敗として返す（途中の失敗を捨てて先へ進むと、
+                // PostgreSQL では以降の文がすべて無効になり、確定しても取り消されて、成功と表示されたのに
+                // 何も保存されない状態になる）
                 tracing::error!("請求書作成エラー: {:?}", e);
-                continue;
+                return Err(format!("請求書ヘッダの登録に失敗しました: {e}"));
             }
         };
 
         // 明細作成 + 対応する受注のステータスをINVOICEDへ進める
+        // どの文が失敗しても、結果を捨てずに失敗として返す（全体が取り消され、画面にエラーが出る）
         let mut header_received_order_id: Option<i64> = None;
         for vr in rows {
-            let _ = settlement_repo::insert_invoice_item(
-                &mut tx,
+            settlement_repo::insert_invoice_item(
+                tx,
                 invoice_id,
                 vr.row.engineer_id,
                 &vr.row.engineer_name,
-                vr.row.total_hours.unwrap_or(Decimal::ZERO).to_i32().unwrap_or(0),
+                // 稼働時間（例: 140.5）。DBの列は小数に対応しているので、切り捨てずに保存する
+                vr.row.total_hours.unwrap_or(Decimal::ZERO),
                 vr.row.billing_base_rate,
                 vr.billing_amount,
                 &vr.row.billing_settlement_type,
@@ -838,45 +999,97 @@ pub async fn create_invoices_by_client(
                 vr.row.billing_deduction_rate,
                 vr.row.billing_overtime_rate,
                 tax_rate,
-            ).await;
+            )
+            .await
+            .map_err(|e| format!("請求書明細の登録に失敗しました: {e}"))?;
 
             let ro_id = settlement_repo::find_received_order_for_invoice(
-                &mut tx,
+                tx,
                 *client_id,
                 target_month,
                 vr.row.engineer_id,
                 vr.row.client_contract_id,
             )
             .await
-            .ok()
-            .flatten();
+            .map_err(|e| format!("受注の検索に失敗しました: {e}"))?;
 
             if let Some(ro_id) = ro_id {
                 if header_received_order_id.is_none() {
                     header_received_order_id = Some(ro_id);
                 }
-                let _ = settlement_repo::link_received_order_invoice(&mut tx, ro_id, invoice_id).await;
+                settlement_repo::link_received_order_invoice(tx, ro_id)
+                    .await
+                    .map_err(|e| format!("受注の状態更新に失敗しました: {e}"))?;
             }
         }
 
         if let Some(ro_id) = header_received_order_id {
-            let _ = settlement_repo::set_invoice_received_order(&mut tx, invoice_id, ro_id).await;
+            settlement_repo::set_invoice_received_order(tx, invoice_id, ro_id)
+                .await
+                .map_err(|e| format!("請求書と受注の紐づけに失敗しました: {e}"))?;
         }
 
-        results.push(CreatedInvoice {
-            id: invoice_id,
-            invoice_no,
-            client_id: *client_id,
-            client_name,
-            project_id: project_id.clone(),
-            project_name,
-            count: rows.len(),
-            total,
-        });
+        // 取引先まとめでは案件が複数にまたがるので、案件欄は「全案件」とする
+        let (result_project_id, result_project_name) = match group_project_id {
+            Some(pid) => (pid.clone(), project_name),
+            None => (String::new(), "全案件".to_string()),
+        };
+        results.push(IssuedInvoice { id: invoice_id, invoice_no, client_id: *client_id, total, client_name, project_id: result_project_id, project_name: result_project_name, count: rows.len() });
     }
 
-    tx.commit().await.map_err(|e| format!("Commit error: {}", e))?;
     Ok(results)
+}
+
+/// 確定後に、請求書をDBから読み直して件数・IDを突き合わせる(保存を確認する)
+pub async fn verify_issued_invoices(
+    pool: &PgPool,
+    issued: Vec<IssuedInvoice>,
+) -> Result<Vec<CreatedInvoice>, String> {
+    let invoice_ids: Vec<i64> = issued.iter().map(|r| r.id).collect();
+    if invoice_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let invoice_rows = settlement_repo::find_invoices_by_ids(pool, &invoice_ids)
+        .await
+        .map_err(|e| format!("請求書の読み直しに失敗しました: {}", e))?;
+
+    if invoice_rows.len() != issued.len() {
+        tracing::error!(
+            "請求書の保存を確認できませんでした: 作成数={}, 読み直し数={}",
+            issued.len(),
+            invoice_rows.len()
+        );
+        return Err(format!(
+            "請求書の保存を確認できませんでした: 作成数={}, 読み直し数={}",
+            issued.len(),
+            invoice_rows.len()
+        ));
+    }
+
+    // 並び順は保証されないので、IDで突き合わせる（位置で突き合わせると、別の請求書の表示になり得る）
+    let db_by_id: std::collections::HashMap<i64, (String, i64, i32)> = invoice_rows
+        .into_iter()
+        .map(|(id, no, client_id, total)| (id, (no, client_id, total)))
+        .collect();
+    let mut final_results = Vec::with_capacity(issued.len());
+    for r in issued {
+        let Some((db_invoice_no, db_client_id, db_total)) = db_by_id.get(&r.id).cloned() else {
+            tracing::error!("請求書の保存を確認できませんでした: id={} がDBに見つかりません", r.id);
+            return Err(format!("請求書の保存を確認できませんでした: id={}", r.id));
+        };
+        final_results.push(CreatedInvoice {
+            id: r.id,
+            invoice_no: db_invoice_no,
+            client_id: db_client_id,
+            client_name: r.client_name,
+            project_id: r.project_id,
+            project_name: r.project_name,
+            count: r.count,
+            total: db_total,
+        });
+    }
+    Ok(final_results)
 }
 
 /// 作成結果（請求書）
@@ -921,6 +1134,113 @@ mod payment_due_date_tests {
         assert_eq!(
             payment_due_date_from_terms(ymd(2026, 5, 31), "翌々月15日払い"),
             ymd(2026, 7, 15)
+        );
+    }
+
+    fn sample_row(received_order_id: Option<i64>, base_rate: i32) -> SettlementRow {
+        SettlementRow {
+            engineer_id: 1,
+            engineer_name: "テスト".to_string(),
+            partner_id: None,
+            partner_name: None,
+            client_name: "クライアント".to_string(),
+            client_id: 1,
+            client_edi_system_type: String::new(),
+            client_invoice_by_client: false,
+            timesheet_id: Some(1),
+            total_hours: Some(Decimal::from(160)),
+            timesheet_status: Some("APPROVED".to_string()),
+            client_contract_id: 1,
+            received_order_id,
+            billing_base_rate: base_rate,
+            billing_settlement_type: "RANGE".to_string(),
+            billing_lower_limit: Decimal::from(140),
+            billing_upper_limit: Decimal::from(180),
+            billing_fixed_hours: None,
+            billing_deduction_rate: 0,
+            billing_overtime_rate: 0,
+            billing_effort: Decimal::ONE,
+            billing_payment_terms: String::new(),
+            partner_contract_id: None,
+            payment_base_rate: None,
+            payment_settlement_type: None,
+            payment_lower_limit: None,
+            payment_upper_limit: None,
+            payment_fixed_hours: None,
+            payment_deduction_rate: None,
+            payment_overtime_rate: None,
+            payment_effort: None,
+            payment_condition: String::new(),
+            invoice_issued: Some(false),
+            notice_issued: None,
+            purchase_order_id: None,
+            purchase_order_status: None,
+            project_id: "PRJ1".to_string(),
+            project_name: "案件".to_string(),
+            engineer_employee_code: String::new(),
+        }
+    }
+
+    #[test]
+    fn billing_uses_the_price_on_the_received_order() {
+        // 注文書の単価（72万）で請求金額が決まる。上下限の範囲内（160h）なので、単価がそのまま請求額
+        let (rows, _) = calculate_preview(vec![sample_row(Some(10), 720_000)]);
+        assert_eq!(rows[0].billing_amount, 720_000);
+        let (rows, _) = calculate_preview(vec![sample_row(Some(10), 700_000)]);
+        assert_eq!(rows[0].billing_amount, 700_000);
+    }
+
+    #[test]
+    fn billing_is_zero_without_a_received_order() {
+        // 注文書が無い月は、稼働報告が承認済みでも、請求金額は 0（請求書は作れない）
+        let (rows, _) = calculate_preview(vec![sample_row(None, 700_000)]);
+        assert_eq!(rows[0].billing_amount, 0);
+    }
+}
+
+#[cfg(test)]
+mod billing_unit_tests {
+    use super::*;
+
+    fn month() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 10, 1).unwrap()
+    }
+
+    #[test]
+    fn billing_unit_parses_db_values_with_project_as_default() {
+        assert_eq!(BillingUnit::from_db("CLIENT"), BillingUnit::Client);
+        assert_eq!(BillingUnit::from_db("PROJECT"), BillingUnit::Project);
+        // 空・未知は既定(案件ごと)。現行の挙動を変えない
+        assert_eq!(BillingUnit::from_db(""), BillingUnit::Project);
+        assert_eq!(BillingUnit::from_db("client"), BillingUnit::Project);
+        assert_eq!(BillingUnit::Client.as_str(), "CLIENT");
+        assert_eq!(BillingUnit::Project.as_str(), "PROJECT");
+    }
+
+    #[test]
+    fn project_unit_splits_by_project_and_client_unit_merges_all_projects() {
+        let a = invoice_group_key(BillingUnit::Project, 7, "PRJ1");
+        let b = invoice_group_key(BillingUnit::Project, 7, "PRJ2");
+        assert_ne!(a, b, "案件ごと: 案件が違えば別の請求書");
+        assert_eq!(a, (7, Some("PRJ1".to_string())));
+
+        let c = invoice_group_key(BillingUnit::Client, 7, "PRJ1");
+        let d = invoice_group_key(BillingUnit::Client, 7, "PRJ2");
+        assert_eq!(c, d, "取引先まとめ: 案件が違っても1通");
+        assert_eq!(c, (7, None));
+        assert_ne!(c, invoice_group_key(BillingUnit::Client, 8, "PRJ1"), "取引先が違えば別");
+    }
+
+    #[test]
+    fn subject_uses_project_name_by_default_and_client_name_when_merged() {
+        assert_eq!(
+            invoice_subject(BillingUnit::Project, "A案件", "株式会社X", month()),
+            "A案件 2026年10月分 請求書",
+            "従来と同じ件名"
+        );
+        assert_eq!(
+            invoice_subject(BillingUnit::Client, "A案件", "株式会社X", month()),
+            "株式会社X 2026年10月分 請求書"
         );
     }
 }

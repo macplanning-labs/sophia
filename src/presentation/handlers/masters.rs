@@ -226,12 +226,13 @@ pub async fn api_create(
         return Ok(Json(serde_json::json!({"ok": false, "error": msg})));
     }
 
-    master_repo::execute_create(&pool, def, body).await.map_err(|e| {
+    let created_id = master_repo::execute_create(&pool, def, body).await.map_err(|e| {
         tracing::error!("masters create error: {:?}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    Ok(Json(serde_json::json!({"ok": true})))
+    // 自動採番のIDがある表(パートナーなど)は、作ったIDも返す(従来の ok は変えない)
+    Ok(Json(serde_json::json!({"ok": true, "id": created_id})))
 }
 
 // ── API: 削除 ──

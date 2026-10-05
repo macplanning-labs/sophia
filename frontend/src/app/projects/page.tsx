@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
 import { fetchProjects } from "@/lib/api";
@@ -11,7 +11,6 @@ import {
 } from "@/components/ui/table";
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
 import { Plus } from "lucide-react";
-import { ProjectEditModal } from "@/components/projects/ProjectEditModal";
 
 export default function ProjectsPage() {
   return (
@@ -24,7 +23,6 @@ export default function ProjectsPage() {
 function ProjectsPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [editId, setEditId] = useState<string | null>(null);
   const [nameFilter, setNameFilter] = useState("");
   const [clientFilter, setClientFilter] = useState("");
   const [activeFilter, setActiveFilter] = useState("");
@@ -34,21 +32,11 @@ function ProjectsPageContent() {
     queryFn: fetchProjects,
   });
 
-  // /projects/[id] からのリダイレクト (?edit=) および直接リンクに対応
+  // 旧リンク (/projects?edit=ID) は案件詳細へ移動
   useEffect(() => {
     const fromUrl = searchParams.get("edit");
-    if (fromUrl) setEditId(fromUrl);
-  }, [searchParams]);
-
-  const openEdit = useCallback((projectId: string) => {
-    setEditId(projectId);
-    router.replace(`/projects?edit=${encodeURIComponent(projectId)}`, { scroll: false });
-  }, [router]);
-
-  const closeEdit = useCallback(() => {
-    setEditId(null);
-    router.replace("/projects", { scroll: false });
-  }, [router]);
+    if (fromUrl) router.replace(`/projects/${encodeURIComponent(fromUrl)}`);
+  }, [searchParams, router]);
 
   const rows = projects ?? [];
 
@@ -145,7 +133,7 @@ function ProjectsPageContent() {
                 <TableRow
                   key={p.project_id}
                   className="border-border/50 cursor-pointer hover:bg-accent/50"
-                  onClick={() => openEdit(p.project_id)}
+                  onClick={() => router.push(`/projects/${encodeURIComponent(p.project_id)}`)}
                 >
                   <TableCell className="text-sm tabular-nums text-muted-foreground">{p.project_id}</TableCell>
                   <TableCell className="text-sm font-medium text-emerald-400">{p.name}</TableCell>
@@ -163,12 +151,6 @@ function ProjectsPageContent() {
           <span className="text-xs text-muted-foreground">表示中: {filteredProjects.length}件</span>
         </div>
       </div>
-
-      <ProjectEditModal
-        projectId={editId}
-        open={!!editId}
-        onClose={closeEdit}
-      />
     </div>
   );
 }

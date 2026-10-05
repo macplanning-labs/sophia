@@ -52,8 +52,8 @@ export default function ExpenseDetailPage({ id: idProp, embedded = false, onOpen
 
   const rejectMutation = useMutation({
     mutationFn: () => rejectExpense(Number(id)),
-    onSuccess: () => { invalidate(); toast.success("差戻しました"); },
-    onError: (e: Error) => toast.error(e.message || "差戻しに失敗しました"),
+    onSuccess: () => { invalidate(); toast.success("差し戻しました"); },
+    onError: (e: Error) => toast.error(e.message || "差し戻しに失敗しました"),
   });
 
   const unapproveMutation = useMutation({
@@ -117,7 +117,7 @@ export default function ExpenseDetailPage({ id: idProp, embedded = false, onOpen
                 <Check className="w-3.5 h-3.5 mr-1" /> 承認
               </Button>
               <Button size="sm" variant="outline" className="text-red-400 border-red-500/30 hover:bg-red-500/10" onClick={() => rejectMutation.mutate()}>
-                <X className="w-3.5 h-3.5 mr-1" /> 差戻し
+                <X className="w-3.5 h-3.5 mr-1" /> 差し戻し
               </Button>
             </>
           )}

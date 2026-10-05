@@ -6,6 +6,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     body::Bytes,
 };
+use crate::infrastructure::db_tx::LogErr;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use sqlx::PgPool;
@@ -56,7 +57,7 @@ pub(super) async fn build_mail_logs(pool: &PgPool) -> Vec<MailRow> {
 pub(super) async fn count_confirmed_mails(pool: &PgPool) -> i64 {
     crate::infrastructure::repositories::mail_repo::count_confirmed_mails_recent(pool)
         .await
-        .unwrap_or(0)
+        .log_err().unwrap_or(0)
 }
 
 pub(super) async fn count_needs_review_mails(pool: &PgPool) -> i64 {
@@ -98,7 +99,7 @@ pub(super) async fn mail_sync_last_processed_at(pool: &PgPool) -> Option<chrono:
 pub async fn manual_mail_fetch(
     State(pool): State<PgPool>,
 ) -> (StatusCode, Json<StatusResponse>) {
-    let result = crate::infrastructure::mail_pipeline::run_pipeline(&pool, None).await;
+    let result = crate::infrastructure::mail_pipeline::run_pipeline(&pool).await;
     let has_errors = result.has_errors();
     let msg = result.to_string();
     (StatusCode::OK, Json(StatusResponse {

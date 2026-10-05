@@ -36,11 +36,13 @@ const order: Record<string, StatusDef> = {
 
 // 実際の値は ReceivedOrderStatus（src/domain/models/client_contract.rs）と一致させる
 const receivedOrder: Record<string, StatusDef> = {
-  REGISTERED:      { label: "受注登録",   className: "border-slate-500/30 text-slate-400" },
-  REPORT_RECEIVED: { label: "勤怠受領",   className: "border-amber-500/30 text-amber-400" },
-  REPORT_SENT:     { label: "報告書送付", className: "border-sky-500/30 text-sky-400" },
-  INVOICED:        { label: "請求書処理", className: "border-indigo-500/30 text-indigo-400" },
-  PAID:            { label: "入金済",     className: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" },
+  REGISTERED:       { label: "受注登録",   className: "border-slate-500/30 text-slate-400" },
+  REPORT_RECEIVED:  { label: "勤怠受領",   className: "border-amber-500/30 text-amber-400" },
+  REPORT_SENT:      { label: "報告書送付", className: "border-sky-500/30 text-sky-400" },
+  INVOICED:         { label: "請求書処理", className: "border-indigo-500/30 text-indigo-400" },
+  INVOICE_SENT:     { label: "請求送付",   className: "border-indigo-500/30 text-indigo-400" },
+  INVOICE_CONFIRMED: { label: "受諾",      className: "border-sky-500/30 text-sky-400" },
+  PAID:             { label: "入金済",     className: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" },
 };
 
 const invoice: Record<string, StatusDef> = {
@@ -51,7 +53,7 @@ const invoice: Record<string, StatusDef> = {
   // 請求書承認・送信ワークフロー（migrations/021、2026-07-11実装）
   PENDING_APPROVAL:  { label: "承認待ち",   className: "border-amber-500/30 text-amber-400" },
   APPROVED:          { label: "承認済",     className: "border-sky-500/30 text-sky-400" },
-  SENT:              { label: "送信済",     className: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" },
+  SENT:              { label: "送付済",     className: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" },
 };
 
 const notice: Record<string, StatusDef> = {
@@ -62,11 +64,12 @@ const notice: Record<string, StatusDef> = {
 
 const timesheet: Record<string, StatusDef> = {
   PENDING:   { label: "未提出",   className: "border-slate-500/30 text-slate-400" },
-  UPLOADED:  { label: "提出済",   className: "border-sky-500/30 text-sky-400" },
+  UPLOADED:  { label: "受領済",   className: "border-sky-500/30 text-sky-400" },
   PARSED:    { label: "解析済",   className: "border-cyan-500/30 text-cyan-400" },
+  SUBMITTED: { label: "提出済",   className: "border-sky-500/30 text-sky-400" },
   APPROVED:  { label: "承認済",   className: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30" },
-  REJECTED:  { label: "差戻し",   className: "border-rose-500/30 text-rose-400" },
-  SENT:      { label: "送信済",   className: "bg-sky-500/15 text-sky-400 border-sky-500/30" },
+  REJECTED:  { label: "差し戻し", className: "border-rose-500/30 text-rose-400" },
+  SENT:      { label: "送付済",   className: "bg-sky-500/15 text-sky-400 border-sky-500/30" },
 };
 
 const payroll: Record<string, StatusDef> = {

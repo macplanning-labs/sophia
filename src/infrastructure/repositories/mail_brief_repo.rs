@@ -2,6 +2,7 @@
 ///
 /// ダッシュボードの「取引先からのメール」カードに表示する相手別要約情報を構築する。
 
+use crate::infrastructure::db_tx::LogErr;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -162,6 +163,7 @@ async fn build_mail_thread_brief(
     // 添付情報を収集（最大 12 通）
     let mut attachments = vec![];
     let mut needs_choice = false;
+    let mut latest_decided = false; // email_list は新しい順
     for (idx, email) in email_list.iter().take(12).enumerate() {
         if !email.attachment_filename.is_empty() {
             let kind = crate::domain::services::mail_thread_brief::attachment_kind(
@@ -183,9 +185,18 @@ async fn build_mail_thread_brief(
                 None
             };
 
-            // needs_choice は forecast と final が両方ある場合
-            if matches!(kind, crate::domain::services::mail_thread_brief::AttachmentKind::Forecast) {
-                needs_choice = true;
+            // 見込み/最終のうち最新の添付が「見込み」のときだけ選択が必要
+            // （最新が最終なら、過去月の見込みが残っていても選択は不要）
+            {
+                use crate::domain::services::mail_thread_brief::AttachmentKind;
+                match kind {
+                    AttachmentKind::Forecast if !latest_decided => {
+                        needs_choice = true;
+                        latest_decided = true;
+                    }
+                    AttachmentKind::Final => latest_decided = true,
+                    _ => {}
+                }
             }
 
             attachments.push(AttachmentInfo {
@@ -198,7 +209,7 @@ async fn build_mail_thread_brief(
                     crate::domain::services::mail_thread_brief::AttachmentKind::Other => "other".to_string(),
                 },
                 hours_label,
-                timesheet_status: get_timesheet_status(pool, &email.attachment_filename).await.ok().flatten(),
+                timesheet_status: get_timesheet_status(pool, &email.attachment_filename).await.log_err().ok().flatten(),
             });
         }
     }

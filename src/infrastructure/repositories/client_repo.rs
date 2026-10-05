@@ -77,3 +77,11 @@ pub async fn update(pool: &PgPool, id: i64, form: ClientFormInput<'_>) -> Result
     .await?;
     Ok(())
 }
+
+/// 取引先の名前と「メール」欄（取得した書類の行の差出人表示に使う）
+pub async fn find_name_and_email(pool: &PgPool, id: i64) -> Result<Option<(String, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT name, email FROM m_client WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+}

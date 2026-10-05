@@ -1,11 +1,13 @@
 "use client";
 
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchTimesheetDetail } from "@/lib/api";
 import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { GuidanceCallout } from "@/components/ui/guidance-callout";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { toast } from "sonner";
 import { useDynamicId } from "@/lib/utils";
 import { getTimesheetStatusGuidance } from "@/lib/guidance/timesheet";
@@ -20,6 +22,7 @@ export default function TimesheetDetailPage({ id: idProp, embedded = false }: Pr
   const dynamicId = useDynamicId();
   const id = idProp || dynamicId;
   const queryClient = useQueryClient();
+  const [confirmTarget, setConfirmTarget] = useState<"reject" | null>(null);
   const { data, isLoading } = useQuery({
     queryKey: ["timesheets", id],
     queryFn: () => fetchTimesheetDetail(id),
@@ -37,12 +40,12 @@ export default function TimesheetDetailPage({ id: idProp, embedded = false }: Pr
   });
 
   const rejectMut = useMutation({
-    mutationFn: async () => { const r = await fetch(`/api/v1/timesheets/${id}/reject`, { method: "POST" }); if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.error || "差戻しに失敗しました"); } return r; },
+    mutationFn: async () => { const r = await fetch(`/api/v1/timesheets/${id}/reject`, { method: "POST" }); if (!r.ok) { const b = await r.json().catch(() => ({})); throw new Error(b.error || "差し戻しに失敗しました"); } return r; },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["timesheets", id] });
       queryClient.invalidateQueries({ queryKey: ["timesheets"], exact: true });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      toast.success("差戻ししました");
+      toast.success("差し戻しました");
     },
   });
 
@@ -71,11 +74,11 @@ export default function TimesheetDetailPage({ id: idProp, embedded = false }: Pr
             ✅ 承認
           </button>
           <button
-            onClick={() => { if (confirm("差戻ししますか？")) rejectMut.mutate(); }}
+            onClick={() => setConfirmTarget("reject")}
             disabled={rejectMut.isPending}
             className="px-3 py-1.5 text-xs font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors disabled:opacity-50"
           >
-            ↩ 差戻し
+            ↩ 差し戻し
           </button>
         </>
       )}
@@ -148,6 +151,23 @@ export default function TimesheetDetailPage({ id: idProp, embedded = false }: Pr
               </Table>
             </div>
           )}
+          <ConfirmSheet
+            open={confirmTarget === "reject"}
+            title="稼働報告を差し戻し"
+            facts={[
+              ...(data?.contract_info ? [{ label: "契約情報", value: data.contract_info }] : []),
+              ...(sheet?.target_month ? [{ label: "対象月", value: sheet.target_month }] : []),
+            ]}
+            variant="danger"
+            confirmLabel="差し戻し"
+            cancelLabel="キャンセル"
+            loading={rejectMut.isPending}
+            onConfirm={() => {
+              setConfirmTarget(null);
+              rejectMut.mutate();
+            }}
+            onCancel={() => setConfirmTarget(null)}
+          />
         </>
       )}
     </DetailLayout>

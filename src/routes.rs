@@ -33,6 +33,7 @@ use tower_governor::{
     key_extractor::SmartIpKeyExtractor,
     GovernorLayer,
 };
+use crate::infrastructure::db_tx::LogErr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
@@ -71,6 +72,23 @@ pub fn create_router(state: AppState) -> Router {
 
     // ── 1. Admin専用ルート ──
     let admin_routes = Router::new()
+        // 支払通知の承認・差戻(管理者のみ)
+        .route(
+            "/api/v1/notices/{id}/approve",
+            post(handlers::notices::api_approve),
+        )
+        .route(
+            "/api/notices/{id}/approve",
+            post(handlers::notices::api_approve),
+        )
+        .route(
+            "/api/v1/notices/{id}/reject",
+            post(handlers::notices::api_reject),
+        )
+        .route(
+            "/api/notices/{id}/reject",
+            post(handlers::notices::api_reject),
+        )
         // 給与管理（計算・確認・支払はAdmin専用）— JSON API
         // ※ 一覧/詳細(GET /api/v1/payroll, /api/v1/payroll/{id})は employee_routes 側で
         //   本人の employee_id と一致する場合のみ閲覧可、というロジックで別途制御しているため
@@ -231,6 +249,17 @@ pub fn create_router(state: AppState) -> Router {
             "/api/peppol/transmissions",
             get(handlers::peppol::list_transmissions),
         )
+        // ── 帳票横断検索（Admin専用。給与・金額が見えるため）──
+        .route(
+            "/api/v1/documents/search",
+            get(handlers::documents::api_search_documents),
+        )
+        // ── 請求書のプレビューと確定（Admin専用。UI刷新 2-4）──
+        .route("/api/v1/assignments", post(handlers::assignments::api_create))
+        .route("/api/v1/assignments/preview", post(handlers::assignments::api_preview))
+        .route("/api/v1/assignments/overview", get(handlers::assignments::api_overview))
+        .route("/api/v1/billing/preview", get(handlers::billing::api_preview))
+        .route("/api/v1/billing/confirm", post(handlers::billing::api_confirm))
         // ── 自社情報設定（Admin専用。銀行口座・SMTP認証情報を含むため）──
         .route(
             "/api/v1/company-info",
@@ -273,6 +302,23 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/v1/settings/api-keys/{id}/revoke",
             post(handlers::settings::api_keys::revoke_api_key),
+        )
+        // ── 社員の作成・更新・削除は管理者専用(B1: 一般社員が給与設定を変更できていた不具合の修正)──
+        .route(
+            "/api/v1/employees",
+            post(handlers::employees::api_create),
+        )
+        .route(
+            "/api/employees",
+            post(handlers::employees::api_create),
+        )
+        .route(
+            "/api/v1/employees/{id}",
+            put(handlers::employees::api_update).delete(handlers::employees::api_delete),
+        )
+        .route(
+            "/api/employees/{id}",
+            put(handlers::employees::api_update).delete(handlers::employees::api_delete),
         )
         // Admin専用ガード
         .layer(middleware::from_fn(admin_required));
@@ -407,37 +453,6 @@ pub fn create_router(state: AppState) -> Router {
             post(handlers::home::edi_import_all),
         )
         .route("/api/edi/import-all", post(handlers::home::edi_import_all))
-        .route(
-            "/api/v1/edi/import/{email_id}",
-            post(handlers::home::edi_import_single),
-        )
-        .route(
-            "/api/edi/import/{email_id}",
-            post(handlers::home::edi_import_single),
-        )
-        .route("/api/v1/edi/orders", get(handlers::home::edi_list_orders))
-        .route("/api/edi/orders", get(handlers::home::edi_list_orders))
-        .route(
-            "/api/v1/edi/orders/{order_id}/import",
-            post(handlers::home::edi_import_and_approve),
-        )
-        .route(
-            "/api/edi/orders/{order_id}/import",
-            post(handlers::home::edi_import_and_approve),
-        )
-        .route(
-            "/api/v1/edi/invoices",
-            get(handlers::home::edi_list_invoices),
-        )
-        .route("/api/edi/invoices", get(handlers::home::edi_list_invoices))
-        .route(
-            "/api/v1/edi/invoices/{invoice_id}/approve",
-            post(handlers::home::edi_approve_invoice),
-        )
-        .route(
-            "/api/edi/invoices/{invoice_id}/approve",
-            post(handlers::home::edi_approve_invoice),
-        )
         // ── 支払通知アクション（PDF, メール — SPAから利用） ──
         .route(
             "/api/v1/notices/{id}/email-preview",
@@ -500,6 +515,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/received-orders/{id}/delete",
             post(handlers::received_orders::delete),
+        )
+        .route(
+            "/api/v1/received-orders/{id}/create-contract",
+            post(handlers::received_orders::api_create_contract),
+        )
+        .route(
+            "/api/received-orders/{id}/create-contract",
+            post(handlers::received_orders::api_create_contract),
         )
         .route(
             "/api/v1/received-orders/{id}/link-contract",
@@ -615,14 +638,6 @@ pub fn create_router(state: AppState) -> Router {
             "/api/settlement/issue-notices",
             post(handlers::settlement_dashboard::api_issue_notices),
         )
-        .route(
-            "/api/v1/settlement/import-billings",
-            post(handlers::settlement_dashboard::api_import_billings),
-        )
-        .route(
-            "/api/settlement/import-billings",
-            post(handlers::settlement_dashboard::api_import_billings),
-        )
         // ── 一覧 JSON API ──
         .route("/api/v1/auth/me", get(handlers::auth::api_me))
         .route("/api/auth/me", get(handlers::auth::api_me))
@@ -735,11 +750,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/tasks", get(handlers::tasks::api_index))
         .route(
             "/api/v1/employees",
-            get(handlers::employees::api_index).post(handlers::employees::api_create),
+            get(handlers::employees::api_index),
         )
         .route(
             "/api/employees",
-            get(handlers::employees::api_index).post(handlers::employees::api_create),
+            get(handlers::employees::api_index),
         )
         .route(
             "/api/v1/expenses",
@@ -922,15 +937,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/payroll/{id}", get(handlers::payroll::api_detail))
         .route(
             "/api/v1/employees/{id}",
-            get(handlers::employees::api_detail)
-                .put(handlers::employees::api_update)
-                .delete(handlers::employees::api_delete),
+            get(handlers::employees::api_detail),
         )
         .route(
             "/api/employees/{id}",
-            get(handlers::employees::api_detail)
-                .put(handlers::employees::api_update)
-                .delete(handlers::employees::api_delete),
+            get(handlers::employees::api_detail),
         )
         .route(
             "/api/v1/expenses/{id}",
@@ -1026,6 +1037,30 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/received-emails/{id}/import",
             post(handlers::received_emails::api_import),
+        )
+        .route(
+            "/api/v1/timesheet-matching",
+            get(handlers::timesheet_matching::api_board),
+        )
+        .route(
+            "/api/v1/timesheet-attachments/{id}/file",
+            get(handlers::timesheet_matching::api_attachment_file),
+        )
+        .route(
+            "/api/v1/timesheet-attachments/{id}/preview",
+            get(handlers::timesheet_matching::api_attachment_preview),
+        )
+        .route(
+            "/api/v1/timesheet-attachments/{id}/import",
+            post(handlers::timesheet_matching::api_attachment_import),
+        )
+        .route(
+            "/api/v1/timesheet-attachments/{id}/reject",
+            post(handlers::timesheet_matching::api_attachment_reject),
+        )
+        .route(
+            "/api/v1/timesheet-attachments/{id}/unreject",
+            post(handlers::timesheet_matching::api_attachment_unreject),
         )
         .route(
             "/api/v1/received-emails/{id}/resolve",
@@ -1449,7 +1484,7 @@ pub fn create_router(state: AppState) -> Router {
                 if let Some(parent) = std::path::Path::new(path).parent() {
                     let fallback = format!("frontend/out{}/_/index.html", parent.to_string_lossy());
                     if std::path::Path::new(&fallback).exists() {
-                        let body = tokio::fs::read(&fallback).await.unwrap_or_default();
+                        let body = tokio::fs::read(&fallback).await.log_err().unwrap_or_default();
                         return Ok::<_, std::convert::Infallible>(
                             crate::presentation::http_util::build_response(
                                 axum::response::Response::builder()
@@ -1464,7 +1499,7 @@ pub fn create_router(state: AppState) -> Router {
                 // デフォルトフォールバック: index.html
                 let body = tokio::fs::read("frontend/out/index.html")
                     .await
-                    .unwrap_or_default();
+                    .log_err().unwrap_or_default();
                 Ok(crate::presentation::http_util::build_response(
                     axum::response::Response::builder()
                         .status(200)

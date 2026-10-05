@@ -2,6 +2,7 @@ use axum::{
     extract::{Query, State},
     Json, response::IntoResponse,
 };
+use crate::infrastructure::db_tx::LogErr;
 use chrono::{NaiveDate, Datelike};
 use sqlx::PgPool;
 use crate::domain::services::settlement_dashboard::{
@@ -67,21 +68,21 @@ pub async fn api_filters(
 
     let clients: Vec<ClientOption> = crate::infrastructure::repositories::client_repo::list_id_name_options(&pool)
         .await
-        .unwrap_or_default()
+        .log_err().unwrap_or_default()
         .into_iter()
         .map(|(id, name)| ClientOption { id, name })
         .collect();
 
     let partners: Vec<PartnerOption> = crate::infrastructure::repositories::partner_repo::list_id_name_options(&pool)
         .await
-        .unwrap_or_default()
+        .log_err().unwrap_or_default()
         .into_iter()
         .map(|(partner_id, name)| PartnerOption { partner_id, name })
         .collect();
 
     let projects: Vec<ProjectOption> = crate::infrastructure::repositories::project_repo::list_id_name_options(&pool)
         .await
-        .unwrap_or_default()
+        .log_err().unwrap_or_default()
         .into_iter()
         .map(|(project_id, name)| ProjectOption { project_id, name })
         .collect();
@@ -125,7 +126,7 @@ pub async fn api_issue_invoices(
         .collect();
 
     let edi_excluded_count = selected_rows.iter()
-        .filter(|vr| vr.row.client_edi_system_type == "EDI_OASIS")
+        .filter(|vr| vr.row.client_invoice_by_client)
         .count();
 
     match settlement_dashboard::create_invoices_by_client(&pool, &selected_rows, target_month).await {
@@ -249,33 +250,3 @@ pub async fn api_issue_notices(
     }
 }
 
-/// POST /api/settlement/import-billings — EDI-OASIS請求書取込
-pub async fn api_import_billings(
-    State(pool): State<PgPool>,
-    axum::Json(payload): axum::Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
-    let year = payload["year"].as_i64().unwrap_or(0) as i32;
-    let month = payload["month"].as_i64().unwrap_or(0) as i32;
-
-    if year == 0 || month == 0 {
-        return Json(serde_json::json!({ "success": false, "message": "year/monthを指定してください" }));
-    }
-
-    let client = match crate::infrastructure::edi_oasis_client::EdiOasisClient::from_env() {
-        Ok(c) => c,
-        Err(e) => return Json(serde_json::json!({ "success": false, "message": format!("EDI接続エラー: {}", e) })),
-    };
-
-    let mut client = client;
-    let result = crate::infrastructure::billing_importer::import_billings_for_month(
-        &pool, &mut client, year, month,
-    ).await;
-
-    Json(serde_json::json!({
-        "success": result.errors.is_empty(),
-        "message": format!("{}", result),
-        "imported": result.billings_imported,
-        "skipped": result.billings_skipped,
-        "errors": result.errors,
-    }))
-}

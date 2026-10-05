@@ -7,6 +7,7 @@
 ///
 /// 添付ファイル付き送信: `send_with_attachment()` で PDF等を添付可能。
 
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tracing::{info, warn};
@@ -266,7 +267,7 @@ impl EmailService {
 
             if !resp.status().is_success() {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
+                let body = resp.text().await.log_err().unwrap_or_default();
                 return Err(format!("Gmail API送信失敗 status={} body={}", status, body));
             }
             Ok(())
@@ -827,14 +828,14 @@ mod tests {
     #[test]
     fn external_domain_is_blocked_by_default() {
         let internal = vec![];
-        assert!(!is_recipient_allowed("client@ntp.example.com", "", &internal));
+        assert!(!is_recipient_allowed("client@customer.example.com", "", &internal));
     }
 
     #[test]
     fn external_domain_allowed_when_explicitly_listed() {
-        let allowlist = "client@ntp.example.com, partner@example.co.jp";
+        let allowlist = "client@customer.example.com, partner@example.co.jp";
         let internal = vec![];
-        assert!(is_recipient_allowed("client@ntp.example.com", allowlist, &internal));
+        assert!(is_recipient_allowed("client@customer.example.com", allowlist, &internal));
         assert!(is_recipient_allowed(" partner@example.co.jp ", allowlist, &internal));
         assert!(!is_recipient_allowed("other@example.com", allowlist, &internal));
     }

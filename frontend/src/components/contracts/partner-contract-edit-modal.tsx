@@ -16,7 +16,9 @@ import {
   DEFAULT_WORK_LOCATION,
 } from "@/components/contracts/work-location-field";
 import { Button } from "@/components/ui/button";
+import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { toast } from "sonner";
+import { DateInput } from "@/components/ui/date-input";
 
 const SETTLEMENT_TYPES = [
   { value: "上下割", label: "上下割" },
@@ -72,6 +74,7 @@ export function PartnerContractEditModal({ contractId, open, onClose }: Props) {
   const qc = useQueryClient();
   const [form, setForm] = useState<PartnerEditForm | null>(null);
   const [extendDate, setExtendDate] = useState("");
+  const [confirmAction, setConfirmAction] = useState<"delete" | "extend" | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["partner-contracts", String(contractId)],
@@ -200,6 +203,7 @@ export function PartnerContractEditModal({ contractId, open, onClose }: Props) {
   );
 
   return (
+    <>
     <FormModal
       open={open}
       title={`発注契約 #${contractId} の編集`}
@@ -220,10 +224,7 @@ export function PartnerContractEditModal({ contractId, open, onClose }: Props) {
               size="sm"
               className="border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
               disabled={deleteMutation.isPending || updateMutation.isPending}
-              onClick={() => {
-                if (!confirm(`発注契約 #${contractId} を削除しますか？この操作は取り消せません。`)) return;
-                deleteMutation.mutate();
-              }}
+              onClick={() => setConfirmAction("delete")}
             >
               {deleteMutation.isPending ? "削除中…" : "削除"}
             </Button>
@@ -242,8 +243,8 @@ export function PartnerContractEditModal({ contractId, open, onClose }: Props) {
             契約更改（期間延長）のみ、既存の発注書に影響しないため常に可能です。現在の終了日: {data?.end_date || "-"}
           </p>
           <div className="flex items-center gap-2 flex-wrap">
-            <input
-              type="date"
+            <DateInput
+              
               value={extendDate}
               onChange={(e) => setExtendDate(e.target.value)}
               min={data?.end_date || undefined}
@@ -253,10 +254,7 @@ export function PartnerContractEditModal({ contractId, open, onClose }: Props) {
               type="button"
               size="sm"
               disabled={!extendDate || extendMutation.isPending}
-              onClick={() => {
-                if (!confirm(`終了日を ${extendDate} に延長しますか？`)) return;
-                extendMutation.mutate();
-              }}
+              onClick={() => setConfirmAction("extend")}
             >
               {extendMutation.isPending ? "延長中…" : "契約を延長"}
             </Button>
@@ -516,5 +514,41 @@ export function PartnerContractEditModal({ contractId, open, onClose }: Props) {
         </p>
       )}
     </FormModal>
+
+    <ConfirmSheet
+      open={confirmAction === "delete"}
+      title="発注契約を削除"
+      facts={[
+        { label: "契約ID", value: contractId },
+        ...(data?.engineer_name ? [{ label: "要員名", value: data.engineer_name }] : []),
+      ]}
+      description="この操作は取り消せません。"
+      variant="danger"
+      confirmLabel="削除"
+      loading={deleteMutation.isPending}
+      onConfirm={() => {
+        setConfirmAction(null);
+        deleteMutation.mutate();
+      }}
+      onCancel={() => setConfirmAction(null)}
+    />
+
+    <ConfirmSheet
+      open={confirmAction === "extend"}
+      title="終了日を延長"
+      facts={[
+        { label: "契約ID", value: contractId },
+        ...(data?.end_date ? [{ label: "現在の終了日", value: data.end_date }] : []),
+        ...(extendDate ? [{ label: "新しい終了日", value: extendDate }] : []),
+      ]}
+      confirmLabel="延長"
+      loading={extendMutation.isPending}
+      onConfirm={() => {
+        setConfirmAction(null);
+        extendMutation.mutate();
+      }}
+      onCancel={() => setConfirmAction(null)}
+    />
+    </>
   );
 }

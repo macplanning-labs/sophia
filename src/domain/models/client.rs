@@ -26,23 +26,6 @@ pub struct Client {
     pub peppol_participant_id: String,
 }
 
-impl Client {
-    /// EDIシステムを保有しているか
-    ///
-    /// `edi_system_type`は"なし"/"EDI-OASIS"/"メール"の3択（`masters.rs::EDI_OPTIONS`）だが、
-    /// "メール"は単に注文書がメールで連携される旨のメモであり、Phase2が年月ポーリング可能な
-    /// 実在のEDIシステムではない。非空判定だと"メール"もEDI保有扱いになってしまうため、
-    /// 実際にポーリング対象となる"EDI_OASIS"との完全一致で判定する。
-    pub fn has_edi(&self) -> bool {
-        self.edi_system_type == "EDI_OASIS"
-    }
-
-    /// 請求書の作成・送付が必要か（EDI非保有の場合のみ）
-    pub fn needs_invoice(&self) -> bool {
-        !self.has_edi()
-    }
-}
-
 /// クライアント登録・編集フォーム
 #[derive(Debug, Deserialize)]
 pub struct ClientForm {

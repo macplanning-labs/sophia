@@ -15,6 +15,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use crate::infrastructure::db_tx::LogErr;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -39,8 +40,18 @@ pub static REPORT_DEADLINE_HOLIDAY_RULE_OPTIONS: &[(&str, &str)] = &[
     ("NEXT_BUSINESS_DAY", "翌営業日"),
 ];
 
+pub static COMMERCIAL_FLOW_OPTIONS: &[(&str, &str)] = &[
+    ("DIRECT", "直営"),
+    ("SUBCONTRACT", "下請"),
+];
+
 fn options_json(options: &[(&str, &str)]) -> serde_json::Value {
     serde_json::json!(options.iter().map(|(value, label)| serde_json::json!({ "value": value, "label": label })).collect::<Vec<_>>())
+}
+
+/// commercial_flow の値を検証する。None/"DIRECT"/"SUBCONTRACT" 以外は無効。
+fn validate_commercial_flow(value: &str) -> bool {
+    matches!(value, "DIRECT" | "SUBCONTRACT")
 }
 
 // ══════════════════════════════════════════════════════════
@@ -66,8 +77,8 @@ pub async fn api_detail(
         Err(e) => return Err(AppError::from(e)),
     };
 
-    let client_contracts = project_repo::list_client_contract_summaries(&pool, &project_id).await.unwrap_or_default();
-    let partner_contracts = project_repo::list_partner_contract_summaries(&pool, &project_id).await.unwrap_or_default();
+    let client_contracts = project_repo::list_client_contract_summaries(&pool, &project_id).await.log_err().unwrap_or_default();
+    let partner_contracts = project_repo::list_partner_contract_summaries(&pool, &project_id).await.log_err().unwrap_or_default();
 
     Ok(Json(serde_json::json!({
         "project": project,
@@ -92,6 +103,10 @@ pub struct ProjectUpdateBody {
     pub report_deadline_value: Option<i32>,
     pub report_deadline_holiday_rule: Option<String>,
     pub report_request_day: Option<i32>,
+    #[serde(default)]
+    pub commercial_flow: Option<String>,
+    #[serde(default)]
+    pub is_test: Option<bool>,
 }
 
 /// PUT /api/projects/{project_id} — 案件情報のみ更新(JSON)
@@ -100,6 +115,19 @@ pub async fn api_update(
     Path(project_id): Path<String>,
     Json(body): Json<ProjectUpdateBody>,
 ) -> Result<impl IntoResponse, AppError> {
+    // commercial_flow の検証
+    if let Some(ref cf) = body.commercial_flow {
+        if !validate_commercial_flow(cf) {
+            return Ok((
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "commercial_flow は 'DIRECT', 'SUBCONTRACT', または null のいずれかである必要があります"
+                }))
+            ).into_response());
+        }
+    }
+
     let input = ProjectUpdateInput {
         client_id: body.client_id,
         name: body.name,
@@ -110,6 +138,8 @@ pub async fn api_update(
         report_deadline_value: body.report_deadline_value,
         report_deadline_holiday_rule: body.report_deadline_holiday_rule,
         report_request_day: body.report_request_day,
+        commercial_flow: body.commercial_flow,
+        is_test: body.is_test,
     };
 
     match project_repo::update_project(&pool, &project_id, &input).await {
@@ -126,7 +156,7 @@ pub async fn api_delete(
     State(pool): State<PgPool>,
     Path(project_id): Path<String>,
 ) -> impl IntoResponse {
-    let Some(project) = project_repo::find_project_detail(&pool, &project_id).await.ok().flatten() else {
+    let Some(project) = project_repo::find_project_detail(&pool, &project_id).await.log_err().ok().flatten() else {
         return (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({
             "success": false, "error": "該当する案件が見つかりません"
         }))).into_response();
@@ -202,6 +232,10 @@ pub struct WizardProjectBody {
     pub report_deadline_value: Option<i32>,
     pub report_deadline_holiday_rule: Option<String>,
     pub report_request_day: Option<i32>,
+    #[serde(default)]
+    pub commercial_flow: Option<String>,
+    #[serde(default)]
+    pub is_test: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -269,7 +303,10 @@ pub struct WizardPartnerContractBody {
 #[derive(Debug, serde::Deserialize)]
 pub struct WizardRequestBody {
     pub project: WizardProjectBody,
-    /// クライアント契約ステップはスキップ可能(2026-07-31確定) — null/未指定ならスキップ扱い。
+    /// 受注契約は0件以上（技術者ごとに1件）。スキップ可能。
+    #[serde(default)]
+    pub client_contracts: Vec<WizardClientContractBody>,
+    /// 旧形式（1件のみ）。互換のため受け付け、`client_contracts` に加える。
     #[serde(default)]
     pub client_contract: Option<WizardClientContractBody>,
     /// パートナー契約は0件可(2026-07-31確定)。
@@ -282,6 +319,19 @@ pub async fn api_wizard_create(
     State(pool): State<PgPool>,
     Json(body): Json<WizardRequestBody>,
 ) -> Result<impl IntoResponse, AppError> {
+    // commercial_flow の検証
+    if let Some(ref cf) = body.project.commercial_flow {
+        if !validate_commercial_flow(cf) {
+            return Ok((
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "commercial_flow は 'DIRECT', 'SUBCONTRACT', または null のいずれかである必要があります"
+                }))
+            ).into_response());
+        }
+    }
+
     let input = WizardInput {
         project: WizardProjectInput {
             client_id: body.project.client_id,
@@ -291,8 +341,10 @@ pub async fn api_wizard_create(
             report_deadline_value: body.project.report_deadline_value,
             report_deadline_holiday_rule: body.project.report_deadline_holiday_rule,
             report_request_day: body.project.report_request_day,
+            commercial_flow: body.project.commercial_flow,
+            is_test: body.project.is_test,
         },
-        client_contract: body.client_contract.map(|cc| WizardClientContractInput {
+        client_contracts: body.client_contracts.into_iter().chain(body.client_contract).map(|cc| WizardClientContractInput {
             engineer: cc.engineer,
             start_date: cc.start_date,
             end_date: cc.end_date,
@@ -310,7 +362,7 @@ pub async fn api_wizard_create(
             report_deadline_days_before: cc.report_deadline_days_before,
             currency: cc.currency,
             remarks: cc.remarks,
-        }),
+        }).collect(),
         partner_contracts: body.partner_contracts.into_iter().map(|pc| WizardPartnerContractInput {
             partner_id: pc.partner_id,
             engineer: pc.engineer,
@@ -348,5 +400,27 @@ pub async fn api_wizard_create(
             "success": true, "project_id": project_id
         }))).into_response()),
         Err(e) => Err(AppError::from(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_commercial_flow_direct() {
+        assert!(validate_commercial_flow("DIRECT"));
+    }
+
+    #[test]
+    fn test_validate_commercial_flow_subcontract() {
+        assert!(validate_commercial_flow("SUBCONTRACT"));
+    }
+
+    #[test]
+    fn test_validate_commercial_flow_invalid() {
+        assert!(!validate_commercial_flow("INVALID"));
+        assert!(!validate_commercial_flow("direct")); // case-sensitive
+        assert!(!validate_commercial_flow(""));
     }
 }

@@ -7,7 +7,11 @@
 /// `run_pipeline()` が唯一のオーケストレーター。スケジューラ(15分毎を想定)と、
 /// ダッシュボードの手動トリガーAPIの両方から同じ関数を呼ぶことで、自動/手動でロジックが
 /// 分岐・重複しないようにする。
+///
+/// 取引先の EDI へは、要対応の通知メールが届いたときだけ接続し、そのメールが指す書類だけを取る
+/// （自動でも手動でも同じ。メールが無いのに接続しない。取引先ごとの処理は crate::custom。DEMO-000145 / DEMO-000148）。
 
+pub mod alert_policy;
 pub mod checkpoint;
 pub mod circuit_breaker;
 pub mod imap_util;
@@ -16,6 +20,7 @@ pub mod phase1_watch;
 pub mod phase2_fetch;
 pub mod phase3_parse_register;
 pub mod phase4_store_notify;
+pub mod timesheet_matching;
 
 use std::time::Duration;
 
@@ -83,18 +88,17 @@ impl PipelineRunResult {
 ///
 /// Phase1のIMAP接続/認証エラーのみ「運用が完全に止まる致命的エラー」として、
 /// Phase4の集約通知を待たずにこの場でADMINへ即時アラートを送る。
-///
-/// `override_month`: `Some((year, month))` の場合、Phase2のEDI-OASIS APIポーリングを
-/// その月のみに限定する（ダッシュボードで年月を指定した手動一括取込用）。`None` なら
-/// 従来通り「当月+翌月」を自動ポーリングする（スケジューラ・通常の手動トリガー用）。
-pub async fn run_pipeline(pool: &PgPool, override_month: Option<(i32, i32)>) -> PipelineRunResult {
+pub async fn run_pipeline(pool: &PgPool) -> PipelineRunResult {
     let mut result = PipelineRunResult::default();
 
+    let alert_cfg = alert_policy::AlertConfig::from_env();
     match run_phase1_with_breaker(pool).await {
         Phase1Outcome::Success(p1) => {
             tracing::info!("[Pipeline] Phase1完了: {p1}");
             // 個別メールの非致命エラー（一覧書込失敗など）を監視へ流す
             ops_message::log_errors(&p1.errors);
+            notify_phase1_recovery(pool).await;
+            notify_persistent_mail_errors(pool, &p1.errors, &alert_cfg).await;
             result.phase1 = Some(p1);
         }
         Phase1Outcome::LockedSkip(msg) => {
@@ -102,14 +106,14 @@ pub async fn run_pipeline(pool: &PgPool, override_month: Option<(i32, i32)>) -> 
             tracing::warn!("[Pipeline] {msg}");
             result.phase1_fatal_error = Some(msg);
         }
-        Phase1Outcome::Error(e) => {
-            ops_message::log_error(&e);
-            send_fatal_alert(pool, &e).await;
-            result.phase1_fatal_error = Some(e);
+        Phase1Outcome::Error { message, attempts } => {
+            ops_message::log_error(&message);
+            notify_phase1_failure(pool, &attempts, &alert_cfg).await;
+            result.phase1_fatal_error = Some(message);
         }
     }
 
-    result.phase2 = phase2_fetch::run(pool, override_month).await;
+    result.phase2 = phase2_fetch::run(pool).await;
     ops_message::log_errors(&result.phase2.errors);
 
     result.phase3 = phase3_parse_register::run(pool).await;
@@ -125,7 +129,10 @@ pub async fn run_pipeline(pool: &PgPool, override_month: Option<(i32, i32)>) -> 
 enum Phase1Outcome {
     Success(phase1_watch::Phase1Result),
     LockedSkip(String),
-    Error(String),
+    Error {
+        message: String,                              // ログ用の一行（ops_message::fail 形式）
+        attempts: Vec<alert_policy::AttemptRecord>,   // 試行ごとの生のエラー（最後が最終結果）
+    },
 }
 
 /// Phase1をIMAPサーキットブレイカーで保護しつつ実行する。
@@ -156,13 +163,20 @@ async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
                     "メール読取不可（新着走査全体が停止）"
                 )
             };
-            return Phase1Outcome::Error(ops_message::fail(
+            let error_msg = ops_message::fail(
                 "メール取込",
                 "Phase1",
                 process,
                 impact,
-                e,
-            ));
+                &e,
+            );
+            return Phase1Outcome::Error {
+                message: error_msg,
+                attempts: vec![alert_policy::AttemptRecord {
+                    time: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    error: e,
+                }],
+            };
         }
     };
 
@@ -179,6 +193,7 @@ async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
     let max_attempts = imap_retry_max_attempts();
     let retry_interval = imap_retry_interval();
     let mut attempt: u32 = 0;
+    let mut attempts: Vec<alert_policy::AttemptRecord> = Vec::new();
 
     loop {
         attempt += 1;
@@ -194,30 +209,43 @@ async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
             }
             Err(e) if circuit_breaker::is_auth_failure(&e) => {
                 let failures = circuit_breaker::record_failure(pool, &mailbox).await;
-                if failures >= circuit_breaker::LOCK_THRESHOLD {
+                let error_msg = if failures >= circuit_breaker::LOCK_THRESHOLD {
                     circuit_breaker::lock(pool, &mailbox, &e).await;
                     let msg = format!(
                         "連続{failures}回認証失敗のためIMAPロック。解除まで新着走査は停止"
                     );
-                    return Phase1Outcome::Error(ops_message::fail(
+                    ops_message::fail(
                         "メール取込",
                         "Phase1",
                         "IMAP読取(認証)",
                         &msg,
-                        e,
-                    ));
-                }
-                return Phase1Outcome::Error(ops_message::fail(
-                    "メール取込",
-                    "Phase1",
-                    "IMAP読取(認証)",
-                    "今回の新着メール走査不可（認証失敗）",
-                    e,
-                ));
+                        &e,
+                    )
+                } else {
+                    ops_message::fail(
+                        "メール取込",
+                        "Phase1",
+                        "IMAP読取(認証)",
+                        "今回の新着メール走査不可（認証失敗）",
+                        &e,
+                    )
+                };
+                attempts.push(alert_policy::AttemptRecord {
+                    time: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    error: e.clone(),
+                });
+                return Phase1Outcome::Error {
+                    message: error_msg,
+                    attempts,
+                };
             }
             Err(e)
                 if ops_message::is_retryable_phase1_imap_error(&e) && attempt < max_attempts =>
             {
+                attempts.push(alert_policy::AttemptRecord {
+                    time: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    error: e.clone(),
+                });
                 tracing::warn!(
                     "[Phase1] IMAP一時障害のため再試行待ち: 試行={attempt}/{max_attempts} 間隔={}秒 | {e}",
                     retry_interval.as_secs()
@@ -225,18 +253,26 @@ async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
                 tokio::time::sleep(retry_interval).await;
             }
             Err(e) => {
+                attempts.push(alert_policy::AttemptRecord {
+                    time: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    error: e.clone(),
+                });
                 let detail = if attempt > 1 {
                     format!("{e}（{attempt}/{max_attempts}回試行後も失敗）")
                 } else {
                     e
                 };
-                return Phase1Outcome::Error(ops_message::fail(
+                let error_msg = ops_message::fail(
                     "メール取込",
                     "Phase1",
                     "IMAP読取",
                     "今回の新着メール走査不可",
                     detail,
-                ));
+                );
+                return Phase1Outcome::Error {
+                    message: error_msg,
+                    attempts,
+                };
             }
         }
     }
@@ -261,27 +297,65 @@ mod tests {
     }
 }
 
-/// Phase1のIMAP接続/認証エラーなど、パイプライン全体が止まる致命的エラーをADMINへ即時通知する。
-/// Phase4の「要確認」集約通知（個別ドキュメント単位）とは別枠の即時アラート。
-async fn send_fatal_alert(pool: &PgPool, error: &str) {
-    let today = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+/// Phase1 が失敗した走査1回ぶんを通知ポリシーに記録し、必要なら管理者へ通知する。
+/// 一時的な通信障害は連続失敗が閾値に達するまで通知しない（alert_policy 参照）。
+async fn notify_phase1_failure(
+    pool: &PgPool,
+    attempts: &[alert_policy::AttemptRecord],
+    cfg: &alert_policy::AlertConfig,
+) {
+    // 分類は ops_message::fail で包む前の生のエラー（最後の試行）で行う
+    let raw_error = attempts.last().map(|a| a.error.as_str()).unwrap_or("");
+    let kind = ops_message::classify_phase1_fatal(raw_error);
+    let now = chrono::Local::now();
+    match alert_policy::record_failure(kind, now, cfg) {
+        alert_policy::Decision::Alert { failed_runs, since } => {
+            let msg = alert_policy::build_fatal_alert(raw_error, attempts, failed_runs, since, now);
+            notify_admins(pool, &msg).await;
+        }
+        alert_policy::Decision::Suppress { failed_runs } => {
+            tracing::warn!(
+                "[Pipeline] Phase1失敗の管理者通知を見送り: 種別={kind:?} 連続失敗={failed_runs}回（通信障害は{}回連続で通知、通知済みの障害は{}時間ごとに再通知）",
+                cfg.network_threshold_runs,
+                cfg.repeat_hours
+            );
+        }
+        _ => {}
+    }
+}
 
-    // 原因種別を分類して、件名とアドバイスを切り替える
-    let kind = ops_message::classify_phase1_fatal(error);
-    let copy = ops_message::fatal_alert_copy(kind);
+/// Phase1 が成功した。通知済みの障害があれば復旧のお知らせを送る。
+async fn notify_phase1_recovery(pool: &PgPool) {
+    match alert_policy::record_success() {
+        alert_policy::Decision::Recovered { failed_runs, since } => {
+            let msg = alert_policy::build_recovery_notice(failed_runs, since, chrono::Local::now());
+            notify_admins(pool, &msg).await;
+        }
+        alert_policy::Decision::SelfHealed { failed_runs } => {
+            tracing::info!("[Pipeline] Phase1が通知前に自然復旧しました（連続失敗{failed_runs}回）");
+        }
+        _ => {}
+    }
+}
 
-    // メールでの通知は自社SMTP(=IMAPと同じGmailアカウント認証情報)経由のため、
-    // 今回の致命的エラーがまさにその認証情報自体の問題だった場合は送信も失敗し、
-    // 管理者に何も届かないまま長時間気づかれない恐れがある。Google Chat Webhookはこの認証情報と無関係な
-    // 別チャネルのため、メールと併用して必ず投稿する。
-    let chat_text = format!(
-        "*【Sophia】{} ({today})*\n{error}\n\n\
-         ※これはダッシュボード一覧への書き込み失敗とは別です。\
-         {}\n\
-         （既に取込済みのメールへの影響はありません）",
-        copy.title, copy.advice
-    );
-    crate::domain::services::chat_notifier::post(&chat_text).await;
+/// 特定のメールだけが保存できない状態が続いていれば、1回だけ管理者へ通知する。
+async fn notify_persistent_mail_errors(pool: &PgPool, errors: &[String], cfg: &alert_policy::AlertConfig) {
+    let now = chrono::Local::now();
+    for error_line in alert_policy::record_mail_errors(errors, cfg) {
+        let msg = alert_policy::build_mail_error_alert(&error_line, cfg.mail_error_runs, now);
+        notify_admins(pool, &msg).await;
+    }
+}
+
+/// 管理者へ Google Chat とメールの両方で通知する。
+///
+/// メールでの通知は自社SMTP(=IMAPと同じGmailアカウント認証情報)経由のため、
+/// 障害がまさにその認証情報自体の問題だった場合は送信も失敗し、
+/// 管理者に何も届かないまま長時間気づかれない恐れがある。
+/// Google Chat Webhookはこの認証情報と無関係な
+/// 別チャネルのため、メールと併用して必ず投稿する。
+async fn notify_admins(pool: &PgPool, msg: &alert_policy::AlertMessage) {
+    crate::domain::services::chat_notifier::post(&msg.chat).await;
 
     // s_userにrole列は存在しない。ADMIN判定は is_staff=TRUE（role.rs::get_role()と同じ基準）。
     let admin_email_result: Result<Option<(String,)>, sqlx::Error> = sqlx::query_as(
@@ -293,14 +367,14 @@ async fn send_fatal_alert(pool: &PgPool, error: &str) {
     let admin_email = match admin_email_result {
         Ok(Some((email,))) => email,
         Ok(None) => {
-            tracing::error!("[Pipeline] ADMINユーザーが見つからず致命的エラーアラートメールを送信できません(Chatへは投稿試行済み)");
+            tracing::error!("[Pipeline] ADMINユーザーが見つからず管理者通知メールを送信できません(Chatへは投稿試行済み): {}", msg.subject);
             return;
         }
         Err(e) => {
             ops_message::log_error(&ops_message::fail(
                 "メール取込",
-                "Phase1",
-                "致命アラートの宛先読取",
+                "Pipeline",
+                "管理者通知の宛先読取",
                 "管理者メールは送れない（Chatへは投稿試行済み）",
                 ops_message::format_sqlx(&e),
             ));
@@ -308,23 +382,10 @@ async fn send_fatal_alert(pool: &PgPool, error: &str) {
         }
     };
 
-    let subject = format!("【Sophia】{} ({today})", copy.title);
-    let body = format!(
-        "管理者各位\n\nメール自動取込のPhase1（新着メール走査）で致命的エラーが発生し、\
-         今回の走査は実行できませんでした。\n\
-         ※ダッシュボード「メールチェック一覧」への書き込み失敗とは別の障害です。\n\n\
-         原因分類: {}\n\n\
-         エラー内容:\n{error}\n\n\
-         対応:\n{}\n\n\
-         （既に取込済みのメールへの影響はありません。IMAPロック中でなければ次回スケジューラ実行時に\
-         自動的に再試行されます。ロック中の場合は管理者が手動で解除するまで自動実行されません）\n",
-        copy.title, copy.advice
-    );
-
     let email_svc = crate::domain::services::email_service::EmailService::new(pool.clone());
-    if let Err(e) = email_svc.send(&admin_email, None, &subject, &body).await {
-        tracing::error!("[Pipeline] 致命的エラーアラートメール送信失敗(Chatへは投稿試行済み): {e}");
+    if let Err(e) = email_svc.send(&admin_email, None, &msg.subject, &msg.body).await {
+        tracing::error!("[Pipeline] 管理者通知メール送信失敗(Chatへは投稿試行済み): {} | {e}", msg.subject);
     } else {
-        tracing::info!("[Pipeline] 致命的エラーアラート送信完了 → {admin_email}");
+        tracing::info!("[Pipeline] 管理者通知送信完了 → {admin_email}: {}", msg.subject);
     }
 }

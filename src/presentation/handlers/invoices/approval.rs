@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use crate::presentation::middleware::role::AuthUser;
 use crate::presentation::api_response::AppError;
 
-/// POST /api/invoices/{id}/approve — 承認（Admin限定、PENDING_APPROVAL→APPROVED）
+/// POST /api/invoices/{id}/approve — 承認（Admin限定、PENDING_APPROVAL/REJECTED→APPROVED）
 pub async fn api_approve(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
@@ -20,13 +20,13 @@ pub async fn api_approve(
     match approve_invoice(&pool, id, auth_user.user.id).await {
         Ok(true) => Ok(axum::Json(serde_json::json!({ "success": true })).into_response()),
         Ok(false) => Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
-            "success": false, "error": "承認待ちの請求書のみ承認できます（既に承認済み、または送信済みの可能性があります）"
+            "success": false, "error": "承認待ち・差戻しの請求書のみ承認できます（既に承認済み、または送信済みの可能性があります）"
         }))).into_response()),
         Err(e) => Err(AppError::from(e)),
     }
 }
 
-/// POST /api/invoices/{id}/reject — 差戻し（Admin限定、APPROVED→PENDING_APPROVAL）
+/// POST /api/invoices/{id}/reject — 差戻し（Admin限定、PENDING_APPROVAL/APPROVED→REJECTED）
 pub async fn api_reject(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
@@ -36,7 +36,7 @@ pub async fn api_reject(
     match reject_invoice(&pool, id).await {
         Ok(true) => Ok(axum::Json(serde_json::json!({ "success": true })).into_response()),
         Ok(false) => Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
-            "success": false, "error": "承認済みの請求書のみ差し戻せます"
+            "success": false, "error": "承認待ちまたは承認済みの請求書のみ差し戻せます"
         }))).into_response()),
         Err(e) => Err(AppError::from(e)),
     }

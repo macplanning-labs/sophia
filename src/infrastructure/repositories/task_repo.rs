@@ -189,7 +189,7 @@ pub async fn list_pending_report_reminders(pool: &PgPool, lead_days: i32) -> Res
            WHERE mt.task_type = 'REPORT_UPLOAD'
              AND mt.status = 'PENDING'
              AND mt.reminder_sent = false
-             AND mt.deadline - $1 <= CURRENT_DATE
+             AND mt.deadline - $1::int <= CURRENT_DATE
              AND p.email IS NOT NULL AND p.email != ''
            GROUP BY p.partner_id, p.name, p.email, DATE_TRUNC('month', mt.work_month)
            ORDER BY p.name, work_month"#

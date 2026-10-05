@@ -1,20 +1,25 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { fetchReceivedEmails, apiPost, apiDelete } from "@/lib/api";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ExternalLink, CheckCircle2, X, Trash2 } from "lucide-react";
+import { ExternalLink, CheckCircle2, X, Trash2, FileSpreadsheet } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { DataTableWrapper } from "@/components/ui/data-table-wrapper";
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
 import { toast } from "sonner";
 import type { ReceivedEmailRow } from "@/lib/types";
+import Link from "next/link";
+
+const isTimesheetMail = (e: ReceivedEmailRow) =>
+  e.source_type === "ATTACHMENT" && /\.(pdf|xlsx|xlsm|xls)$/i.test(e.attachment_filename ?? "");
 
 const SOURCE_TYPE_LABEL: Record<string, string> = {
-  EDI_API: "EDI-OASIS",
+  EDI_API: "取引先EDI",
   ATTACHMENT: "添付ファイル",
   IGNORED: "対象外",
   UNKNOWN: "不明",
@@ -39,13 +44,26 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 export default function ReceivedEmailsPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">読み込み中...</div>}>
+      <ReceivedEmailsContent />
+    </Suspense>
+  );
+}
+
+function ReceivedEmailsContent() {
   const queryClient = useQueryClient();
-  const [needsReviewOnly, setNeedsReviewOnly] = useState(true);
-  const [knownDomainOnly, setKnownDomainOnly] = useState(true);
+  // ダッシュボードのカードから送信者指定で来た場合は、要確認以外も含め全件から絞り込む
+  const searchParams = useSearchParams();
+  const initialFrom = searchParams.get("from") ?? "";
+  const initialOpenId = Number(searchParams.get("open") ?? "") || null;
+  const [needsReviewOnly, setNeedsReviewOnly] = useState(!initialFrom);
+  const [knownDomainOnly, setKnownDomainOnly] = useState(!initialFrom);
   const [previewEmail, setPreviewEmail] = useState<ReceivedEmailRow | null>(null);
+  const [openedFromUrl, setOpenedFromUrl] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [sourceFilter, setSourceFilter] = useState("");
-  const [fromFilter, setFromFilter] = useState("");
+  const [fromFilter, setFromFilter] = useState(initialFrom);
   const [statusFilter, setStatusFilter] = useState("");
 
   const { data, isLoading } = useQuery({
@@ -54,6 +72,16 @@ export default function ReceivedEmailsPage() {
   });
 
   const emails = data?.emails ?? [];
+
+  // ダッシュボードのカードから「open=<メールID>」で来たときは、そのメールの内容を最初から開く
+  useEffect(() => {
+    if (openedFromUrl || !initialOpenId) return;
+    const target = emails.find((e) => e.id === initialOpenId);
+    if (target) {
+      setPreviewEmail(target);
+      setOpenedFromUrl(true);
+    }
+  }, [emails, initialOpenId, openedFromUrl]);
 
   const sourceOptions = useMemo(() => {
     const types = new Set(emails.map((e) => e.source_type).filter(Boolean));
@@ -291,6 +319,15 @@ export default function ReceivedEmailsPage() {
                         <CheckCircle2 className="w-3.5 h-3.5" /> 確認済みにする
                       </button>
                     )}
+                    {isTimesheetMail(e) && (
+                      <Link
+                        href="/timesheet-matching"
+                        className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-sky-500/10 text-sky-400 border border-sky-500/30 hover:bg-sky-500/20 transition-colors"
+                        title="勤務表を受注に結び付けて、稼働報告に取り込む"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5" /> 勤務表を取り込む
+                      </Link>
+                    )}
                     <button
                       onClick={() => deleteMutation.mutate([e.id])}
                       disabled={deleteMutation.isPending}
@@ -394,6 +431,14 @@ export default function ReceivedEmailsPage() {
                 >
                   <Trash2 className="w-3.5 h-3.5" /> 削除
                 </button>
+                {isTimesheetMail(previewEmail) && (
+                  <Link
+                    href="/timesheet-matching"
+                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-sky-500/10 text-sky-400 border border-sky-500/30 hover:bg-sky-500/20 transition-colors"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" /> 勤務表を取り込む
+                  </Link>
+                )}
                 {previewEmail.needs_manual_review && (
                   <button
                     onClick={() => { resolveMutation.mutate(previewEmail.id); setPreviewEmail(null); }}

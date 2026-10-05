@@ -4,6 +4,7 @@ use axum::{
     extract::{Path, State},
     response::IntoResponse,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::domain::models::billing::BillingInvoice;
@@ -50,13 +51,13 @@ pub async fn api_email_preview(
 ) -> Result<impl IntoResponse, AppError> {
     use crate::domain::services::email_service::{EmailService, compose_invoice_email};
 
-    let invoice = billing_repo::find_invoice(&pool, id).await.ok().flatten();
+    let invoice = billing_repo::find_invoice(&pool, id).await.log_err().ok().flatten();
 
     let Some(invoice) = invoice else {
         return Ok((axum::http::StatusCode::NOT_FOUND, "請求書が見つかりません").into_response());
     };
 
-    let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.unwrap_or_default();
+    let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.log_err().unwrap_or_default();
     let (to_email, cc_email) = billing_repo::resolve_invoice_send_recipients(
         &pool, invoice.client_id, invoice.received_order_id,
     ).await.unwrap_or((None, None));
@@ -100,7 +101,7 @@ pub async fn send_mail(
     use crate::domain::services::email_service::{EmailService, compose_invoice_email};
 
     // 請求書情報を取得（承認済み、または送信済み＝再送信のもののみ送信可）
-    let invoice = billing_repo::find_invoice(&pool, id).await.ok().flatten();
+    let invoice = billing_repo::find_invoice(&pool, id).await.log_err().ok().flatten();
 
     let invoice = match invoice {
         Some(inv) => inv,

@@ -492,7 +492,7 @@ pub fn build_v1_api() -> serde_json::Value {
 ///
 /// 認証は Cookie `sophia_jwt`（Admin）。実キーや接続文字列はスキーマに載せない。
 pub fn build_internal_v1_api() -> serde_json::Value {
-    json!({
+    let mut api = json!({
         "openapi": "3.0.0",
         "info": {
             "title": "Sophia /api/v1 Internal API",
@@ -694,6 +694,61 @@ pub fn build_internal_v1_api() -> serde_json::Value {
                         "403": {"description": "権限不足"}
                     }
                 }
+            },
+            "/documents/search": {
+                "get": {
+                    "tags": ["documents"],
+                    "summary": "帳票横断検索",
+                    "operationId": "search_documents",
+                    "security": [{"CookieAuth": []}],
+                    "parameters": [
+                        {
+                            "name": "q",
+                            "in": "query",
+                            "description": "検索クエリ（1文字以上、空白のみはNG）",
+                            "required": true,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "types",
+                            "in": "query",
+                            "description": "帳票種別（カンマ区切り: received_order,order,invoice,notice。省略時は全種別）",
+                            "required": false,
+                            "schema": {"type": "string"}
+                        },
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "description": "最大件数（既定20、最大50）",
+                            "required": false,
+                            "schema": {"type": "integer", "format": "int32", "default": 20}
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "検索成功",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "array",
+                                        "items": {"$ref": "#/components/schemas/DocumentSearchResult"}
+                                    }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "不正なパラメータ",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/ApiError"}
+                                }
+                            }
+                        },
+                        "401": {"description": "認証失敗"},
+                        "403": {"description": "権限不足（Admin専用）"},
+                        "500": {"description": "サーバーエラー"}
+                    }
+                }
             }
         },
         "components": {
@@ -764,6 +819,28 @@ pub fn build_internal_v1_api() -> serde_json::Value {
                         "uploaded": {"type": "integer", "format": "int64"},
                         "approved": {"type": "integer", "format": "int64"}
                     }
+                },
+                "DocumentSearchResult": {
+                    "type": "object",
+                    "required": ["type", "id", "number", "title", "counterparty", "status", "url"],
+                    "properties": {
+                        "type": {"type": "string", "enum": ["received_order", "order", "invoice", "notice"], "description": "帳票種別"},
+                        "id": {"type": "string", "description": "ID（受注書ID、発注書ID、請求書番号、支払通知ID）"},
+                        "number": {"type": "string", "description": "番号表示"},
+                        "title": {"type": "string", "description": "タイトル（案件名、件名等）"},
+                        "counterparty": {"type": "string", "description": "取引先名"},
+                        "status": {"type": "string", "description": "状態"},
+                        "month": {"type": "string", "format": "date", "nullable": true, "description": "対象月（YYYY-MM形式）"},
+                        "url": {"type": "string", "description": "詳細URL"}
+                    }
+                },
+                "ApiError": {
+                    "type": "object",
+                    "required": ["success", "error"],
+                    "properties": {
+                        "success": {"type": "boolean", "enum": [false]},
+                        "error": {"type": "string", "description": "エラーメッセージ"}
+                    }
                 }
             },
             "securitySchemes": {
@@ -789,9 +866,162 @@ pub fn build_internal_v1_api() -> serde_json::Value {
                 "description": "稼働報告管理 API"
             },
             {
+                "name": "documents",
+                "description": "帳票横断検索 API"
+            },
+            {
                 "name": "settings",
                 "description": "設定・管理 API"
             }
         ]
+    });
+    // json! マクロの再帰上限を超えるため、請求書の確定まわりは別に組み立てて差し込む
+    api["paths"]["/billing/preview"] = billing_preview_path();
+    api["paths"]["/billing/confirm"] = billing_confirm_path();
+    api["paths"]["/assignments"] = assignments_create_path();
+    api["paths"]["/assignments/preview"] = assignments_preview_path();
+    api["paths"]["/assignments/overview"] = assignments_overview_path();
+    if let Some(tags) = api["tags"].as_array_mut() {
+        tags.push(json!({"name": "billing", "description": "請求書のプレビューと確定 API"}));
+        tags.push(json!({"name": "assignments", "description": "アサイン(受注契約+発注契約)の作成と利益試算 API"}));
+    }
+    api
+}
+
+fn billing_preview_path() -> serde_json::Value {
+    json!({
+                "get": {
+                    "tags": ["billing"],
+                    "summary": "請求書のプレビュー(保存しない)",
+                    "description": "承認済みの勤務表から、請求書ごとの明細・合計・あと何名(missing)・確定できるか(confirmable)を計算して返す。取引先の請求単位(案件ごと/取引先まとめ)に従う。管理者専用。",
+                    "operationId": "billing_preview",
+                    "security": [{"CookieAuth": []}],
+                    "parameters": [
+                        {"name": "month", "in": "query", "required": true, "description": "対象月(YYYY-MM)", "schema": {"type": "string"}},
+                        {"name": "client_id", "in": "query", "required": false, "description": "取引先ID(省略時は全取引先)", "schema": {"type": "integer", "format": "int64"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "プレビュー: {month, invoices[{key, client_id, client_name, billing_unit, project_id, subject, items, subtotal, tax_amount, total, missing, already_issued_count, confirmable, edi_excluded}]}"},
+                        "400": {"description": "month が不正"},
+                        "403": {"description": "権限不足(管理者専用)"}
+                    }
+                }
+            })
+}
+
+fn billing_confirm_path() -> serde_json::Value {
+    json!({
+                "post": {
+                    "tags": ["billing"],
+                    "summary": "請求書の確定",
+                    "description": "取引先×月の排他ロックの中で再計算し、請求書を作る。揃っていない場合は force=true と force_reason(必須)と、遅れている契約ごとの force_actions(NEXT_MONTH=翌月回し / SECOND_INVOICE=当月2通目)で強制確定でき、履歴が残る。請求書を先方が作る取引先（先方の EDI で作成代行）は対象外。管理者専用。",
+                    "operationId": "billing_confirm",
+                    "security": [{"CookieAuth": []}],
+                    "requestBody": {
+                        "required": true,
+                        "content": {"application/json": {"schema": {
+                            "type": "object",
+                            "required": ["month", "keys"],
+                            "properties": {
+                                "month": {"type": "string", "description": "YYYY-MM"},
+                                "keys": {"type": "array", "items": {"type": "string"}, "description": "プレビューの行ID(最大50)"},
+                                "force": {"type": "boolean", "default": false},
+                                "force_reason": {"type": "string", "description": "force=true のとき必須(500文字以内)"},
+                                "force_actions": {"type": "array", "items": {"type": "object", "properties": {
+                                    "client_contract_id": {"type": "integer", "format": "int64"},
+                                    "action": {"type": "string", "enum": ["NEXT_MONTH", "SECOND_INVOICE"]}
+                                }}}
+                            }
+                        }}}
+                    },
+                    "responses": {
+                        "200": {"description": "確定: {success, created[{key, invoice_id, invoice_no, total}], skipped[{key, reason, missing}]}"},
+                        "400": {"description": "入力が不正(理由なしの強制確定、遅れている契約の扱いが未指定など)"},
+                        "403": {"description": "権限不足(管理者専用)"},
+                        "409": {"description": "勤務表が揃っていない/確定できる請求書がない(skipped に詳細)"}
+                    }
+                }
+            })
+}
+
+fn assignments_create_path() -> serde_json::Value {
+    json!({
+        "post": {
+            "tags": ["assignments"],
+            "summary": "アサイン作成",
+            "description": "既存の案件に要員をアサインする。受注契約は常に、発注契約(提案元パートナー)はパートナー要員(staff_type=PARTNER)のときだけ作る。自社社員(EMPLOYEE)に partner_contract を渡すと 400。1回で作り、途中で失敗したら全部取り消す。同じ要員・同じ開始日の受注契約が既にあれば 409。管理者専用。",
+            "operationId": "create_assignment",
+            "security": [{"CookieAuth": []}],
+            "requestBody": {
+                "required": true,
+                "content": {"application/json": {"schema": {
+                    "type": "object",
+                    "required": ["project_id", "staff_type", "client_contract"],
+                    "properties": {
+                        "project_id": {"type": "string"},
+                        "staff_type": {"type": "string", "enum": ["EMPLOYEE", "PARTNER"]},
+                        "engineer_id": {"type": "integer", "format": "int64", "description": "既存の要員(new_engineer とどちらか一方)"},
+                        "new_engineer": {"type": "object", "properties": {"name": {"type": "string"}, "name_kana": {"type": "string"}, "email": {"type": "string"}}},
+                        "client_contract": {"type": "object", "description": "start_date, end_date, base_rate, effort(既定1), lower_limit_hours, upper_limit_hours, fixed_hours, deduction_rate, overtime_rate, settlement_type(既定=上下割), remarks"},
+                        "partner_contract": {"type": "object", "description": "partner_id(提案元パートナー)と、client_contract と同じ項目 + work_location_name"}
+                    }
+                }}}
+            },
+            "responses": {
+                "201": {"description": "作成: {success, engineer_id, client_contract_id, partner_contract_id|null}"},
+                "400": {"description": "入力が不正(区分と発注契約の食い違い、日付・単価・精算幅など)"},
+                "403": {"description": "権限不足(管理者専用)"},
+                "404": {"description": "案件・提案元パートナー・要員が見つからない"},
+                "409": {"description": "同じ要員・同じ開始日の受注契約が既にある"}
+            }
+        }
     })
 }
+
+fn assignments_preview_path() -> serde_json::Value {
+    json!({
+        "post": {
+            "tags": ["assignments"],
+            "summary": "アサインの利益試算(保存しない)",
+            "description": "受注の単価・精算幅と、発注(パートナー要員のみ)から、月額の売上・原価・粗利・粗利率、稼働時間別の試算、案件の商流ごとの利益の目安との差、警告(赤字・目安未達・単価の桁・前回単価との差・精算幅のずれ)、案件全体の変化を返す。警告はアサインの作成を妨げない。管理者専用。",
+            "operationId": "preview_assignment",
+            "security": [{"CookieAuth": []}],
+            "requestBody": {
+                "required": true,
+                "content": {"application/json": {"schema": {
+                    "type": "object",
+                    "required": ["project_id", "client_contract"],
+                    "properties": {
+                        "project_id": {"type": "string"},
+                        "engineer_id": {"type": "integer", "format": "int64", "description": "既存の要員(前回単価との比較に使う)"},
+                        "client_contract": {"type": "object", "description": "base_rate, effort(既定1), lower_limit_hours, upper_limit_hours, fixed_hours, deduction_rate, overtime_rate"},
+                        "partner_contract": {"type": "object", "description": "同じ項目。自社社員は省略(原価が分からないため粗利は出ない)"}
+                    }
+                }}}
+            },
+            "responses": {
+                "200": {"description": "試算: {monthly, target{flow,target_pct,diff_pct,status}, hours_scenarios, warnings[{code,message}], project_total{before,after}}"},
+                "400": {"description": "単価・精算幅が不正"},
+                "403": {"description": "権限不足(管理者専用)"},
+                "404": {"description": "案件が見つからない"}
+            }
+        }
+    })
+}
+
+fn assignments_overview_path() -> serde_json::Value {
+    json!({
+        "get": {
+            "tags": ["assignments"],
+            "summary": "アサイン編成画面の案件一覧(利益つき)",
+            "description": "有効な案件(テスト案件を除く)ごとに、有効な契約の月額の売上・原価・粗利・粗利率、商流ごとの目安との差(status: OK/BELOW/UNSET/NOT_APPLICABLE)、アサイン数、うち自社社員の数(自社社員は原価が分からず、粗利に原価が含まれない)を返す。管理者専用。",
+            "operationId": "assignments_overview",
+            "security": [{"CookieAuth": []}],
+            "responses": {
+                "200": {"description": "{projects[{project_id, project_name, client_id, client_name, commercial_flow, assignment_count, internal_count, revenue, cost, gross_profit, margin_pct, target_pct, diff_pct, status}], targets{direct, subcontract}}"},
+                "403": {"description": "権限不足(管理者専用)"}
+            }
+        }
+    })
+}
+

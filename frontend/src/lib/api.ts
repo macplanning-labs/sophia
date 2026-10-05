@@ -265,7 +265,7 @@ import type {
   ClientContractRow, ReceivedOrderRow, ReceivedEmailRow, InvoiceRow,
   TimesheetApiResponse, TaskApiResponse,
   EmployeeRow, ExpenseRow, ExpenseItemForm, ExpenseDetail, PayrollApiResponse, UserRow, CompanyInfo,
-  ProjectRow, WizardResult, MailBriefsResponse,
+  ProjectRow, WizardResult, MailBriefsResponse, MemberRow, MemberDetail,
 } from "./types";
 
 export async function fetchClientContracts(): Promise<ClientContractRow[]> {
@@ -419,12 +419,35 @@ export async function fetchEngineerOptions(): Promise<{ id: number; name: string
   return fetchJson(`${BASE}/api/v1/engineers/options`);
 }
 
+// ── 要員(/members) ──
+
+export async function fetchMembers(): Promise<MemberRow[]> {
+  return fetchJson<MemberRow[]>(`${BASE}/api/v1/masters/engineers`);
+}
+
+export async function fetchMemberDetail(id: string): Promise<MemberDetail> {
+  return fetchJson<MemberDetail>(`${BASE}/api/v1/masters/engineers/${id}`);
+}
+
+export async function createMember(data: {
+  name: string;
+  name_kana?: string;
+  affiliation_type: string;
+  partner_id?: string;
+  employee_id?: string;
+  email?: string;
+}): Promise<MemberRow> {
+  return apiPost<MemberRow>(`${BASE}/api/v1/masters/engineers`, data);
+}
+
 // ── ログインユーザー情報 ──
 
 export interface CurrentUser {
   user_id: number;
   role: "ADMIN" | "EMPLOYEE" | "PARTNER" | "ENGINEER" | "ANONYMOUS";
   email: string;
+  /** 氏名(未設定なら null)。アカウントメニューの頭文字に使う */
+  display_name?: string | null;
   can_view_all_expenses?: boolean;
   can_view_all_payroll?: boolean;
   mfa_enabled?: boolean;
@@ -484,6 +507,14 @@ export async function fetchClientContractDetail(id: string): Promise<any> {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function fetchReceivedOrderDetail(id: string): Promise<any> {
   return fetchJson(`${BASE}/api/v1/received-orders/${id}`);
+}
+
+/** 契約が無い注文書から、受注契約を作って紐付ける（案件・技術者は注文書から特定。指定も可） */
+export async function createContractFromReceivedOrder(
+  id: string | number,
+  body: { project_id?: string; engineer_id?: number } = {}
+): Promise<ApiResult & { contract_id?: number }> {
+  return apiPost(`${BASE}/api/v1/received-orders/${id}/create-contract`, body);
 }
 
 /** 受注書に受注契約を手動紐付け */
@@ -586,6 +617,14 @@ export async function fetchOrderTimesheetRequestPreview(id: string): Promise<{
   partner_name?: string;
 }> {
   return fetchJson(`${BASE}/api/v1/orders/${id}/request-timesheet-preview`);
+}
+
+export async function approveNotice(id: string): Promise<ApiResult> {
+  return apiPost(`${BASE}/api/v1/notices/${id}/approve`, {});
+}
+
+export async function rejectNotice(id: string): Promise<ApiResult> {
+  return apiPost(`${BASE}/api/v1/notices/${id}/reject`, {});
 }
 
 export async function approveInvoice(id: string): Promise<ApiResult> {
@@ -699,30 +738,11 @@ export async function deleteMasterRecord(table: string, id: string): Promise<voi
   await apiDelete(`${BASE}/api/v1/masters/${table}/${id}`);
 }
 
-// ── EDI操作API ──
-
-export async function fetchEdiOrders(year: number, month: number): Promise<{ orders: EdiOrder[]; imported_order_numbers: string[] }> {
-  return fetchJson(`${BASE}/api/v1/edi/orders?year=${year}&month=${month}`);
-}
-
-export async function importEdiOrder(orderId: number): Promise<ApiResult> {
-  return apiPost(`${BASE}/api/v1/edi/orders/${orderId}/import`, {});
-}
-
-export async function fetchEdiInvoices(year: number, month: number): Promise<{ invoices: EdiInvoice[] }> {
-  return fetchJson(`${BASE}/api/v1/edi/invoices?year=${year}&month=${month}`);
-}
-
-export async function approveEdiInvoice(invoiceId: number): Promise<ApiResult> {
-  return apiPost(`${BASE}/api/v1/edi/invoices/${invoiceId}/approve`, {});
-}
+// ── 取引先 EDI の通知メールの処理 ──
+// 取引先の EDI へは、通知メールが届いたときだけ（メール取込の中で）接続する。画面から一覧・取込・承認はしない（DEMO-000148）
 
 export async function triggerEdiImport(): Promise<ApiResult> {
   return apiPost(`${BASE}/api/v1/edi/import`, {});
-}
-
-export async function triggerBillingImport(year: number, month: number): Promise<ApiResult> {
-  return apiPost(`${BASE}/api/v1/settlement/import-billings`, { year, month });
 }
 
 export async function triggerImportAll(year: number, month: number): Promise<ApiResult> {
@@ -872,25 +892,6 @@ export async function invitePortalEngineer(data: unknown): Promise<any> {
 
 // ── 型定義 ──
 
-export type EdiOrder = {
-  id: number;
-  order_no: string;
-  project_name: string;
-  worker_name: string;
-  amount: number;
-  status: string;
-  is_imported: boolean;
-};
-
-export type EdiInvoice = {
-  id: number;
-  invoice_no: string;
-  project_name: string;
-  amount: number;
-  status: string;
-  is_approved: boolean;
-};
-
 export type MailLog = {
   id: number;
   sender_name: string;
@@ -936,3 +937,32 @@ export async function revokeApiKey(id: string): Promise<ApiResult> {
   return apiPost<ApiResult>(`${BASE}/api/v1/settings/api-keys/${id}/revoke`, {});
 }
 
+// ── 請求書プレビュー・確定(新UI 3-4) ──
+
+import type { BillingPreviewResponse, BillingConfirmRequest, BillingConfirmResponse } from "./types";
+
+export async function fetchBillingPreview(month: string): Promise<BillingPreviewResponse> {
+  return fetchJson<BillingPreviewResponse>(`${BASE}/api/v1/billing/preview?month=${month}`);
+}
+
+export async function confirmBilling(req: BillingConfirmRequest): Promise<BillingConfirmResponse> {
+  return fetchJson<BillingConfirmResponse>(`${BASE}/api/v1/billing/confirm`, {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+
+// ── アサイン編成(新UI 3-2) ──
+
+export async function fetchAssignmentOverview(): Promise<import("./types").AssignmentOverview> {
+  return fetchJson(`${BASE}/api/v1/assignments/overview`);
+}
+
+export async function previewAssignment(req: unknown): Promise<import("./types").AssignmentPreview> {
+  return apiPost(`${BASE}/api/v1/assignments/preview`, req);
+}
+
+export async function createAssignment(req: unknown): Promise<import("./types").AssignmentCreateResult> {
+  return apiPost(`${BASE}/api/v1/assignments`, req);
+}

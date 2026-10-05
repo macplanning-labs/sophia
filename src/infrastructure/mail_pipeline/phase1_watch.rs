@@ -2,6 +2,7 @@
 ///
 /// 責務: last_processed_at 以降のメールをチェックポイント方式で走査し、
 ///       EDI_API / ATTACHMENT / IGNORED に分類して t_received_email に保存するだけ。
+///       EDI_API は、取引先マスタの「EDI通知メール」欄のアドレスから届いた通知メール。
 ///       添付バイナリの取得やEDI APIへのアクセスは行わない（Phase2の責務）。
 ///
 /// 「未読/既読」に依存しない設計:
@@ -9,21 +10,16 @@
 /// - どのメールを処理済みとするかは s_mail_sync_checkpoint.last_processed_at と
 ///   t_received_email.message_id の UNIQUE 制約のみで判断する。
 
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use super::checkpoint;
 use super::imap_util::{
-    decode_mime_string, extract_attachment_filenames, extract_body_text, fetch_since_blocking,
-    get_header_value, parse_email_date, parse_from_header, ImapConfig,
+    decode_mime_string, extract_attachment_filenames, extract_body_text_from_parts, fetch_since_blocking,
+    get_header_value, parse_email_date, parse_from_header, strip_nul, ImapConfig,
 };
 use super::ops_message;
 use crate::domain::models::mail_pipeline::{PipelineStatus, SourceType};
-
-// 件名に含まれるキーワード（いずれかがマッチすれば取込対象）
-const SUBJECT_KEYWORDS: &[&str] = &[
-    "稼働報告", "作業報告", "請求書", "勤怠", "報告書", "勤務表",
-    "支払通知", "承認", "注文書", "発注", "受注", "作業依頼",
-];
 
 /// Phase1実行結果
 #[derive(Debug, Default)]
@@ -80,7 +76,7 @@ pub async fn run(pool: &PgPool) -> Result<Phase1Result, String> {
     // connect_and_examine自体のタイムアウトはimap_util::IMAP_TIMEOUT（30秒）で保護済み。
     let raw_messages = tokio::task::spawn_blocking(move || fetch_since_blocking(&config, &since_str))
         .await
-        .map_err(|e| format!("IMAP読取タスクの実行に失敗しました: {e}"))??;
+        .map_err(|e| format!("メール読取タスクが異常終了しました: {e}"))??;
 
     if raw_messages.is_empty() {
         checkpoint::update_checkpoint(pool, &mailbox, run_started_at)
@@ -115,10 +111,11 @@ pub async fn run(pool: &PgPool) -> Result<Phase1Result, String> {
             }
         };
 
-        let message_id = get_header_value(&parsed_header, "Message-ID")
-            .unwrap_or_default()
-            .trim_matches(|c| c == '<' || c == '>' || c == ' ')
-            .to_string();
+        let message_id = strip_nul(
+            get_header_value(&parsed_header, "Message-ID")
+                .unwrap_or_default()
+                .trim_matches(|c| c == '<' || c == '>' || c == ' '),
+        );
 
         if message_id.is_empty() {
             continue;
@@ -142,19 +139,24 @@ pub async fn run(pool: &PgPool) -> Result<Phase1Result, String> {
         let subject_raw = get_header_value(&parsed_header, "Subject").unwrap_or_default();
         let date_raw = get_header_value(&parsed_header, "Date").unwrap_or_default();
 
+        // DB(text列)は NUL 文字を保存できないため、保存する文字列はすべて strip_nul を通す
         let (from_name, from_email) = parse_from_header(&from_raw);
-        let subject = decode_mime_string(&subject_raw);
-        let body_text = extract_body_text(body_bytes);
+        let (from_name, from_email) = (strip_nul(&from_name), strip_nul(&from_email));
+        let subject = strip_nul(&decode_mime_string(&subject_raw));
+        let body_text = strip_nul(&extract_body_text_from_parts(header_bytes, body_bytes));
 
         let all_bytes = [header_bytes, body_bytes].concat();
-        let attachment_names = extract_attachment_filenames(&all_bytes);
+        let attachment_names: Vec<String> = extract_attachment_filenames(&all_bytes)
+            .iter()
+            .map(|n| strip_nul(n))
+            .collect();
         let attachment_str = attachment_names.join(", ");
 
         let received_at = parse_email_date(&date_raw);
 
         // ── 分類: EDI_API / ATTACHMENT / IGNORED ──
         let classification =
-            classify(pool, &from_email, &subject, !attachment_names.is_empty()).await;
+            classify(pool, &from_email, !attachment_names.is_empty()).await;
         let source_type = classification.source_type;
 
         let status = if source_type == SourceType::Ignored {
@@ -239,40 +241,18 @@ struct Classification {
 async fn classify(
     pool: &PgPool,
     from_email: &str,
-    subject: &str,
     has_attachment: bool,
 ) -> Classification {
-    // EDI連携クライアント（m_client.edi_system_type='EDI_OASIS'、Phase2が年月ポーリング対象とする
-    // クライアントのみ）からの通知メールか。単なる非空判定だと「メールで受け取っている」等の
-    // 備考的な値を入れただけの非EDI連携クライアント（例: クロスシステム）まで誤って
-    // EdiApi分類してしまい、Phase2のポーリング対象にも入らないため添付が一切処理されなくなる
-    // （実際にクロスシステムでedi_system_type='EMAIL'という値が設定され発生した不具合）。
-    #[derive(sqlx::FromRow)]
-    struct EdiClientMatch {
-        id: i64,
-        name: String,
-    }
-    let edi_client: Option<EdiClientMatch> = sqlx::query_as(
-        "SELECT id, name FROM m_client WHERE LOWER(email) = LOWER($1) AND edi_system_type = 'EDI_OASIS' LIMIT 1",
-    )
-    .bind(from_email)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
-
-    if let Some(c) = edi_client {
-        // EDI連携先からの通知メールは、Phase2の年月ポーリングが別途処理するため
-        // このメール行自体はACK目的の記録のみ（分類の可視化用）。
+    // 取引先 EDI の通知メールか（差出人の照合は、取引先ごとのカスタマイズが行う）。
+    // 該当すれば、Phase2 がカスタマイズの中で、件名・本文を見て書類を取るか（取引先の EDI へ接続するか）を決める。
+    if let Some(sender) = crate::custom::edi_notice_sender(pool, from_email).await {
         return Classification {
             source_type: SourceType::EdiApi,
             partner_id: None,
-            client_id: Some(c.id),
-            client_name: Some(c.name),
+            client_id: Some(sender.client_id),
+            client_name: Some(sender.client_name),
         };
     }
-
-    let matches_filter = SUBJECT_KEYWORDS.iter().any(|kw| subject.contains(kw));
 
     // m_partner の主キーは partner_id VARCHAR(32)（id列は存在しない）。
     // 旧email_fetcher.rsは "SELECT id FROM m_partner" という誤ったクエリで
@@ -303,24 +283,33 @@ async fn classify(
     // ドメイン一致の判定（DB アクセス失敗は未照合扱いで続行）
     let domain_matches = crate::infrastructure::repositories::received_email_repo::sender_matches_known_domain(pool, from_email)
         .await
-        .unwrap_or(false);
+        .log_err().unwrap_or(false);
 
     let recognized = partner_id.is_some() || client_match.is_some() || domain_matches;
     let client_id = client_match.as_ref().map(|c| c.id);
     let client_name = client_match.map(|c| c.name);
 
-    let source_type = if has_attachment && (matches_filter || recognized) {
-        SourceType::Attachment
-    } else {
-        // 件名一致/送信元照合できたが添付なし（本文のみの通知等）→ 対象外として記録
-        // 未照合(recognized=false)の場合は partner_id/client_id を持ち込まない
-        SourceType::Ignored
-    };
-
-    if recognized || matches_filter {
+    let source_type = attachment_source_type(has_attachment, recognized);
+    if recognized {
         Classification { source_type, partner_id, client_id, client_name }
     } else {
-        Classification { source_type: SourceType::Ignored, partner_id: None, client_id: None, client_name: None }
+        // 未照合の場合は partner_id/client_id を持ち込まない
+        Classification { source_type, partner_id: None, client_id: None, client_name: None }
+    }
+}
+
+/// 添付付きメールを取込対象(ATTACHMENT)にするかを決める。
+///
+/// 送信元（アドレスまたはドメイン）が登録済みの取引先/パートナーと一致する場合だけ取り込む。
+/// 以前は件名キーワード（「請求書」等）だけでも取り込んでいたため、自社宛のSaaS利用料の請求メール
+/// （例: payments-noreply@google.com の Google Workspace 請求書）が取引先不明で毎月
+/// PARSE_FAILED・要確認通知になっていた。未照合のメールは IGNORED として記録だけ残す
+/// （ダッシュボードのメール取込一覧で後から確認できる）。
+fn attachment_source_type(has_attachment: bool, sender_recognized: bool) -> SourceType {
+    if has_attachment && sender_recognized {
+        SourceType::Attachment
+    } else {
+        SourceType::Ignored
     }
 }
 
@@ -401,5 +390,27 @@ pub(crate) fn classify_subject_label(subject: &str) -> String {
         "CONTRACT".to_string()
     } else {
         "OTHER".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unrecognized_sender_with_attachment_is_ignored() {
+        // Google Workspace の請求メール（件名に「請求書」、PDF添付あり、送信元は取引先外）
+        assert_eq!(attachment_source_type(true, false), SourceType::Ignored);
+    }
+
+    #[test]
+    fn recognized_sender_with_attachment_is_imported() {
+        assert_eq!(attachment_source_type(true, true), SourceType::Attachment);
+    }
+
+    #[test]
+    fn mail_without_attachment_is_ignored() {
+        assert_eq!(attachment_source_type(false, true), SourceType::Ignored);
+        assert_eq!(attachment_source_type(false, false), SourceType::Ignored);
     }
 }

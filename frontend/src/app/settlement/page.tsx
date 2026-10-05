@@ -14,7 +14,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { CreatedInvoicesModal } from "@/components/settlement/created-invoices-modal";
+
 import { SettlementReadinessPanel } from "@/components/settlement/settlement-readiness-panel";
 import { showActionableError } from "@/lib/actionable-error";
 import type { CreatedInvoice, CreatedNotice } from "@/lib/types";
@@ -124,6 +124,10 @@ function SettlementPageContent() {
 
   const handleDismissCreatedNotices = useCallback((partnerId: string) => {
     setCreatedNotices((prev) => prev.filter((n) => n.partner_id !== partnerId));
+  }, []);
+
+  const handleDismissCreatedInvoices = useCallback((clientId: number) => {
+    setCreatedInvoices((prev) => prev.filter((i) => i.client_id !== clientId));
   }, []);
 
   return (
@@ -239,12 +243,8 @@ function SettlementPageContent() {
         partners={partnerOptions}
         createdNotices={createdNotices}
         onDismissCreatedNotices={handleDismissCreatedNotices}
-      />
-
-      <CreatedInvoicesModal
-        open={createdInvoices.length > 0}
-        onClose={() => setCreatedInvoices([])}
-        invoices={createdInvoices}
+        createdInvoices={createdInvoices}
+        onDismissCreatedInvoices={handleDismissCreatedInvoices}
       />
     </div>
   );

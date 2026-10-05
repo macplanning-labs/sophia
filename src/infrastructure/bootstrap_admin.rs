@@ -178,7 +178,7 @@ pub async fn create_first_admin(pool: &sqlx::PgPool, input: &BootstrapInput)
     .await?;
 
     // コミット
-    tx.commit().await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
 
     Ok(Outcome::Created)
 }

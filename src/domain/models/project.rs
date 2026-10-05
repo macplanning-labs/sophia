@@ -23,6 +23,10 @@ pub struct Project {
     pub report_deadline_value: Option<i32>,
     /// FIXED_DAYが非営業日の場合の調整ルール: "PREVIOUS_BUSINESS_DAY" | "NEXT_BUSINESS_DAY"
     pub report_deadline_holiday_rule: Option<String>,
+    /// 商流: "DIRECT" (直営) | "SUBCONTRACT" (下請) | NULL (未指定)
+    pub commercial_flow: Option<String>,
+    /// テスト案件か: true の案件は除外対象（集計、通知、候補から）
+    pub is_test: bool,
 }
 
 impl Project {
@@ -53,6 +57,8 @@ pub struct ProjectWithClient {
     pub report_deadline_type: String,
     pub report_deadline_value: Option<i32>,
     pub report_deadline_holiday_rule: Option<String>,
+    pub commercial_flow: Option<String>,
+    pub is_test: bool,
 }
 
 /// 案件登録・編集フォーム

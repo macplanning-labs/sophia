@@ -26,6 +26,8 @@ pub async fn start_scheduler(pool: PgPool) {
     // Phase1(監視・分類)→Phase2(データソース取得)→Phase3(解析・登録)→Phase4(保存・通知)を
     // run_pipeline() が順に呼ぶ。ダッシュボードの手動トリガーAPIも同じ関数を呼ぶため、
     // 自動/手動でロジックが分岐・重複することはない。
+    // 取引先の EDI へは、要対応の通知メールが届いたときだけ接続する（crate::custom）。
+    // 15分毎に無条件で接続すると、毎回ログイン通知メールが届く（2026-10-05 障害）。
     //
     // MAIL_PIPELINE_ENABLED=false でこの自動ジョブのみ無効化できる（手動トリガーAPIは影響を受けない）。
     // ステージング環境でGmailの実アカウントに定期的にIMAPログインする必要がない場合に使用する。
@@ -41,7 +43,7 @@ pub async fn start_scheduler(pool: PgPool) {
             let pool = pool_clone.clone();
             Box::pin(async move {
                 tracing::info!("[スケジューラ] メール自動取込パイプライン開始");
-                let result = crate::infrastructure::mail_pipeline::run_pipeline(&pool, None).await;
+                let result = crate::infrastructure::mail_pipeline::run_pipeline(&pool).await;
                 tracing::info!("[スケジューラ] メール自動取込パイプライン完了: {result}");
             })
         });

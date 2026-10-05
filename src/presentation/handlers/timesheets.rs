@@ -14,6 +14,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::domain::models::timesheet::TimesheetStatus;
@@ -315,7 +316,7 @@ pub async fn api_detail(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let sheet = timesheet_repo::find_by_id(&pool, id).await.ok().flatten();
+    let sheet = timesheet_repo::find_by_id(&pool, id).await.log_err().ok().flatten();
 
     match sheet {
         Some(sheet) => {
@@ -353,7 +354,7 @@ pub async fn api_detail(
 
             // 関連メール
             let source_emails: Vec<serde_json::Value> = timesheet_repo::list_source_emails_for_timesheet(&pool, id)
-                .await.unwrap_or_default()
+                .await.log_err().unwrap_or_default()
             .iter().map(|r| serde_json::json!({
                 "from": r.0, "subject": r.1, "received_at": r.2, "status": r.3,
             })).collect();

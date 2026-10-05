@@ -15,6 +15,7 @@ use axum::{
     response::{IntoResponse, Redirect},
     Form,
 };
+use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use rust_decimal::Decimal;
 
@@ -218,7 +219,7 @@ pub async fn api_index(State(pool): State<PgPool>) -> Json<Vec<PartnerContractRo
 
 /// ロック判定: 紐づく発注書がACCEPTED以降ならtrue（contract_idで直接判定）
 async fn is_contract_id_locked(pool: &PgPool, contract_id: i64) -> bool {
-    order_repo::count_locked_orders_for_partner_contract(pool, contract_id).await.unwrap_or(0) > 0
+    order_repo::count_locked_orders_for_partner_contract(pool, contract_id).await.log_err().unwrap_or(0) > 0
 }
 
 /// GET /api/partner-contracts/{id} — 詳細（JSON）
@@ -226,7 +227,7 @@ pub async fn api_detail(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let row = order_repo::find_partner_contract_detail(&pool, id).await.ok().flatten();
+    let row = order_repo::find_partner_contract_detail(&pool, id).await.log_err().ok().flatten();
 
     match row {
         Some(r) => {
@@ -235,7 +236,7 @@ pub async fn api_detail(
 
             // 発注履歴
             let order_items: Vec<serde_json::Value> = order_repo::list_order_history_for_partner_contract(&pool, r.id)
-            .await.unwrap_or_default()
+            .await.log_err().unwrap_or_default()
             .iter().map(|row| serde_json::json!({
                 "order_id": row.0, "work_start": row.1, "work_end": row.2,
                 "base_fee": row.3, "actual_hours": row.4, "price": row.5,
@@ -243,7 +244,7 @@ pub async fn api_detail(
 
             // 支払通知履歴
             let notice_items: Vec<serde_json::Value> = order_repo::list_notice_history_for_partner_contract(&pool, r.id)
-            .await.unwrap_or_default()
+            .await.log_err().unwrap_or_default()
             .iter().map(|row| serde_json::json!({
                 "notice_id": row.0, "target_month": row.1,
                 "actual_hours": row.2, "amount": row.3,
@@ -311,7 +312,7 @@ pub async fn api_extend(
         }))).into_response()),
     };
 
-    let current = order_repo::find_partner_contract_detail(&pool, id).await.ok().flatten();
+    let current = order_repo::find_partner_contract_detail(&pool, id).await.log_err().ok().flatten();
     let current_end_date = match current {
         Some(c) => c.end_date,
         None => return Ok((axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({

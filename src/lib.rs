@@ -1,5 +1,6 @@
 /// Sophia — ライブラリ公開 API
 
+pub mod custom;
 pub mod config;
 pub mod domain;
 pub mod infrastructure;

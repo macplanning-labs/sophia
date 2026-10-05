@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
 import { fetchEmployees } from "@/lib/api";
@@ -12,6 +12,9 @@ import { DetailModal } from "@/components/ui/detail-modal";
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
 import { Plus } from "lucide-react";
 import EmployeeDetailPage from "./[id]/client";
+import { DateInput } from "@/components/ui/date-input";
+import { useCurrentUser } from "@/lib/useCurrentUser";
+import { useMounted } from "@/lib/useMounted";
 
 const EMPLOYMENT_TYPE_LABELS: Record<string, string> = {
   REGULAR: "正社員",
@@ -31,7 +34,12 @@ function EmployeesPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
-  const [editId, setEditId] = useState<string | null>(null);
+  const { isAdmin, isLoading: userLoading } = useCurrentUser();
+  const mounted = useMounted();
+  const showAdmin = isAdmin && mounted;
+  const urlEdit = searchParams.get("edit");
+  const [editId, setEditId] = useState<string | null>(urlEdit);
+  const [prevUrlEdit, setPrevUrlEdit] = useState<string | null>(urlEdit);
   const [nameFilter, setNameFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [activeFilter, setActiveFilter] = useState("");
@@ -41,10 +49,10 @@ function EmployeesPageContent() {
     queryFn: fetchEmployees,
   });
 
-  useEffect(() => {
-    const fromUrl = searchParams.get("edit");
-    if (fromUrl) setEditId(fromUrl);
-  }, [searchParams]);
+  if (urlEdit !== prevUrlEdit) {
+    setPrevUrlEdit(urlEdit);
+    if (urlEdit) setEditId(urlEdit);
+  }
 
   const openEdit = useCallback((id: string | number) => {
     const idStr = String(id);
@@ -57,7 +65,7 @@ function EmployeesPageContent() {
     router.replace("/employees", { scroll: false });
   }, [router]);
 
-  const rows = employees ?? [];
+  const rows = useMemo(() => employees ?? [], [employees]);
 
   const nameOptions = useMemo(() => {
     const map = new Map<string, string>();
@@ -113,13 +121,19 @@ function EmployeesPageContent() {
 
   const createMutation = useMutation({
     mutationFn: async () => {
+      if (!form.employee_id.trim()) {
+        throw new Error("社員コードは必須です");
+      }
       const res = await fetch("/api/v1/employees", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify(form),
       });
-      if (!res.ok) throw new Error("作成に失敗しました");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || "作成に失敗しました");
+      }
       return res.json();
     },
     onSuccess: () => {
@@ -139,9 +153,11 @@ function EmployeesPageContent() {
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-end">
-        <Button size="sm" onClick={() => setShowCreate(true)} className="gap-1.5">
-          <Plus className="w-3.5 h-3.5" /> 新規作成
-        </Button>
+        {showAdmin && !userLoading && (
+          <Button size="sm" onClick={() => setShowCreate(true)} className="gap-1.5">
+            <Plus className="w-3.5 h-3.5" /> 新規作成
+          </Button>
+        )}
       </div>
       <div className="bg-card border border-border rounded-lg overflow-hidden">
         {isLoading ? (
@@ -190,7 +206,9 @@ function EmployeesPageContent() {
                 <TableRow><TableCell colSpan={7} className="text-center py-12 text-muted-foreground">条件に一致するデータがありません</TableCell></TableRow>
               ) : filteredEmployees.map((e) => (
                 <TableRow key={e.id} className="border-border/50 cursor-pointer hover:bg-accent/50" onClick={() => openEdit(e.id)}>
-                  <TableCell className="text-sm font-mono text-muted-foreground">{e.employee_id}</TableCell>
+                  <TableCell className={`text-sm font-mono ${!e.employee_id?.trim() ? "text-amber-400" : "text-muted-foreground"}`}>
+                    {!e.employee_id?.trim() ? "未設定" : e.employee_id}
+                  </TableCell>
                   <TableCell className="text-sm font-medium">{e.last_name}{e.first_name}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{EMPLOYMENT_TYPE_LABELS[e.employment_type] ?? e.employment_type}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{e.hire_date ?? "—"}</TableCell>
@@ -211,15 +229,16 @@ function EmployeesPageContent() {
       </div>
 
       {/* 新規作成モーダル */}
-      <FormModal
-        open={showCreate}
-        title="社員新規作成"
-        size="lg"
-        loading={createMutation.isPending}
-        submitLabel="登録"
-        onSubmit={() => createMutation.mutate()}
-        onClose={() => setShowCreate(false)}
-      >
+      {showAdmin && (
+        <FormModal
+          open={showCreate}
+          title="社員新規作成"
+          size="lg"
+          loading={createMutation.isPending}
+          submitLabel="登録"
+          onSubmit={() => createMutation.mutate()}
+          onClose={() => setShowCreate(false)}
+        >
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-xs text-muted-foreground mb-1">社員番号 *</label>
@@ -285,8 +304,8 @@ function EmployeesPageContent() {
           </div>
           <div>
             <label className="block text-xs text-muted-foreground mb-1">入社日</label>
-            <input
-              type="date"
+            <DateInput
+              
               className="w-full px-3 py-2 bg-muted border border-border rounded-lg text-sm text-foreground"
               value={form.hire_date}
               onChange={(e) => setForm({ ...form, hire_date: e.target.value })}
@@ -302,7 +321,8 @@ function EmployeesPageContent() {
             />
           </div>
         </div>
-      </FormModal>
+        </FormModal>
+      )}
 
       {editId && (
         <DetailModal open title={`社員 #${editId}`} icon="👤" size="xl" onClose={closeEdit}>

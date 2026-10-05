@@ -12,6 +12,11 @@ repository = "https://github.com/macplanning-labs/sophia"
 # export_openapi 等の補助バイナリがあるため、`cargo run` の既定をアプリ本体に固定する
 default-run = "sophia"
 
+[features]
+# 当社カスタマイズ（取引先ごとの連携）は公開版に含めない。src/custom/registry.rs が無いため custom は有効にできない
+default = []
+custom = []
+
 [dependencies]
 # 認証共通ライブラリ（公開ビルド用に crates/ へ同梱）
 auth-core = { path = "crates/auth-core" }
@@ -122,3 +127,8 @@ tokio-cron-scheduler = "0.13"
 pdf-extract = "0.12"
 jpholiday = "0.2.0"
 
+
+# DB結合テスト（tests/sql_contract.rs）: コードの中のSQLを、構文解析で取り出して、実DBに準備させる
+[dev-dependencies]
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

@@ -4,6 +4,7 @@
 /// - GET  /received-emails          — 一覧（ステータスフィルタ）
 /// - POST /received-emails/{id}/import — 稼働報告取込
 
+use crate::infrastructure::db_tx::LogErr;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect};
 use sqlx::PgPool;
@@ -47,7 +48,7 @@ pub async fn api_index(
     let filter_status = params.status.unwrap_or_default();
     let emails = received_email_repo::list_received_emails(&pool, &filter_status, params.needs_review, params.known_domain_only)
         .await
-        .unwrap_or_default();
+        .log_err().unwrap_or_default();
     axum::Json(serde_json::json!({ "emails": emails }))
 }
 
