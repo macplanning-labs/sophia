@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
 import { AppHeader } from "@/components/layout/app-header";
+import { IntegrationAlertBanner } from "@/components/layout/integration-alert-banner";
+import { SectionTabs } from "@/components/layout/section-tabs";
 import { QueryProvider } from "@/providers/query-provider";
 import { MonthProvider } from "@/lib/MonthContext";
 import { CommandPaletteProvider } from "@/lib/CommandPaletteContext";
@@ -35,7 +37,9 @@ export default function RootLayout({
                 <Sidebar />
                 <div className="flex-1 flex flex-col min-w-0 min-h-0">
                   <AppHeader />
-                  <main className="flex-1 min-h-0 overflow-auto">
+                  <IntegrationAlertBanner />
+                  <SectionTabs />
+                  <main className="flex-1 min-h-0 overflow-auto pb-16">{/* 下に余白を取り、最後の行まで見えるようにする(DEMO-000197) */}
                     <MfaSetupGate>{children}</MfaSetupGate>
                   </main>
                 </div>

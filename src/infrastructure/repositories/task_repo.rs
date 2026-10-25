@@ -4,6 +4,9 @@ use anyhow::Result;
 use chrono::NaiveDate;
 use sqlx::PgPool;
 
+use super::stamp_repo;
+use crate::domain::authz::stamp::StampMode;
+
 use crate::domain::models::task::MonthlyTask;
 
 /// タスク一覧（月指定）
@@ -109,11 +112,14 @@ pub async fn insert_task(
     responsible: &str,
     deadline: NaiveDate,
 ) -> Result<()> {
+    // 担当スタンプ: 案件 → 顧客の順に写す(設計書 §6.6)
+    let mut conn = pool.acquire().await?;
+    let stamp = stamp_repo::for_project_child(&mut conn, project_id, "t_monthly_task", StampMode::Manual).await?;
     sqlx::query(
         r#"INSERT INTO t_monthly_task (
             project_id, engineer_id, work_month, task_type,
-            responsible, deadline, status, note
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', '')"#
+            responsible, deadline, status, note, owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', '', $7, $8)"#
     )
     .bind(project_id)
     .bind(engineer_id)
@@ -121,7 +127,9 @@ pub async fn insert_task(
     .bind(task_type)
     .bind(responsible)
     .bind(deadline)
-    .execute(pool)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }

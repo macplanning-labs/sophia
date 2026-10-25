@@ -36,9 +36,8 @@ export default function PeppolTransmissionsPage() {
   const rows = data ?? [];
 
   return (
-    <div className="space-y-4">
+    <div className="p-6 space-y-4">
       <PageHeader
-        subtitle="Peppol送受信ログ"
         actions={
           <Button variant="outline" size="sm" onClick={() => setShowAll((v) => !v)}>
             {showAll ? "未処理のみ表示" : "すべて表示"}

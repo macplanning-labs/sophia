@@ -4,8 +4,9 @@
 /// create, update は業務固有のためここに残す。
 
 use anyhow::Result;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
+use crate::domain::authz::stamp::OwnerStamp;
 use crate::domain::models::client::Client;
 
 // ── 共通CRUD（マクロ生成）──
@@ -39,23 +40,36 @@ pub struct ClientFormInput<'a> {
     pub invoice_email: &'a str,
 }
 
-/// クライアント登録（クライアント管理画面フォームから）
-pub async fn create(pool: &PgPool, form: ClientFormInput<'_>) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO m_client (name, contact_person, email, phone, address, edi_system_type, edi_notification_email, work_report_email, invoice_email) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+/// 新規登録する取引先(顧客)の入力。担当(組織・担当者)は別引数のスタンプで渡す。
+pub struct NewClient<'a> {
+    pub name: &'a str,
+    pub contact_person: &'a str,
+    pub email: &'a str,
+    pub phone: &'a str,
+    pub address: &'a str,
+    /// 請求単位(`PROJECT` / `CLIENT`)。呼び出し側で検証済みであること
+    pub billing_unit: &'a str,
+}
+
+/// 取引先(顧客)を登録して ID を返す。担当スタンプは必須(組織と担当者がそろったもの)。
+///
+/// 担当は登録時にだけ入れる。更新(`update`)は担当を変えない(変更は担当の付け替えAPIだけ。設計書 U11)。
+pub async fn create(conn: &mut PgConnection, form: &NewClient<'_>, stamp: &OwnerStamp) -> Result<i64> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO m_client (name, contact_person, email, phone, address, billing_unit, owner_org_unit_id, owner_employee_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(form.name)
     .bind(form.contact_person)
     .bind(form.email)
     .bind(form.phone)
     .bind(form.address)
-    .bind(form.edi_system_type)
-    .bind(form.edi_notification_email)
-    .bind(form.work_report_email)
-    .bind(form.invoice_email)
-    .execute(pool)
+    .bind(form.billing_unit)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
+    .fetch_one(&mut *conn)
     .await?;
-    Ok(())
+    Ok(id)
 }
 
 /// クライアント更新（クライアント管理画面フォームから）

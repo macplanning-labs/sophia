@@ -61,7 +61,7 @@ interface TimesheetPreviewProps {
   canConfirm?: boolean;
   /** 左右パネルの上に差し込む欄（メール取込での「結び付ける受注」など） */
   header?: ReactNode;
-  /** 下のボタン行の、キャンセルの前に差し込むボタン（メール取込での「差し戻し」など） */
+  /** 下のボタン行の、右端に差し込む例外のボタン（メール取込での「差し戻し」など） */
   extraActions?: ReactNode;
   /** true のとき、親の高さいっぱいに収める（スクロールなしで1画面のスクリーンショットに収めたい用途）。
    *  重要なのは右側（アプリの計算値）。右側を広くとり、全日付を行間を詰めて表示する。
@@ -288,8 +288,8 @@ export function TimesheetPreview({ preview, excelBuffer, pdfUrl, onConfirm, onCa
       </div>
 
       {/* アクションボタン */}
-      <div className="flex items-center justify-end gap-3 shrink-0">
-        {extraActions}
+      {/* 左から右へ: キャンセル → 承認(登録)。例外の操作(差し戻しなど)は、右端に離して置く */}
+      <div className="flex items-center gap-3 shrink-0">
         <button
           onClick={onCancel}
           className="px-4 py-2 text-sm font-medium text-muted-foreground border border-border rounded-lg hover:bg-accent/50 transition-colors"
@@ -307,6 +307,7 @@ export function TimesheetPreview({ preview, excelBuffer, pdfUrl, onConfirm, onCa
             <><CheckCircle className="w-4 h-4" /> {confirmLabel ?? "この内容で登録する"}</>
           )}
         </button>
+        {extraActions && <div className="ml-auto flex items-center gap-3">{extraActions}</div>}
       </div>
     </div>
   );

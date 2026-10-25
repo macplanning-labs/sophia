@@ -7,7 +7,9 @@ use axum::{
 use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
+use crate::domain::authz::Authz;
 use crate::domain::models::expense::{ExpenseRequestCreateForm, ExpenseStatus};
+use crate::domain::services::expense_access;
 use crate::domain::services::document_workflow::{
     self, ActorContext, DocumentKind, WorkflowAction,
 };
@@ -15,10 +17,17 @@ use crate::infrastructure::repositories::expense_repo::{self, ExpenseCategoryOpt
 use crate::presentation::middleware::role::AuthUser;
 use crate::presentation::api_response::AppError;
 
-fn expense_actor(auth_user: &AuthUser, employee_id: i64) -> ActorContext {
+/// 操作する人の立場を作る。管理操作の可否は操作ごとに違う(D12: 承認・承認取り消しは管理者のみ、
+/// 差戻しは経理・人事にも開放、再申請などはこれまでどおり全件を見られる人)。
+fn expense_actor(auth_user: &AuthUser, authz: Option<&Authz>, employee_id: i64, action: WorkflowAction) -> ActorContext {
+    let can_manage = match action {
+        WorkflowAction::Approve | WorkflowAction::Unapprove | WorkflowAction::MarkPaid => auth_user.can_approve_expense(authz),
+        WorkflowAction::Reject => auth_user.can_review_expense(authz),
+        WorkflowAction::Submit | WorkflowAction::Resubmit => auth_user.can_see_all_expenses(authz),
+    };
     ActorContext {
         user_id: auth_user.user.id,
-        can_manage: auth_user.can_view_all_expenses(),
+        can_manage,
         is_owner: auth_user.employee_id() == Some(employee_id),
     }
 }
@@ -26,6 +35,7 @@ fn expense_actor(auth_user: &AuthUser, employee_id: i64) -> ActorContext {
 async fn run_expense_transition(
     pool: &sqlx::PgPool,
     auth_user: &AuthUser,
+    authz: Option<&Authz>,
     id: i64,
     action: WorkflowAction,
 ) -> Result<document_workflow::TransitionPlan, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
@@ -36,7 +46,7 @@ async fn run_expense_transition(
         ));
     };
 
-    let actor = expense_actor(auth_user, exp.employee_id);
+    let actor = expense_actor(auth_user, authz, exp.employee_id, action);
     if !actor.can_manage && !actor.is_owner {
         return Err((
             axum::http::StatusCode::FORBIDDEN,
@@ -124,8 +134,10 @@ async fn run_expense_transition(
 pub async fn api_index(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
 ) -> axum::Json<Vec<ExpenseRow>> {
-    let own_employee_id = if auth_user.can_view_all_expenses() { None } else { auth_user.employee_id() };
+    let authz = authz.map(|e| e.0);
+    let own_employee_id = if auth_user.can_see_all_expenses(authz.as_ref()) { None } else { auth_user.employee_id() };
 
     let rows = expense_repo::list_expense_rows(&pool, own_employee_id)
         .await
@@ -139,13 +151,14 @@ pub async fn api_index(
 pub async fn api_detail(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let expense = expense_repo::find_by_id(&pool, id).await.log_err().ok().flatten();
 
     match expense {
         Some(exp) => {
-            if !auth_user.can_view_all_expenses() && auth_user.employee_id() != Some(exp.employee_id) {
+            if !auth_user.can_see_all_expenses(authz.as_ref().map(|e| &e.0)) && auth_user.employee_id() != Some(exp.employee_id) {
                 return (axum::http::StatusCode::FORBIDDEN,
                     axum::Json(serde_json::json!({"error": "他の社員の経費申請は閲覧できません"}))).into_response();
             }
@@ -190,13 +203,21 @@ pub async fn api_detail(
 }
 
 /// POST /api/expenses — 新規作成（ヘッダー + 初期明細）
+///
+/// 全件権限者（管理者・経理）は他の社員の代理入力ができる。それ以外は申請者を自分に限る。
 pub async fn api_create(
     State(pool): State<PgPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     axum::Json(form): axum::Json<ExpenseRequestCreateForm>,
 ) -> Result<impl IntoResponse, AppError> {
     if form.employee_id <= 0 {
         return Ok((axum::http::StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({"success": false, "error": "社員を選択してください"}))).into_response());
+    }
+
+    if !expense_access::can_access(auth_user.can_see_all_expenses(authz.as_ref().map(|e| &e.0)), auth_user.employee_id(), form.employee_id) {
+        return Ok(super::items::expense_forbidden_response());
     }
 
     let (id, item_ids) = expense_repo::insert_pending(&pool, form.employee_id, &form.items).await?;
@@ -214,6 +235,7 @@ pub struct ApiExpenseUpdateForm {
 pub async fn api_update(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(id): Path<i64>,
     axum::Json(form): axum::Json<ApiExpenseUpdateForm>,
 ) -> impl IntoResponse {
@@ -227,13 +249,14 @@ pub async fn api_update(
             axum::Json(serde_json::json!({"success": false, "error": "経費申請が見つかりません"}))).into_response();
     };
 
-    if !auth_user.can_view_all_expenses() && auth_user.employee_id() != Some(exp.employee_id) {
+    let can_see_all = auth_user.can_see_all_expenses(authz.as_ref().map(|e| &e.0));
+    if !can_see_all && auth_user.employee_id() != Some(exp.employee_id) {
         return (axum::http::StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({"success": false, "error": "他の社員の経費申請は編集できません"}))).into_response();
     }
 
     // 申請者を別人へ付け替えるのは全件閲覧権限者のみ（一般社員は自分の申請のまま保存する用途）
-    if form.employee_id != exp.employee_id && !auth_user.can_view_all_expenses() {
+    if form.employee_id != exp.employee_id && !can_see_all {
         return (axum::http::StatusCode::FORBIDDEN,
             axum::Json(serde_json::json!({"success": false, "error": "申請者の変更権限がありません"}))).into_response();
     }
@@ -258,19 +281,25 @@ pub async fn api_update(
 /// DELETE /api/expenses/{id}
 pub async fn api_delete(
     State(pool): State<PgPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
+    if let Err(resp) = super::items::check_header_access(&pool, &auth_user, authz.as_ref().map(|e| &e.0), id).await {
+        return Ok(resp);
+    }
     let rows = expense_repo::delete_pending(&pool, id).await?;
-    Ok(axum::Json(serde_json::json!({ "success": rows > 0 })))
+    Ok(axum::Json(serde_json::json!({ "success": rows > 0 })).into_response())
 }
 
 /// POST /api/expenses/{id}/approve
 pub async fn api_approve(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    match run_expense_transition(&pool, &auth_user, id, WorkflowAction::Approve).await {
+    match run_expense_transition(&pool, &auth_user, authz.as_ref().map(|e| &e.0), id, WorkflowAction::Approve).await {
         Ok(plan) => axum::Json(serde_json::json!({
             "success": true,
             "from_status": plan.from_status,
@@ -284,9 +313,10 @@ pub async fn api_approve(
 pub async fn api_reject(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    match run_expense_transition(&pool, &auth_user, id, WorkflowAction::Reject).await {
+    match run_expense_transition(&pool, &auth_user, authz.as_ref().map(|e| &e.0), id, WorkflowAction::Reject).await {
         Ok(plan) => axum::Json(serde_json::json!({
             "success": true,
             "from_status": plan.from_status,
@@ -300,9 +330,10 @@ pub async fn api_reject(
 pub async fn api_unapprove(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    match run_expense_transition(&pool, &auth_user, id, WorkflowAction::Unapprove).await {
+    match run_expense_transition(&pool, &auth_user, authz.as_ref().map(|e| &e.0), id, WorkflowAction::Unapprove).await {
         Ok(plan) => axum::Json(serde_json::json!({
             "success": true,
             "from_status": plan.from_status,
@@ -316,9 +347,10 @@ pub async fn api_unapprove(
 pub async fn api_resubmit(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    match run_expense_transition(&pool, &auth_user, id, WorkflowAction::Resubmit).await {
+    match run_expense_transition(&pool, &auth_user, authz.as_ref().map(|e| &e.0), id, WorkflowAction::Resubmit).await {
         Ok(plan) => axum::Json(serde_json::json!({
             "success": true,
             "from_status": plan.from_status,

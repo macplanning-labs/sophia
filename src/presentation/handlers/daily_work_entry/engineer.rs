@@ -61,6 +61,18 @@ pub async fn list_engineers(
 /// employee_routes 配下に置く（実際の招待送信は引き続きAdminのみ成功する）。
 pub async fn api_engineer_options(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::EngineerView) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_engineer_options_inner(State(pool)).await)
+}
+
+async fn api_engineer_options_inner(
+    State(pool): State<PgPool>,
 ) -> impl IntoResponse {
     let engineers = order_repo::list_active_engineer_options(&pool).await;
 

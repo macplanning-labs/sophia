@@ -2,7 +2,7 @@
 //!
 //! auth-coreはユーザーの永続化・ドメイン表現を知らない。「認証に必要な最小限の
 //! 情報を取得できるアプリ側の実装」をトレイトで受け取るジェネリック設計にする。
-//! WIP・Sophiaそれぞれが`AuthUserRepository`（＋`AuthConfigProvider`）をAppStateに
+//! 利用側アプリが`AuthUserRepository`（＋`AuthConfigProvider`）をAppStateに
 //! 実装することで、ハンドラは共通の文法（`AuthUser<U>`）で認証情報を扱える。
 
 use axum::extract::FromRequestParts;

@@ -287,7 +287,7 @@ export default function ReceivedOrderDetailPage({
   ].filter(f => f.value) : [];
 
   const actions = (
-    <div className="flex items-center gap-2 flex-wrap">
+    <div className="flex flex-1 items-center gap-2 flex-wrap">
       <button
         onClick={() => setShowEdit(true)}
         className="px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 hover:bg-indigo-500/20 transition-colors"
@@ -308,15 +308,17 @@ export default function ReceivedOrderDetailPage({
       >
         📧 レポート送信
       </button>
-      {isRegistered && (
+      {/* 例外の「削除」は右端に置き、消さずに非活性にする(登録済みの受注書だけ削除できる) */}
+      <div className="flex items-center gap-2 ml-auto">
         <button
           onClick={() => setConfirmDeleteOpen(true)}
-          disabled={deleteOrder.isPending}
+          disabled={!isRegistered || deleteOrder.isPending}
+          title={!isRegistered ? "登録済みの受注書だけ、削除できます" : undefined}
           className="px-3 py-1.5 text-xs font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors disabled:opacity-50"
         >
           🗑 削除
         </button>
-      )}
+      </div>
     </div>
   );
 

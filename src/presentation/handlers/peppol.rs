@@ -25,6 +25,9 @@ fn err_json(msg: impl Into<String>) -> axum::Json<serde_json::Value> {
 
 /// POST /api/v1/invoices/{id}/peppol/send
 pub async fn send_invoice(State(pool): State<PgPool>, Path(id): Path<i64>) -> impl IntoResponse {
+    if let Some(r) = super::invoices::current_guard(&pool, id).await {
+        return r;
+    }
     let invoice = match billing_repo::find_invoice(&pool, id).await {
         Ok(Some(inv)) => inv,
         Ok(None) => return (axum::http::StatusCode::NOT_FOUND, err_json("請求書が見つかりません")).into_response(),
@@ -35,7 +38,7 @@ pub async fn send_invoice(State(pool): State<PgPool>, Path(id): Path<i64>) -> im
         Ok(Some(c)) => c,
         _ => return (axum::http::StatusCode::UNPROCESSABLE_ENTITY, err_json("クライアント情報が見つかりません")).into_response(),
     };
-    let company = match company_info_repo::get_company_info(&pool).await {
+    let company = match company_info_repo::get_company_info_basic(&pool).await {
         Ok(Some(c)) => c,
         _ => return (axum::http::StatusCode::UNPROCESSABLE_ENTITY, err_json("自社情報が未設定です")).into_response(),
     };
@@ -77,6 +80,9 @@ pub async fn send_invoice(State(pool): State<PgPool>, Path(id): Path<i64>) -> im
 
 /// POST /api/v1/notices/{id}/peppol/send
 pub async fn send_notice(State(pool): State<PgPool>, Path(id): Path<String>) -> impl IntoResponse {
+    if let Some(r) = super::notices::current_guard(&pool, &id).await {
+        return r;
+    }
     let notice = match order_repo::find_payment_notice(&pool, &id).await {
         Ok(Some(n)) => n,
         Ok(None) => return (axum::http::StatusCode::NOT_FOUND, err_json("支払通知書が見つかりません")).into_response(),
@@ -95,7 +101,7 @@ pub async fn send_notice(State(pool): State<PgPool>, Path(id): Path<String>) -> 
         Ok(Some(p)) => p,
         _ => return (axum::http::StatusCode::UNPROCESSABLE_ENTITY, err_json("パートナー情報が見つかりません")).into_response(),
     };
-    let company = match company_info_repo::get_company_info(&pool).await {
+    let company = match company_info_repo::get_company_info_basic(&pool).await {
         Ok(Some(c)) => c,
         _ => return (axum::http::StatusCode::UNPROCESSABLE_ENTITY, err_json("自社情報が未設定です")).into_response(),
     };
@@ -135,6 +141,56 @@ pub async fn send_notice(State(pool): State<PgPool>, Path(id): Path<String>) -> 
     }
 }
 
+/// Peppol 受信 Webhook の認証判定結果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeppolAuth {
+    /// 秘密が一致した
+    Allow,
+    /// 秘密が空で、開発用（ENV_NAME=local / staging）のため認証を省略する
+    AllowSkipped,
+    /// 秘密が不一致、またはヘッダ無し（401）
+    Unauthorized,
+    /// 秘密が空で、省略が許されない環境（未設定・production・dr 等）（503）
+    Misconfigured,
+}
+
+/// Peppol 受信 Webhook の認証判定（純関数）。
+/// - 秘密が空: `env_name` が `local` / `staging` と明示されたときだけ `AllowSkipped`。それ以外は `Misconfigured`
+/// - 秘密あり: `provided` と定数時間で比較する。一致で `Allow`、不一致・ヘッダ無しは `Unauthorized`
+pub fn peppol_auth_decision(
+    env_name: Option<&str>,
+    secret: &str,
+    provided: Option<&str>,
+) -> PeppolAuth {
+    if secret.is_empty() {
+        return match env_name {
+            Some("local" | "staging") => PeppolAuth::AllowSkipped,
+            _ => PeppolAuth::Misconfigured,
+        };
+    }
+    match provided {
+        Some(p) if secrets_match(p.as_bytes(), secret.as_bytes()) => PeppolAuth::Allow,
+        _ => PeppolAuth::Unauthorized,
+    }
+}
+
+/// 長さの違いも含めて全バイトを比較する。両方を最大長まで 0 埋めして比較し、長さの一致も同時に確かめる。
+/// 途中で打ち切らないため、一致箇所の位置や長さの差による応答時間の差を抑える。
+fn secrets_match(provided: &[u8], secret: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    let n = provided.len().max(secret.len());
+    let pad = |s: &[u8]| -> Vec<u8> {
+        let mut v = vec![0u8; n];
+        for (dst, src) in v.iter_mut().zip(s) {
+            *dst = *src;
+        }
+        v
+    };
+    let len_eq = (provided.len() as u64).ct_eq(&(secret.len() as u64));
+    let bytes_eq = pad(provided).ct_eq(&pad(secret));
+    bool::from(len_eq & bytes_eq)
+}
+
 /// POST /api/v1/peppol/inbound — Peppolプロバイダーからの受信Webhook（雛形）
 /// `document_type` フィールドで文書種別を判定し処理を振り分ける。
 /// - "ORDER": 発注書受信 → t_received_order新規作成
@@ -142,33 +198,43 @@ pub async fn send_notice(State(pool): State<PgPool>, Path(id): Path<String>) -> 
 ///
 /// 外部（Peppolプロバイダー）からのサーバー間呼び出しのため、ログインセッションではなく
 /// 共有シークレット（PEPPOL_WEBHOOK_SECRET + X-Peppol-Webhook-Secret ヘッダ）で認証する
-/// （webhook/timesheetのWEBHOOK_SECRETと同じ方式）。
-/// 本番（ENV_NAME=production）では秘密未設定を拒否する（開発標準書 §3.6）。
-/// local/staging で未設定の場合のみチェックをスキップする（開発用）。
+/// （認証鍵は PEPPOL_WEBHOOK_SECRET。GAS 連携の Webhook は撤去済みで、そちらの鍵とは無関係）。
+/// 既定で拒否する（本リポの docs/開発標準書.md §3.5 #3「認証・鍵・設定欠落」）。
+/// 秘密が空で認証を省略してよいのは ENV_NAME が `local` / `staging` と明示されたときだけ
+/// （ENV_NAME 未設定・production・dr 等は 503）。判定は `peppol_auth_decision` が行う。
 pub async fn inbound(State(pool): State<PgPool>, headers: HeaderMap, Json(body): Json<serde_json::Value>) -> impl IntoResponse {
-    let env_name = std::env::var("ENV_NAME").unwrap_or_else(|_| "local".to_string());
+    let env_raw = std::env::var("ENV_NAME").ok();
+    let env_name = env_raw.as_deref().map(str::trim);
     let secret = std::env::var("PEPPOL_WEBHOOK_SECRET").unwrap_or_default();
-    if secret.is_empty() {
-        if env_name == "production" {
+    let provided = headers
+        .get("X-Peppol-Webhook-Secret")
+        .and_then(|v| v.to_str().ok());
+    match peppol_auth_decision(env_name, &secret, provided) {
+        PeppolAuth::Allow => {}
+        PeppolAuth::AllowSkipped => {
+            tracing::warn!(
+                "[Peppol] 処理=受信Webhook認証 結果=省略 影響=開発用に認証を省略（ENV_NAME={}）",
+                env_name.unwrap_or("")
+            );
+        }
+        PeppolAuth::Unauthorized => {
+            tracing::warn!("[Peppol] 処理=受信Webhook認証 結果=失敗 影響=受信拒否（401）");
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                err_json("Unauthorized"),
+            )
+                .into_response();
+        }
+        PeppolAuth::Misconfigured => {
             tracing::error!(
-                "[Peppol] 処理=受信Webhook認証 結果=失敗 影響=本番で秘密未設定のため受信拒否"
+                "[Peppol] 処理=受信Webhook認証 結果=失敗 影響=秘密未設定かつ省略不可の環境のため受信拒否（ENV_NAME={}）",
+                env_name.unwrap_or("未設定")
             );
             return (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 err_json("サービス設定不備"),
             )
                 .into_response();
-        }
-        tracing::warn!(
-            "[Peppol] PEPPOL_WEBHOOK_SECRET未設定のため認証スキップ（ENV_NAME={env_name}）"
-        );
-    } else {
-        let provided = headers
-            .get("X-Peppol-Webhook-Secret")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if provided != secret {
-            return (axum::http::StatusCode::UNAUTHORIZED, err_json("Unauthorized")).into_response();
         }
     }
 
@@ -212,6 +278,12 @@ pub async fn inbound(State(pool): State<PgPool>, headers: HeaderMap, Json(body):
     }
 }
 
+/// GET /api/v1/peppol/status — Peppol の接続設定(API の URL・キー)が済んでいるか。
+/// 未設定の環境では、画面の「Peppol送信」ボタンを押せなくするために使う(値そのものは返さない)
+pub async fn status() -> impl IntoResponse {
+    axum::Json(serde_json::json!({ "configured": PeppolClient::from_env().is_ok() }))
+}
+
 #[derive(Debug, serde::Deserialize, Default)]
 pub struct TransmissionFilter {
     pub status: Option<String>,
@@ -231,5 +303,144 @@ pub async fn list_transmissions(State(pool): State<PgPool>, Query(filter): Query
             tracing::error!("peppol list_transmissions failed: {:?}", e);
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, err_json("内部エラー")).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{peppol_auth_decision, secrets_match, PeppolAuth};
+
+    #[test]
+    fn empty_secret_without_env_name_is_misconfigured() {
+        assert_eq!(
+            peppol_auth_decision(None, "", None),
+            PeppolAuth::Misconfigured
+        );
+        assert_eq!(
+            peppol_auth_decision(None, "", Some("x")),
+            PeppolAuth::Misconfigured
+        );
+    }
+
+    #[test]
+    fn empty_secret_in_production_is_misconfigured() {
+        assert_eq!(
+            peppol_auth_decision(Some("production"), "", None),
+            PeppolAuth::Misconfigured
+        );
+        assert_eq!(
+            peppol_auth_decision(Some("production"), "", Some("")),
+            PeppolAuth::Misconfigured
+        );
+    }
+
+    #[test]
+    fn empty_secret_in_dr_is_misconfigured() {
+        assert_eq!(
+            peppol_auth_decision(Some("dr"), "", None),
+            PeppolAuth::Misconfigured
+        );
+    }
+
+    #[test]
+    fn empty_secret_in_unknown_or_blank_env_is_misconfigured() {
+        assert_eq!(
+            peppol_auth_decision(Some("prod"), "", None),
+            PeppolAuth::Misconfigured
+        );
+        assert_eq!(
+            peppol_auth_decision(Some(""), "", None),
+            PeppolAuth::Misconfigured
+        );
+        // 大文字小文字は区別する（明示された値のみ省略を許す）
+        assert_eq!(
+            peppol_auth_decision(Some("LOCAL"), "", None),
+            PeppolAuth::Misconfigured
+        );
+        assert_eq!(
+            peppol_auth_decision(Some("Staging"), "", None),
+            PeppolAuth::Misconfigured
+        );
+    }
+
+    #[test]
+    fn empty_secret_in_local_or_staging_is_skipped() {
+        assert_eq!(
+            peppol_auth_decision(Some("local"), "", None),
+            PeppolAuth::AllowSkipped
+        );
+        assert_eq!(
+            peppol_auth_decision(Some("staging"), "", None),
+            PeppolAuth::AllowSkipped
+        );
+        assert_eq!(
+            peppol_auth_decision(Some("local"), "", Some("anything")),
+            PeppolAuth::AllowSkipped
+        );
+    }
+
+    #[test]
+    fn matching_secret_is_allowed_in_any_env() {
+        for env in [
+            None,
+            Some("local"),
+            Some("staging"),
+            Some("production"),
+            Some("dr"),
+        ] {
+            assert_eq!(
+                peppol_auth_decision(env, "s3cret-value", Some("s3cret-value")),
+                PeppolAuth::Allow
+            );
+        }
+    }
+
+    #[test]
+    fn missing_header_is_unauthorized_when_secret_set() {
+        for env in [None, Some("local"), Some("production")] {
+            assert_eq!(
+                peppol_auth_decision(env, "s3cret-value", None),
+                PeppolAuth::Unauthorized
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_secret_is_unauthorized() {
+        let secret = "s3cret-value";
+        // 同じ長さで1バイト違う / 先頭一致の短い値 / 末尾が余分な値 / 空文字
+        assert_eq!(
+            peppol_auth_decision(Some("production"), secret, Some("s3cret-valuE")),
+            PeppolAuth::Unauthorized
+        );
+        assert_eq!(
+            peppol_auth_decision(Some("production"), secret, Some("s3cret")),
+            PeppolAuth::Unauthorized
+        );
+        assert_eq!(
+            peppol_auth_decision(Some("production"), secret, Some("s3cret-value!")),
+            PeppolAuth::Unauthorized
+        );
+        assert_eq!(
+            peppol_auth_decision(Some("production"), secret, Some("")),
+            PeppolAuth::Unauthorized
+        );
+        assert_eq!(
+            peppol_auth_decision(Some("local"), secret, Some("wrong")),
+            PeppolAuth::Unauthorized
+        );
+    }
+
+    #[test]
+    fn secrets_match_covers_length_and_content() {
+        assert!(secrets_match(b"abc", b"abc"));
+        assert!(secrets_match(b"", b""));
+        assert!(!secrets_match(b"abc", b"abd"));
+        assert!(!secrets_match(b"ab", b"abc"));
+        assert!(!secrets_match(b"abc", b"ab"));
+        assert!(!secrets_match(b"", b"abc"));
+        assert!(!secrets_match(b"abc", b""));
+        // 0 埋めで区別できないこと（末尾が NUL の値は別物）
+        assert!(!secrets_match(b"abc\0", b"abc"));
     }
 }

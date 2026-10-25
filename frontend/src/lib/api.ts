@@ -43,6 +43,15 @@ async function handleUnauthorized(res: Response): Promise<void> {
   throw new SessionExpiredError();
 }
 
+/**
+ * 成功応答の本文を JSON として読む。本文が無い応答(204 No Content・205 Reset Content)は undefined を返す。
+ * 本文なしを .json() で読むと「Unexpected end of JSON input」で失敗し、成功した操作がエラーに見える(DEMO-000180)。
+ */
+async function readSuccessBody<T>(res: Response): Promise<T> {
+  if (res.status === 204 || res.status === 205) return undefined as T;
+  return res.json();
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
     ...init,
@@ -79,7 +88,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     try { const j = JSON.parse(body); if (j.error) message = j.error; } catch { /* ignore */ }
     throw new Error(message);
   }
-  return res.json();
+  return readSuccessBody<T>(res);
 }
 
 // ── CRUD汎用関数 ──
@@ -102,6 +111,47 @@ export async function apiDelete<T = ApiResult>(url: string): Promise<T> {
   return fetchJson<T>(url, { method: "DELETE" });
 }
 
+export async function apiGet<T>(url: string): Promise<T> {
+  return fetchJson<T>(url);
+}
+
+/**
+ * 状態コードと本文の両方を返す（409 などを呼び出し側で分けたいときに使う）。
+ * 既存の fetchJson は変えない。非2xxでも投げず、呼び出し側が ok / status で判断する。
+ * 401 はセッション切れ処理（handleUnauthorized）を通す。
+ */
+export async function requestJsonWithStatus<T = unknown>(
+  method: "POST" | "DELETE",
+  url: string,
+  data?: unknown,
+): Promise<{ ok: boolean; status: number; body: T }> {
+  const res = await fetch(url, {
+    method,
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: data === undefined ? undefined : JSON.stringify(data),
+  });
+  await handleUnauthorized(res);
+  const text = await res.text().catch(() => "");
+  let body = null as T;
+  try {
+    body = text ? (JSON.parse(text) as T) : (null as T);
+  } catch {
+    /* 本文が JSON でない場合は null のまま */
+  }
+  // MFA 未登録の 403 は、fetchJson と同じく MFA の設定画面へ移す
+  const mfa = (body as { mfa_setup_required?: boolean } | null)?.mfa_setup_required;
+  if (
+    res.status === 403 &&
+    mfa &&
+    typeof window !== "undefined" &&
+    !window.location.pathname.startsWith("/settings/security")
+  ) {
+    window.location.href = "/settings/security";
+  }
+  return { ok: res.ok, status: res.status, body };
+}
+
 export async function apiUpload<T = ApiResult>(url: string, formData: FormData): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
@@ -115,7 +165,7 @@ export async function apiUpload<T = ApiResult>(url: string, formData: FormData):
     try { const j = JSON.parse(body); if (j.error) message = j.error; } catch { /* ignore */ }
     throw new Error(message);
   }
-  return res.json();
+  return readSuccessBody<T>(res);
 }
 
 /** PDF等のバイナリをBlobで取得 */
@@ -327,6 +377,11 @@ export async function createOrdersFromContracts(payload: {
 
 export async function fetchReceivedEmails(needsReview: boolean, knownDomainOnly: boolean): Promise<{ emails: ReceivedEmailRow[] }> {
   return fetchJson(`${BASE}/api/v1/received-emails?needs_review=${needsReview}&known_domain_only=${knownDomainOnly}`);
+}
+
+/** 帳票の横断検索(受注・注文書・請求書・支払通知)。管理者のみ */
+export async function searchDocuments(q: string, limit = 20): Promise<import("./types").DocumentSearchHit[]> {
+  return fetchJson(`${BASE}/api/v1/documents/search?q=${encodeURIComponent(q)}&limit=${limit}`);
 }
 
 export async function fetchInvoices(): Promise<InvoiceRow[]> {
@@ -627,6 +682,26 @@ export async function rejectNotice(id: string): Promise<ApiResult> {
   return apiPost(`${BASE}/api/v1/notices/${id}/reject`, {});
 }
 
+/** 送った支払通知書の訂正版(新しい版・下書き)を作る(DEMO-000224) */
+export async function reviseNotice(id: string, reason: string): Promise<ApiResult & { new_notice_id?: string }> {
+  return apiPost(`${BASE}/api/v1/notices/${id}/revise`, { reason });
+}
+
+/** 送った支払通知書を取り消す(書類は消えない。DEMO-000224) */
+export async function cancelNotice(id: string, reason: string): Promise<ApiResult> {
+  return apiPost(`${BASE}/api/v1/notices/${id}/cancel`, { reason });
+}
+
+/** 送った請求書の訂正版(新しい版・下書き)を作る(DEMO-000224) */
+export async function reviseInvoice(id: string, reason: string): Promise<ApiResult & { new_invoice_id?: number }> {
+  return apiPost(`${BASE}/api/v1/invoices/${id}/revise`, { reason });
+}
+
+/** 送った請求書を取り消す(書類は消えない。DEMO-000224) */
+export async function cancelInvoice(id: string, reason: string): Promise<ApiResult> {
+  return apiPost(`${BASE}/api/v1/invoices/${id}/cancel`, { reason });
+}
+
 export async function approveInvoice(id: string): Promise<ApiResult> {
   return apiPost(`${BASE}/api/v1/invoices/${id}/approve`, {});
 }
@@ -648,6 +723,11 @@ export async function sendInvoicePeppol(id: string): Promise<ApiResult & { messa
 
 export async function sendNoticePeppol(id: string): Promise<ApiResult & { message_id?: string; status?: string }> {
   return apiPost(`${BASE}/api/v1/notices/${id}/peppol/send`, {});
+}
+
+/** Peppol の接続設定が済んでいるか(未設定の環境では「Peppol送信」を押せなくする) */
+export async function fetchPeppolStatus(): Promise<{ configured: boolean }> {
+  return fetchJson(`${BASE}/api/v1/peppol/status`);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -729,6 +809,14 @@ export async function createMasterRecord(table: string, data: Record<string, unk
   return apiPost(`${BASE}/api/v1/masters/${table}`, data);
 }
 
+/**
+ * クライアント（顧客）を登録する。担当（組織・担当者）が必須のため、マスタ汎用APIではなく専用API。
+ * 失敗時は、サーバの案内（日本語）を Error.message に載せて投げる。
+ */
+export async function createClient(data: Record<string, unknown>): Promise<{ ok: boolean; id: number }> {
+  return apiPost(`${BASE}/api/v1/clients`, data);
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function updateMasterRecord(table: string, id: string, data: Record<string, unknown>): Promise<any> {
   return apiPut(`${BASE}/api/v1/masters/${table}/${id}`, data);
@@ -778,6 +866,61 @@ export async function testImapConnection(): Promise<ApiResult> {
 
 export async function unlockImap(): Promise<ApiResult> {
   return apiPost(`${BASE}/api/v1/mail/imap-unlock`, {});
+}
+
+// ── メール画面の設定・送信の記録(DEMO-000196。管理者専用) ──
+
+/** メールアカウント(送信と受信の取り込みで共通)。パスワードの実値は返らない */
+export interface MailAccount {
+  email_host: string;
+  email_port: number | null;
+  email_use_tls: boolean;
+  email_host_user: string;
+  default_from_email: string;
+  has_smtp_password: boolean;
+}
+
+export async function fetchMailAccount(): Promise<{ success: boolean; account: MailAccount }> {
+  return fetchJson(`${BASE}/api/v1/mail/account`);
+}
+
+/** email_host_password は変えるときだけ送る(空なら今のまま) */
+export async function updateMailAccount(data: Omit<MailAccount, "has_smtp_password"> & { email_host_password?: string }): Promise<ApiResult> {
+  return apiPut(`${BASE}/api/v1/mail/account`, data);
+}
+
+/** 受信の ⚙ に出すもの。アカウントは送信と共通(メール > 送信 の ⚙ で変える) */
+export interface MailReceiveSettings {
+  success: boolean;
+  excluded_mail_domains: string;
+  imap: { host: string; port: number; user: string; configured: boolean };
+  /** 最後に取り込みを終えた日時(UTC)。まだ一度も無ければ null */
+  last_processed_at: string | null;
+  locked: boolean;
+  lock_reason: string | null;
+}
+
+export async function fetchMailReceiveSettings(): Promise<MailReceiveSettings> {
+  return fetchJson(`${BASE}/api/v1/mail/receive-settings`);
+}
+
+export async function updateMailReceiveSettings(excludedMailDomains: string): Promise<ApiResult> {
+  return apiPut(`${BASE}/api/v1/mail/receive-settings`, { excluded_mail_domains: excludedMailDomains });
+}
+
+export interface SentEmailRow {
+  id: number;
+  recipient: string;
+  subject: string;
+  sent_at: string;
+}
+
+export async function fetchSentEmails(): Promise<{ success: boolean; emails: SentEmailRow[]; limit: number }> {
+  return fetchJson(`${BASE}/api/v1/mail/sent`);
+}
+
+export async function fetchSentEmail(id: number): Promise<{ success: boolean; email: SentEmailRow & { body: string } }> {
+  return fetchJson(`${BASE}/api/v1/mail/sent/${id}`);
 }
 
 // ── 給与操作API ──
@@ -902,6 +1045,90 @@ export type MailLog = {
   is_reflected: boolean;
 };
 
+// ── 外部連携の設定（/settings/integrations、Admin専用。DEMO-000215）──
+// 秘密の値(Webhook の URL・サービスアカウントの鍵)は、応答に含まれない(has_secret だけ)。
+
+export interface IntegrationTimes {
+  at: string | null;
+  ok: boolean | null;
+  detail?: unknown;
+  by?: string | null;
+}
+
+export interface IntegrationTarget {
+  id: number | null;
+  label: string;
+  provider: string;
+  provider_label: string;
+  /** db: 画面で保存したもの / env: サーバの設定ファイル(移行の間の予備) */
+  source: "db" | "env";
+  /** 宛先の ID(スペース ID・フォルダ ID) */
+  destination: string;
+  /** 宛先の名前(スペース名・フォルダ名)。分からないときは null */
+  destination_name: string | null;
+  usable: boolean;
+  problem: string | null;
+  config: { root_folder_id?: string; impersonate?: string; destination_name?: string };
+  has_secret: boolean;
+  check: IntegrationTimes;
+  test: IntegrationTimes;
+  delivery: IntegrationTimes;
+}
+
+export interface IntegrationState {
+  overall: { at: string; ok: boolean; problems: string[] } | null;
+  cipher_ready: boolean;
+  notify: { use_id: string; targets: IntegrationTarget[] };
+  store: {
+    use_id: string;
+    targets: IntegrationTarget[];
+    pending_count: number;
+    last_stored: { name: string; at: string } | null;
+  };
+  mail: { from: string; last_import_at: string | null };
+  changes: { at: string; by: string | null; use_id: string; summary: string }[];
+}
+
+export interface IntegrationTargetInput {
+  use_id?: string;
+  label: string;
+  provider: string;
+  config?: { root_folder_id?: string; impersonate?: string; destination_name?: string };
+  /** 入れ直すときだけ送る */
+  secret?: { webhook_url?: string; service_account_json?: string } | null;
+  enabled?: boolean;
+}
+
+export async function fetchIntegrationState(): Promise<IntegrationState> {
+  return fetchJson<IntegrationState>(`${BASE}/api/v1/settings/integrations`);
+}
+
+/** 画面の上部の赤い帯の元(管理者のみ)。problems が空なら帯は出さない */
+export interface IntegrationAlert {
+  checked_at: string | null;
+  problems: string[];
+}
+
+export async function fetchIntegrationAlert(): Promise<IntegrationAlert> {
+  return fetchJson<IntegrationAlert>(`${BASE}/api/v1/settings/integrations/alert`);
+}
+
+export async function runIntegrationCheck(): Promise<IntegrationState> {
+  return apiPost<IntegrationState>(`${BASE}/api/v1/settings/integrations/check`, {});
+}
+
+export async function sendIntegrationTest(targetId: number | null): Promise<{ ok: boolean; error: string | null; state: IntegrationState }> {
+  return apiPost(`${BASE}/api/v1/settings/integrations/test`, { target_id: targetId });
+}
+
+export async function addIntegrationTarget(input: IntegrationTargetInput): Promise<IntegrationState> {
+  return apiPost<IntegrationState>(`${BASE}/api/v1/settings/integrations/targets`, input);
+}
+
+export async function updateIntegrationTarget(id: number, input: IntegrationTargetInput): Promise<IntegrationState> {
+  return apiPut<IntegrationState>(`${BASE}/api/v1/settings/integrations/targets/${id}`, input);
+}
+
 // ── APIキー管理（/settings/api-keys、Admin専用）──
 
 export interface ApiKeyItem {
@@ -912,6 +1139,8 @@ export interface ApiKeyItem {
   is_active: boolean;
   created_at: string;
   revoked_at?: string;
+  /** 有効期限。null/未設定=無期限 */
+  expires_at?: string | null;
 }
 
 export interface GeneratedApiKey {
@@ -929,20 +1158,24 @@ export async function generateApiKey(params: {
   name: string;
   scope: string;
   environment: string;
+  /** 有効日数(1〜3650)。省略=無期限 */
+  expires_in_days?: number;
 }): Promise<GeneratedApiKey> {
   return apiPost<GeneratedApiKey>(`${BASE}/api/v1/settings/api-keys`, params);
 }
 
-export async function revokeApiKey(id: string): Promise<ApiResult> {
-  return apiPost<ApiResult>(`${BASE}/api/v1/settings/api-keys/${id}/revoke`, {});
+/** 失効。成功時のサーバー応答は 204(本文なし) */
+export async function revokeApiKey(id: string): Promise<void> {
+  await apiPost<void>(`${BASE}/api/v1/settings/api-keys/${id}/revoke`, {});
 }
 
 // ── 請求書プレビュー・確定(新UI 3-4) ──
 
 import type { BillingPreviewResponse, BillingConfirmRequest, BillingConfirmResponse } from "./types";
 
-export async function fetchBillingPreview(month: string): Promise<BillingPreviewResponse> {
-  return fetchJson<BillingPreviewResponse>(`${BASE}/api/v1/billing/preview?month=${month}`);
+export async function fetchBillingPreview(month: string, clientId?: number): Promise<BillingPreviewResponse> {
+  const q = clientId != null ? `&client_id=${clientId}` : "";
+  return fetchJson<BillingPreviewResponse>(`${BASE}/api/v1/billing/preview?month=${month}${q}`);
 }
 
 export async function confirmBilling(req: BillingConfirmRequest): Promise<BillingConfirmResponse> {
@@ -952,6 +1185,12 @@ export async function confirmBilling(req: BillingConfirmRequest): Promise<Billin
   });
 }
 
+
+// ── 月別状況(新UI 3-8) ──
+
+export async function fetchStatusMatrix(month: string): Promise<import("./types").StatusMatrix> {
+  return fetchJson(`${BASE}/api/v1/status/matrix?month=${month}`);
+}
 
 // ── アサイン編成(新UI 3-2) ──
 

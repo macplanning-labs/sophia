@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 
 use crate::infrastructure::sync_lock::with_sync_lock;
+use crate::infrastructure::repositories::stamp_repo;
+use crate::domain::authz::stamp::StampMode;
 
 /// 同期状態ファイルのパス
 const SYNC_STATE_FILE: &str = ".edi_sync_state.json";
@@ -216,8 +218,13 @@ impl EdiSync {
                 .await { tracing::error!("DB error: {:?}", e); }
                 updated += 1;
             } else {
+                // 担当スタンプ(自動取込): 親 → 受け皿(設計書 §6.6・D16)。取得に失敗しても同期は止めず、担当なしで作る(U10)
+                let stamp = {
+                    let mut conn = self.sophia.acquire().await?;
+                    stamp_repo::for_auto_client(&mut conn).await.log_err().unwrap_or_default()
+                };
                 if let Err(e) = sqlx::query(
-                    "INSERT INTO m_client (client_id, name, postal_code, address, phone, email) VALUES ($1, $2, $3, $4, $5, $6)"
+                    "INSERT INTO m_client (client_id, name, postal_code, address, phone, email, owner_org_unit_id, owner_employee_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
                 )
                 .bind(format!("C{:04}", r.id))
                 .bind(&r.name)
@@ -225,6 +232,8 @@ impl EdiSync {
                 .bind(r.address.as_deref().unwrap_or(""))
                 .bind(r.tel.as_deref().unwrap_or(""))
                 .bind(r.email.as_deref().unwrap_or(""))
+                .bind(stamp.org_unit_id)
+                .bind(stamp.employee_id)
                 .execute(&self.sophia)
                 .await { tracing::error!("DB error: {:?}", e); }
                 created += 1;
@@ -320,8 +329,14 @@ impl EdiSync {
                     .execute(&self.sophia).await { tracing::error!("DB error: {:?}", e); }
                 updated += 1;
             } else {
-                if let Err(e) = sqlx::query("INSERT INTO m_project (project_id, name) VALUES ($1, $2)")
+                // 担当スタンプ(自動取込): 親 → 受け皿(設計書 §6.6・D16)。取得に失敗しても同期は止めず、担当なしで作る(U10)
+                let stamp = {
+                    let mut conn = self.sophia.acquire().await?;
+                    stamp_repo::for_project(&mut conn, None, StampMode::AutoImport).await.log_err().unwrap_or_default()
+                };
+                if let Err(e) = sqlx::query("INSERT INTO m_project (project_id, name, owner_org_unit_id, owner_employee_id) VALUES ($1, $2, $3, $4)")
                     .bind(&r.project_id).bind(&r.name)
+                    .bind(stamp.org_unit_id).bind(stamp.employee_id)
                     .execute(&self.sophia).await { tracing::error!("DB error: {:?}", e); }
                 created += 1;
             }
@@ -429,12 +444,18 @@ impl EdiSync {
             if exists {
                 updated += 1;
             } else {
+                // 担当スタンプ(自動取込): 親 → 受け皿(設計書 §6.6・D16)。取得に失敗しても同期は止めず、担当なしで作る(U10)
+                let stamp = {
+                    let mut conn = self.sophia.acquire().await?;
+                    stamp_repo::for_project_child(&mut conn, &r.project_id, "m_partner_contract", StampMode::AutoImport).await.log_err().unwrap_or_default()
+                };
                 if let Err(e) = sqlx::query(
                     r#"INSERT INTO m_partner_contract (
                         partner_id, project_id, engineer_id, start_date, end_date,
                         base_rate, settlement_type, lower_limit_hours, upper_limit_hours,
-                        deduction_rate, overtime_rate, effort, is_active
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true)"#
+                        deduction_rate, overtime_rate, effort, is_active,
+                        owner_org_unit_id, owner_employee_id
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true, $13, $14)"#
                 )
                 .bind(&r.partner_id).bind(&r.project_id).bind(eng_id)
                 .bind(r.work_start).bind(r.work_end)
@@ -445,6 +466,8 @@ impl EdiSync {
                 .bind(r.shortage_rate.unwrap_or(0))
                 .bind(r.excess_rate.unwrap_or(0))
                 .bind(r.effort.unwrap_or(rust_decimal::Decimal::ONE))
+                .bind(stamp.org_unit_id)
+                .bind(stamp.employee_id)
                 .execute(&self.sophia)
                 .await { tracing::error!("DB error: {:?}", e); }
                 created += 1;
@@ -492,17 +515,24 @@ impl EdiSync {
             if exists {
                 updated += 1;
             } else {
+                // 担当スタンプ(自動取込): 親 → 受け皿(設計書 §6.6・D16)。取得に失敗しても同期は止めず、担当なしで作る(U10)
+                let stamp = {
+                    let mut conn = self.sophia.acquire().await?;
+                    stamp_repo::for_project_child(&mut conn, &r.project_id, "t_purchase_order", StampMode::AutoImport).await.log_err().unwrap_or_default()
+                };
                 if let Err(e) = sqlx::query(
                     r#"INSERT INTO t_purchase_order (
                         order_id, uuid, partner_id, project_id, order_date,
-                        work_start, work_end, remarks, status, created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'DRAFT', $9, $10)"#
+                        work_start, work_end, remarks, status, created_at, updated_at,
+                        owner_org_unit_id, owner_employee_id
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'DRAFT', $9, $10, $11, $12)"#
                 )
                 .bind(&r.order_id).bind(r.uuid)
                 .bind(&r.customer_id).bind(&r.project_id)
                 .bind(r.order_date).bind(r.work_start).bind(r.work_end)
                 .bind(r.remarks.as_deref().unwrap_or(""))
                 .bind(r.created_at).bind(r.updated_at)
+                .bind(stamp.org_unit_id).bind(stamp.employee_id)
                 .execute(&self.sophia)
                 .await { tracing::error!("DB error: {:?}", e); }
                 created += 1;
@@ -557,17 +587,25 @@ impl EdiSync {
             if exists {
                 updated += 1;
             } else {
+                // 取り込む受注には顧客・契約の情報が無いので、受け皿だけが担当の拠り所になる
+                // 担当スタンプ(自動取込): 親 → 受け皿(設計書 §6.6・D16)。取得に失敗しても同期は止めず、担当なしで作る(U10)
+                let stamp = {
+                    let mut conn = self.sophia.acquire().await?;
+                    stamp_repo::for_received_order(&mut conn, None, None, StampMode::AutoImport).await.log_err().unwrap_or_default()
+                };
                 if let Err(e) = sqlx::query(
                     r#"INSERT INTO t_received_order (
                         received_order_no, uuid, target_month, work_start, work_end,
-                        project_name, status, created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#
+                        project_name, status, created_at, updated_at,
+                        owner_org_unit_id, owner_employee_id
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#
                 )
                 .bind(&r.received_order_no).bind(r.uuid)
                 .bind(r.target_month).bind(r.work_start).bind(r.work_end)
                 .bind(r.project_name.as_deref().unwrap_or(""))
                 .bind(r.status.as_deref().unwrap_or("REGISTERED"))
                 .bind(r.created_at).bind(r.updated_at)
+                .bind(stamp.org_unit_id).bind(stamp.employee_id)
                 .execute(&self.sophia)
                 .await { tracing::error!("DB error: {:?}", e); }
                 created += 1;

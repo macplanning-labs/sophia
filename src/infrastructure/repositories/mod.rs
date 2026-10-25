@@ -7,6 +7,14 @@
 pub mod base;
 
 pub mod client_repo;
+pub mod sent_email_repo;
+pub mod stamp_repo;
+pub mod org_repo;
+pub mod role_repo;
+pub mod org_assignment_repo;
+pub mod org_change_log_repo;
+pub mod owner_transfer_repo;
+pub mod authz_repo;
 pub mod partner_repo;
 pub mod project_repo;
 pub mod assignment_repo;
@@ -20,6 +28,7 @@ pub mod workflow_repo;
 pub mod mail_repo;
 pub mod received_email_repo;
 pub mod mail_brief_repo;
+pub mod mfa_attempt_repo;
 pub mod employee_repo;
 pub mod master_repo;
 pub mod invite_repo;
@@ -29,6 +38,7 @@ pub mod security_repo;
 pub mod user_repo;
 pub mod auth_repo;
 pub mod attempt_lock_store;
+pub mod login_attempt_repo;
 pub mod jwt_blacklist_repo;
 pub mod company_info_repo;
 pub mod peppol_repo;
@@ -39,6 +49,9 @@ pub mod email_template_repo;
 pub mod api_key_repo;
 pub mod api_access_log_repo;
 pub mod documents_search_repo;
+pub mod issued_document_repo;
+pub mod integration_repo;
+pub mod bank_account_repo;
 
 #[cfg(test)]
 pub(crate) mod test_support;

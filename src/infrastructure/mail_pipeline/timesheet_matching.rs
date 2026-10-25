@@ -11,7 +11,8 @@ use sqlx::PgPool;
 
 use super::phase3_parse_register::{month_end_date, normalize_engineer_name_key};
 use crate::domain::models::mail_pipeline::PhaseError;
-use crate::infrastructure::repositories::order_repo;
+use crate::infrastructure::repositories::{order_repo, stamp_repo};
+use crate::domain::authz::stamp::StampMode;
 
 // 勤務表を読み取り、氏名・対象月・契約まで照合した結果
 struct ResolvedTimesheet {
@@ -155,13 +156,25 @@ async fn save_timesheet(
         return Ok(existing_id);
     }
 
+    // 担当スタンプ(自動取込): 契約の案件 → 顧客 → 受け皿(設計書 §6.6・D16)
+    let stamp = {
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|e| PhaseError::Transient(format!("担当の決定エラー: {e}")))?;
+        stamp_repo::for_timesheet(&mut conn, Some(r.contract_id), StampMode::AutoImport)
+            .await
+            .map_err(|e| PhaseError::Transient(format!("担当の決定エラー: {e}")))?
+    };
+
     let new_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO t_monthly_timesheet (
             client_contract_id, target_month, status, total_hours, work_days,
             overtime_hours, night_hours, holiday_hours,
-            daily_data, original_filename, alerts_json, uploaded_at
-        ) VALUES ($1, $2, 'UPLOADED', $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+            daily_data, original_filename, alerts_json, uploaded_at,
+            owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, 'UPLOADED', $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11, $12)
         RETURNING id
         "#,
     )
@@ -175,6 +188,8 @@ async fn save_timesheet(
     .bind(&daily_data)
     .bind(attachment_filename)
     .bind(&alerts_json)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(pool)
     .await
     .map_err(|e| PhaseError::Transient(format!("稼働報告INSERTエラー: {e}")))?;
@@ -343,24 +358,27 @@ fn looks_like_timesheet_hint(filename: &str, subject: &str) -> bool {
 }
 
 /// 指定月の結び付け画面のデータ（左: 取引先ごとの受注、右: 届いた勤務表と提案）
-pub async fn board(pool: &PgPool, month: NaiveDate) -> Result<serde_json::Value, String> {
+pub async fn board(pool: &PgPool, month: NaiveDate, filter: &crate::domain::authz::list_filter::ListFilter) -> Result<serde_json::Value, String> {
     // ── 左: 受注 ──
+    // 見える範囲(担当部署)の受注だけにする。入口の権限表に頼らない(DEMO-000254)
+    let mut qb = sqlx::QueryBuilder::new(
+        r#"SELECT o.id, o.client_id, c.name, e.name, o.project_name, o.status, o.client_contract_id,
+                  t.id, t.status, t.total_hours::float8
+           FROM t_received_order o
+           JOIN m_client c ON c.id = o.client_id
+           LEFT JOIN m_engineer e ON e.id = o.engineer_id
+           LEFT JOIN t_monthly_timesheet t
+                  ON t.client_contract_id = o.client_contract_id AND t.target_month = o.target_month
+           WHERE o.target_month = "#,
+    );
+    qb.push_bind(month).push(" AND ");
+    crate::infrastructure::authz_sql::push_where(&mut qb, filter, "o.owner_org_unit_id", "o.owner_employee_id");
+    qb.push(" ORDER BY c.name, e.name, o.id");
     let order_rows: Vec<(i64, i64, String, Option<String>, String, String, Option<i64>, Option<i64>, Option<String>, Option<f64>)> =
-        sqlx::query_as(
-            r#"SELECT o.id, o.client_id, c.name, e.name, o.project_name, o.status, o.client_contract_id,
-                      t.id, t.status, t.total_hours::float8
-               FROM t_received_order o
-               JOIN m_client c ON c.id = o.client_id
-               LEFT JOIN m_engineer e ON e.id = o.engineer_id
-               LEFT JOIN t_monthly_timesheet t
-                      ON t.client_contract_id = o.client_contract_id AND t.target_month = o.target_month
-               WHERE o.target_month = $1
-               ORDER BY c.name, e.name, o.id"#,
-        )
-        .bind(month)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("受注の取得に失敗しました: {e}"))?;
+        qb.build_query_as()
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("受注の取得に失敗しました: {e}"))?;
 
     let engineer_names: Vec<String> = sqlx::query_scalar("SELECT name FROM m_engineer")
         .fetch_all(pool)

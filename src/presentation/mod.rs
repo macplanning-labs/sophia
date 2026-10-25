@@ -4,3 +4,4 @@ pub mod api_response;
 pub mod cookie_util;
 pub mod auth_messages;
 pub mod http_util;
+pub mod route_table;

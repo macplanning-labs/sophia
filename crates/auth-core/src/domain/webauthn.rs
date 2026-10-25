@@ -9,8 +9,8 @@
 //! そのままauth-coreに移植したので、Step 1の時点で追加実装は不要。
 //! ドキュメント側の記述更新を検討されたい。
 //!
-//! RP ID/Originの解決はSophiaが採用している「リクエストのHost/X-Forwarded-Proto
-//! から動的解決する」方式を踏襲している（[`create_webauthn_from_headers`]）。
+//! RP ID/Originは「リクエストのHost/X-Forwarded-Protoから動的解決する」方式に
+//! 対応している（[`create_webauthn_from_headers`]）。
 
 use axum::http::HeaderMap;
 use url::Url;
@@ -23,9 +23,9 @@ use crate::error::AuthError;
 
 /// WebAuthn設定を初期化してWebauthnインスタンスを返す。
 ///
-/// - `rp_id` — Relying Party ID（ドメイン名、例: "localhost", "wip.example.com"）
+/// - `rp_id` — Relying Party ID（ドメイン名、例: "localhost", "senn.example.com"）
 /// - `rp_origin` — Relying Party Origin（例: "http://localhost:3000"）
-/// - `rp_name` — 表示名（例: "WIP — プロジェクト管理ツール"）
+/// - `rp_name` — 表示名（例: "SENN"）
 pub fn create_webauthn(rp_id: &str, rp_origin: &str, rp_name: &str) -> Result<Webauthn, AuthError> {
     let origin = Url::parse(rp_origin)
         .map_err(|e| AuthError::WebAuthn(format!("無効なRP Origin '{rp_origin}': {e}")))?;
@@ -168,8 +168,8 @@ pub fn finish_authentication(
 // discoverable方式（上記）とは別に、呼び出し側が事前にどのユーザーのPasskeyを
 // 検証対象にするか特定できている場合向けの、webauthn-rs標準の
 // start_passkey_authentication/finish_passkey_authentication をそのまま薄く
-// ラップしたもの。Sophia（本人確認済みユーザーのMFA用パスキー、または
-// 全ユーザーのPasskeyを事前に読み込んだ上でのパスワードレスログイン）が使用する。
+// ラップしたもの。本人確認済みユーザーのMFA用パスキー、または
+// 全ユーザーのPasskeyを事前に読み込んだ上でのパスワードレスログインで使用する。
 // discoverable方式と異なり、未認証の呼び出し元にcredential一覧(allowCredentials)
 // が開示される点に注意（用途に応じて使い分けること）。
 

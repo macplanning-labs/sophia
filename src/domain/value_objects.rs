@@ -8,6 +8,9 @@ use rust_decimal::prelude::ToPrimitive;
 use crate::domain::services::static_regex::compile_static;
 use std::sync::LazyLock;
 
+/// 口座番号(平文と DB の暗号文を型で分ける。DEMO-000233 S2-G2-1)
+pub mod account_number;
+
 /// 精算条件（値オブジェクト）。
 ///
 /// SES契約における精算計算ロジックの唯一の実装箇所。

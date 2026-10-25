@@ -145,23 +145,18 @@ export function ProjectEditModal({ projectId, open, onClose }: Props) {
       loading={updateMutation.isPending || deleteMutation.isPending || detailLoading || !form}
       onSubmit={() => form && updateMutation.mutate(form)}
       onClose={onClose}
-      footerStart={
-        canDelete ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
-            disabled={deleteMutation.isPending || updateMutation.isPending}
-            onClick={() => setConfirmDelete(true)}
-          >
-            {deleteMutation.isPending ? "削除中…" : "削除"}
-          </Button>
-        ) : project?.is_active ? (
-          <p className="text-[11px] text-muted-foreground self-center max-w-[14rem]">
-            削除するには先に「有効」を外して保存してください
-          </p>
-        ) : undefined
+      footerEnd={
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
+          disabled={!canDelete || deleteMutation.isPending || updateMutation.isPending}
+          title={!canDelete && project?.is_active ? "削除するには先に「有効」を外して保存してください" : undefined}
+          onClick={() => setConfirmDelete(true)}
+        >
+          {deleteMutation.isPending ? "削除中…" : "削除"}
+        </Button>
       }
     >
       {!form || detailLoading ? (

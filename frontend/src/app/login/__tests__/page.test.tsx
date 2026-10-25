@@ -20,13 +20,20 @@ function renderLoginPage() {
   );
 }
 
+/**
+ * fetch を、呼び出し先で振り分ける。
+ * - 社内 SSO の問い合わせ(/auth/sso/status)は、既定で「無効」を返す(SSO が無いサーバーと同じ。既存のテストは従来どおり)。
+ * - それ以外(パスワードログインなど)は、渡した本文を返す。
+ */
 function mockLoginResponse(body: unknown, status = 200) {
   vi.stubGlobal(
     "fetch",
-    vi.fn().mockResolvedValue({
-      status,
-      json: async () => body,
-    } as Response)
+    vi.fn().mockImplementation(async (url: string) => {
+      if (String(url).includes("/auth/sso/")) {
+        return { status: 200, ok: true, json: async () => ({ enabled: false }) } as Response;
+      }
+      return { status, json: async () => body } as Response;
+    })
   );
 }
 

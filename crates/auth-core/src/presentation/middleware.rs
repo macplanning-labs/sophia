@@ -78,7 +78,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_disallowed_origin_on_post() {
-        let allowed = Arc::new(vec!["https://wip.example.com".to_string()]);
+        let allowed = Arc::new(vec!["https://senn.example.com".to_string()]);
         let app: Router = Router::new()
             .route("/x", post(|| async { "ok" }))
             .layer(axum::middleware::from_fn(origin_check_middleware(allowed)));
@@ -100,7 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn allows_matching_origin_on_post() {
-        let allowed = Arc::new(vec!["https://wip.example.com".to_string()]);
+        let allowed = Arc::new(vec!["https://senn.example.com".to_string()]);
         let app: Router = Router::new()
             .route("/x", post(|| async { "ok" }))
             .layer(axum::middleware::from_fn(origin_check_middleware(allowed)));
@@ -110,7 +110,7 @@ mod tests {
                 Request::builder()
                     .method(Method::POST)
                     .uri("/x")
-                    .header(header::ORIGIN, "https://wip.example.com")
+                    .header(header::ORIGIN, "https://senn.example.com")
                     .body(Body::empty())
                     .unwrap(),
             )

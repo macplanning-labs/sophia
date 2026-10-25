@@ -11,6 +11,7 @@ import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import Link from "next/link";
 import { toast } from "sonner";
 import type { InvoiceRow } from "@/lib/types";
+import { RevisionBadges } from "@/components/document-revision";
 
 export default function InvoicesPage() {
   return (
@@ -69,7 +70,8 @@ function InvoicesPageContent() {
     return `¥${amount.toLocaleString()}`;
   };
 
-  const isDeletable = (invoice: InvoiceRow) => !invoice.client_accepted_at;
+  // 相手に送る前だけ削除できる(送ったあと・承諾したあとは削除できない)
+  const isDeletable = (invoice: InvoiceRow) => !invoice.client_accepted_at && invoice.status !== "SENT";
 
   const deletableRows = useMemo(
     () => filteredInvoices.filter(isDeletable),
@@ -168,20 +170,28 @@ function InvoicesPageContent() {
         onConfirm={handleConfirmDelete}
         onCancel={() => setConfirmOpen(false)}
       />
-      {selectedIds.size > 0 && (
-        <div className="flex items-center gap-3 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-          <span className="text-sm text-blue-400">選択中: {selectedIds.size}件</span>
-          <Button
-            size="sm"
-            variant="outline"
-            className="border-red-500/30 text-red-400 hover:text-red-300 hover:border-red-400 ml-auto"
-            onClick={handleBulkDelete}
-            disabled={isDeleting}
-          >
-            選択した{selectedIds.size}件を削除
-          </Button>
-        </div>
-      )}
+      {/* 一括削除のバーは、消さずに常に出す(選択が0件のときは、灰色の見た目と非活性。バーが出入りして、表が上下にずれない) */}
+      <div
+        className={
+          selectedIds.size > 0
+            ? "flex items-center gap-3 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg"
+            : "flex items-center gap-3 p-3 bg-muted/20 border border-border rounded-lg"
+        }
+      >
+        <span className={selectedIds.size > 0 ? "text-sm text-blue-400" : "text-sm text-muted-foreground"}>
+          選択中: {selectedIds.size}件
+        </span>
+        <Button
+          size="sm"
+          variant="outline"
+          className="border-red-500/30 text-red-400 hover:text-red-300 hover:border-red-400 ml-auto"
+          onClick={handleBulkDelete}
+          disabled={selectedIds.size === 0 || isDeleting}
+          title={selectedIds.size === 0 ? "削除する行を、左のチェックで選んでください" : undefined}
+        >
+          選択した{selectedIds.size}件を削除
+        </Button>
+      </div>
       <div className="bg-card border border-border rounded-lg overflow-hidden">
         {isLoading ? (
           <div className="p-8 space-y-3">{[...Array(4)].map((_, i) => <div key={i} className="h-10 bg-muted/50 rounded animate-pulse" />)}</div>
@@ -242,13 +252,14 @@ function InvoicesPageContent() {
                       onChange={() => toggleRowSelection(i.id, canDelete)}
                       disabled={!canDelete}
                       className="rounded border-border cursor-pointer disabled:opacity-30 disabled:cursor-default"
-                      title={!canDelete ? "クライアント受領確認済みのため削除できません" : undefined}
+                      title={!canDelete ? "相手に送った請求書は削除できません" : undefined}
                     />
                   </TableCell>
                   <TableCell className="text-sm font-mono text-foreground">
                     <Link href={`/invoices/${i.id}`} className="hover:underline">
                       {i.invoice_id}
                     </Link>
+                    <RevisionBadges revision={i.revision ?? 1} label={i.cancelled ? "取り消し済み" : i.superseded ? "差し替え済み" : null} />
                   </TableCell>
                   <TableCell className="text-sm text-foreground">{i.client_name}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{i.subject}</TableCell>

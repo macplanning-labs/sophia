@@ -105,18 +105,23 @@ pub async fn list_overdue_orders(pool: &PgPool) -> Result<Vec<OverdueOrder>> {
     Ok(rows)
 }
 
-/// 支払期限チェック対象を取得
+/// 支払期限チェック対象を取得(期限が今日・昨日の、パートナー未承諾の支払通知)。
+/// 期限は支払条件から計算して保存した payment_due_date。無い古いデータだけ、従来どおり作成から30日後とする(DEMO-000199)
 pub async fn list_payment_check_reminders(pool: &PgPool) -> Result<Vec<PaymentCheckReminder>> {
     let rows = sqlx::query_as::<_, PaymentCheckReminder>(
-        r#"SELECT pn.notice_id,
-                  COALESCE(p.name, '') as partner_name,
-                  (DATE(pn.created_at + INTERVAL '30 days') = CURRENT_DATE) as is_today
-           FROM t_payment_notice pn
-           JOIN t_purchase_order po ON po.id = pn.purchase_order_pk
-           JOIN m_partner p ON p.partner_id = po.partner_id
-           WHERE pn.partner_accepted_at IS NULL
-             AND DATE(pn.created_at + INTERVAL '30 days') BETWEEN CURRENT_DATE - INTERVAL '1 day' AND CURRENT_DATE
-           ORDER BY pn.created_at"#
+        r#"SELECT notice_id, partner_name, (due = CURRENT_DATE) AS is_today
+           FROM (
+               SELECT pn.notice_id,
+                      COALESCE(p.name, '') AS partner_name,
+                      COALESCE(pn.payment_due_date, DATE(pn.created_at + INTERVAL '30 days')) AS due,
+                      pn.created_at
+               FROM t_payment_notice pn
+               JOIN t_purchase_order po ON po.id = pn.purchase_order_pk
+               JOIN m_partner p ON p.partner_id = po.partner_id
+               WHERE pn.partner_accepted_at IS NULL
+           ) t
+           WHERE due BETWEEN CURRENT_DATE - 1 AND CURRENT_DATE
+           ORDER BY created_at"#
     )
     .fetch_all(pool)
     .await?;

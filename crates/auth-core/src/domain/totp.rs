@@ -92,7 +92,7 @@ pub fn decrypt_secret(blob_b64: &str, secret_key: &str) -> Result<Vec<u8>, AuthE
 
 /// AES-256-GCM暗号化結果（ciphertext/nonceを別々のDBカラムに保存するアプリ向け）。
 /// [`EncryptedSecret`]（単一blobカラム）とは異なり、ciphertext/nonceを個別に
-/// 永続化するスキーマ（例: Sophiaのsecret_encrypted/nonceカラム）向けに用意した。
+/// 永続化するスキーマ（例: secret_encrypted / nonce の2カラム）向けに用意した。
 pub struct EncryptedSecretSplit {
     pub ciphertext_b64: String,
     pub nonce_b64: String,
@@ -189,6 +189,54 @@ pub fn verify_code(
     Ok(totp.check_current(code).unwrap_or(false))
 }
 
+/// TOTP の 1 区間の長さ(秒)と、時計のずれの許容(前後の区間の数)
+const STEP_SECS: u64 = 30;
+const SKEW_STEPS: i64 = 1;
+
+/// コードが合う区間(UNIX 時間 / 30 秒)を返す。前後 1 区間まで許容する(時計のずれに備える)。合わなければ None。
+///
+/// どの区間で合ったかを知る必要がある(**使用済みの区間のコードを断る**ため。DEMO-000153 A-3)。
+/// 比較は、合う位置によって時間が変わらないよう、全部の区間を比べ、定数時間で行う。
+pub fn matching_step(
+    secret_bytes: &[u8],
+    code: &str,
+    now_unix: u64,
+) -> Result<Option<i64>, AuthError> {
+    let totp = build_totp(secret_bytes, "", "")?;
+    let current_step = (now_unix / STEP_SECS) as i64;
+    let mut matched: Option<i64> = None;
+    for offset in -SKEW_STEPS..=SKEW_STEPS {
+        let step = current_step + offset;
+        if step < 0 {
+            continue;
+        }
+        let expected = totp.generate((step as u64) * STEP_SECS);
+        if constant_time_eq(expected.as_bytes(), code.as_bytes()) {
+            matched = Some(step);
+        }
+    }
+    Ok(matched)
+}
+
+/// `matching_step` の、Base32 平文シークレット版(pyotp 互換)
+pub fn matching_step_base32(
+    secret_base32: &str,
+    code: &str,
+    now_unix: u64,
+) -> Result<Option<i64>, AuthError> {
+    let secret_bytes = Secret::Encoded(secret_base32.to_string())
+        .to_bytes()
+        .map_err(|e| AuthError::Totp(format!("TOTP secret error: {e}")))?;
+    matching_step(&secret_bytes, code, now_unix)
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// 秘密鍵のBase32表現を返す（手動入力用のバックアップコード表示）。
 pub fn secret_to_base32(secret_bytes: &[u8]) -> String {
     Secret::Raw(secret_bytes.to_vec()).to_encoded().to_string()
@@ -232,11 +280,51 @@ pub fn generate_totp_setup(issuer: &str, username: &str) -> Result<(String, Stri
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn matching_step_accepts_current_and_adjacent_but_not_further() {
+        let secret = generate_secret();
+        let now = 1_800_000_000u64;
+        let step = (now / 30) as i64;
+        let totp = build_totp(&secret, "t", "u").unwrap();
+        let code_at = |unix: u64| totp.generate(unix);
+        assert_eq!(
+            matching_step(&secret, &code_at(now), now).unwrap(),
+            Some(step)
+        );
+        assert_eq!(
+            matching_step(&secret, &code_at(now - 30), now).unwrap(),
+            Some(step - 1)
+        );
+        assert_eq!(
+            matching_step(&secret, &code_at(now + 30), now).unwrap(),
+            Some(step + 1)
+        );
+        assert_eq!(
+            matching_step(&secret, &code_at(now - 90), now).unwrap(),
+            None
+        );
+        assert_eq!(matching_step(&secret, "12345", now).unwrap(), None);
+        assert_eq!(matching_step(&secret, "", now).unwrap(), None);
+    }
+
+    #[test]
+    fn matching_step_base32_matches_raw_version() {
+        let secret = generate_secret();
+        let b32 = secret_to_base32(&secret);
+        let now = 1_800_000_000u64;
+        let code = build_totp(&secret, "t", "u").unwrap().generate(now);
+        assert_eq!(
+            matching_step_base32(&b32, &code, now).unwrap(),
+            matching_step(&secret, &code, now).unwrap()
+        );
+        assert!(matching_step_base32("!!!not-base32!!!", &code, now).is_err());
+    }
+
     use super::*;
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let secret_key = "test-secret-key-for-wip";
+        let secret_key = "test-secret-key";
         let original = b"test-totp-secret-bytes-here";
 
         let encrypted = encrypt_secret(original, secret_key).unwrap();
@@ -273,10 +361,10 @@ mod tests {
 
     #[test]
     fn base32_roundtrip_matches_current_code() {
-        let (secret_base32, _uri) = generate_totp_setup("WIP", "alice").unwrap();
+        let (secret_base32, _uri) = generate_totp_setup("SENN", "alice").unwrap();
         let secret_bytes = Secret::Encoded(secret_base32.clone()).to_bytes().unwrap();
-        let totp = build_totp(&secret_bytes, "WIP", "alice").unwrap();
+        let totp = build_totp(&secret_bytes, "SENN", "alice").unwrap();
         let code = totp.generate_current().unwrap();
-        assert!(verify_code_base32(&secret_base32, "WIP", &code).unwrap());
+        assert!(verify_code_base32(&secret_base32, "SENN", &code).unwrap());
     }
 }

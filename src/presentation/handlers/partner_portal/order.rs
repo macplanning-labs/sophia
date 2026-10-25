@@ -16,7 +16,10 @@ pub async fn api_dashboard(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> impl IntoResponse {
-    let partner_id = auth_user.partner_id().unwrap_or("unknown").to_string();
+    // 取引先が特定できないときは、文字列 "unknown" で検索せず、何も返さない(DEMO-000181 項目3)
+    let Some(partner_id) = auth_user.partner_id().map(|s| s.to_string()) else {
+        return axum::Json(serde_json::json!({ "partner_id": "", "order_count": 0, "timesheet_count": 0 }));
+    };
     let order_count = order_repo::count_orders_for_partner(&pool, &partner_id).await.log_err().unwrap_or(0);
     let timesheet_count = order_repo::count_timesheets_for_partner(&pool, &partner_id).await.log_err().unwrap_or(0);
     axum::Json(serde_json::json!({ "partner_id": partner_id, "order_count": order_count, "timesheet_count": timesheet_count }))
@@ -33,7 +36,10 @@ pub async fn api_orders(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> impl IntoResponse {
-    let partner_id = auth_user.partner_id().unwrap_or("unknown");
+    // 取引先が特定できないときは、文字列 "unknown" で検索せず、何も返さない(DEMO-000181 項目3)
+    let Some(partner_id) = auth_user.partner_id() else {
+        return axum::Json(serde_json::json!({ "orders": Vec::<serde_json::Value>::new() }));
+    };
 
     let rows = order_repo::list_portal_orders(&pool, partner_id).await.log_err().unwrap_or_default();
 
@@ -64,7 +70,10 @@ pub async fn api_order_approve(
     use sha2::{Sha256, Digest};
     use crate::domain::services::pdf_generator::PdfGenerator;
 
-    let partner_id = auth_user.partner_id().unwrap_or("unknown");
+    // 取引先が特定できないときは、文字列 "unknown" で検索せず、何も返さない(DEMO-000181 項目3)
+    let Some(partner_id) = auth_user.partner_id() else {
+        return axum::Json(serde_json::json!({ "status": "error", "error": "注文書が見つかりません" }));
+    };
 
     // 権限チェック + ステータス確認
     let order = order_repo::find_purchase_order_for_partner(&pool, &order_id, partner_id).await;
@@ -101,23 +110,29 @@ pub async fn api_order_approve(
     hasher.update(&pdf_bytes);
     let document_hash = format!("{:x}", hasher.finalize());
 
-    // PDF永続保存パス: uploads/acceptance/acceptance_{order_id}.pdf
-    let pdf_dir = std::path::Path::new("uploads/acceptance");
-    if let Err(e) = std::fs::create_dir_all(pdf_dir) {
-        tracing::error!("PDFディレクトリ作成エラー: {:?}", e);
-    }
-    let pdf_path = pdf_dir.join(format!("acceptance_{}.pdf", order_id));
-    if let Err(e) = std::fs::write(&pdf_path, &pdf_bytes) {
-        tracing::error!("PDF保存エラー: {:?}", e);
-        return axum::Json(serde_json::json!({ "status": "error", "error": "PDFの保存に失敗しました" }));
-    }
-
-    // DB更新: ステータス + 承諾日時 + ハッシュ + PDFパス
-    let result = order_repo::finalize_order_acceptance(&pool, &order_id, &document_hash, pdf_path.to_str().unwrap_or("")).await;
+    // DB更新: ステータス + 承諾日時 + ハッシュ + PDF の置き場所。
+    // PDF は、コンテナの中(作り直すと消える。DEMO-000087)ではなく、発行した書類の記録に残す(DEMO-000214)
+    let pdf_ref = format!("issued_document:acceptance:{}", order_id);
+    let result = order_repo::finalize_order_acceptance(&pool, &order_id, &document_hash, &pdf_ref).await;
 
     if let Err(e) = result {
         tracing::error!("承諾DB更新エラー: {:?}", e);
         return axum::Json(serde_json::json!({ "status": "error", "error": "データベース更新に失敗しました" }));
+    }
+
+    // 承諾の PDF を、承諾の瞬間のまま残す(DEMO-000214。失敗したら error ログと異常の通知)
+    let partner_name = order_repo::find_partner_name(&pool, partner_id).await.log_err().unwrap_or_default();
+    {
+        use crate::domain::services::issued_document::{record_sent, DocType, Issued};
+        record_sent(&pool, Issued {
+            doc_type: DocType::Acceptance,
+            doc_ref: &order_id,
+            party_name: &partner_name,
+            target_month: chrono::Datelike::with_day(&order.work_start, 1),
+            amount: None,
+            pdf: &pdf_bytes,
+        })
+        .await;
     }
 
     // 社内通知メール（token.rsの既存ロジックを再利用）
@@ -139,7 +154,13 @@ pub async fn api_order_pdf(
     use crate::domain::services::pdf_generator::PdfGenerator;
     use crate::presentation::http_util;
 
-    let partner_id = auth_user.partner_id().unwrap_or("unknown");
+    // 取引先が特定できないときは、文字列 "unknown" で検索せず、何も返さない(DEMO-000181 項目3)
+    let Some(partner_id) = auth_user.partner_id() else {
+        return http_util::build_response(
+            Response::builder().status(StatusCode::NOT_FOUND),
+            Body::from("注文書が見つかりません")
+        );
+    };
     let order = order_repo::find_purchase_order_for_partner(&pool, &order_id, partner_id).await.log_err().ok().flatten();
 
     let order = match order {
@@ -149,6 +170,20 @@ pub async fn api_order_pdf(
             Body::from("注文書が見つかりません")
         ),
     };
+
+    // 送った瞬間の PDF があれば、それを見せる(DEMO-000214)
+    use crate::domain::services::issued_document::{self, DocType};
+    let name = issued_document::file_name(DocType::PurchaseOrder, &order_id, chrono::Datelike::with_day(&order.work_start, 1));
+    let disposition = issued_document::content_disposition_inline(&name);
+    if let Some(pdf_bytes) = issued_document::frozen_pdf(&pool, DocType::PurchaseOrder, &order_id).await {
+        return http_util::build_response(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .header(header::CONTENT_DISPOSITION, disposition),
+            Body::from(pdf_bytes)
+        );
+    }
 
     let pdf_data = match crate::presentation::handlers::orders::build_purchase_order_pdf_data(&pool, &order).await {
         Ok(d) => d,
@@ -164,7 +199,7 @@ pub async fn api_order_pdf(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/pdf")
-                .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"order_{}.pdf\"", order_id)),
+                .header(header::CONTENT_DISPOSITION, disposition),
             Body::from(pdf_bytes)
         ),
         Err(e) => http_util::build_response(
@@ -186,7 +221,13 @@ pub async fn api_acceptance_pdf(
     use crate::domain::services::pdf_generator::PdfGenerator;
     use crate::presentation::http_util;
 
-    let partner_id = auth_user.partner_id().unwrap_or("unknown");
+    // 取引先が特定できないときは、文字列 "unknown" で検索せず、何も返さない(DEMO-000181 項目3)
+    let Some(partner_id) = auth_user.partner_id() else {
+        return http_util::build_response(
+            Response::builder().status(StatusCode::NOT_FOUND),
+            Body::from("注文書が見つかりません")
+        );
+    };
     let order = order_repo::find_purchase_order_for_partner(&pool, &order_id, partner_id).await.log_err().ok().flatten();
 
     let order = match order {
@@ -196,6 +237,20 @@ pub async fn api_acceptance_pdf(
             Body::from("注文書が見つかりません")
         ),
     };
+
+    // 承諾の瞬間の PDF があれば、それを見せる(DEMO-000214)
+    use crate::domain::services::issued_document::{self, DocType};
+    let name = issued_document::file_name(DocType::Acceptance, &order_id, chrono::Datelike::with_day(&order.work_start, 1));
+    let disposition = issued_document::content_disposition_inline(&name);
+    if let Some(pdf_bytes) = issued_document::frozen_pdf(&pool, DocType::Acceptance, &order_id).await {
+        return http_util::build_response(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .header(header::CONTENT_DISPOSITION, disposition),
+            Body::from(pdf_bytes)
+        );
+    }
 
     let pdf_data = match crate::presentation::handlers::orders::build_purchase_order_pdf_data(&pool, &order).await {
         Ok(d) => d,
@@ -211,7 +266,7 @@ pub async fn api_acceptance_pdf(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/pdf")
-                .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"acceptance_{}.pdf\"", order_id)),
+                .header(header::CONTENT_DISPOSITION, disposition),
             Body::from(pdf_bytes)
         ),
         Err(e) => http_util::build_response(

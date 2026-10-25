@@ -18,6 +18,18 @@ use super::StatusResponse;
 /// mail_pipeline::run_pipeline（Phase1〜4）を実行する。
 pub async fn edi_import(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::response::Response {
+    // 管理者だけ。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.is_admin() {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(edi_import_inner(State(pool)).await)
+}
+
+async fn edi_import_inner(
+    State(pool): State<PgPool>,
 ) -> (StatusCode, Json<StatusResponse>) {
     let result = crate::infrastructure::mail_pipeline::run_pipeline(&pool).await;
     let has_errors = result.has_errors();
@@ -34,6 +46,18 @@ pub async fn edi_import(
 /// 2. バックグラウンドでPDF生成 + Google Driveアップロード
 ///
 pub async fn edi_import_all(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::response::Response {
+    // 管理者だけ。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.is_admin() {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(edi_import_all_inner(State(pool)).await)
+}
+
+async fn edi_import_all_inner(
     State(pool): State<PgPool>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let mut messages: Vec<String> = Vec::new();
@@ -80,7 +104,7 @@ async fn generate_and_upload_pdfs(pool: &PgPool) -> anyhow::Result<()> {
         PdfGenerator, PurchaseOrderPdfData, OrderPdfItem,
         InvoicePdfData, InvoicePdfItem,
     };
-    use crate::domain::services::drive_service;
+    use crate::infrastructure::drive_service;
 
     let gen = PdfGenerator::new();
 
@@ -160,6 +184,7 @@ async fn generate_and_upload_pdfs(pool: &PgPool) -> anyhow::Result<()> {
         .await
         .log_err().unwrap_or_default();
 
+    let mut company_read_alerted = false;
     for inv in &invoices_without_pdf {
         let client_name: String = crate::infrastructure::repositories::client_repo::find_by_id(pool, inv.client_id)
             .await
@@ -173,11 +198,25 @@ async fn generate_and_upload_pdfs(pool: &PgPool) -> anyhow::Result<()> {
             .await
             .log_err().unwrap_or_default();
 
-        let company = crate::infrastructure::repositories::billing_repo::find_company_invoice_info(pool)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+        // 振込先を読めなければ、口座番号の空いた請求書を作らずに次へ進む(DEMO-000233 S2-G2-2)
+        let company = match crate::infrastructure::repositories::billing_repo::find_company_invoice_info(pool).await {
+            Ok(c) => c.unwrap_or_default(),
+            Err(e) => {
+                tracing::error!("[PDF] 請求書 {} 自社情報を読めず、PDFを作りません: {e:?}", inv.invoice_no);
+                // 同じ原因で請求書ごとに知らせない。1回の実行で1件だけ異常の通知を出す(既存の issued_document と同じく、通知は人が動く高さのみ)
+                if !company_read_alerted {
+                    company_read_alerted = true;
+                    let incident = crate::domain::services::chat_notifier::Incident::new(
+                        integration_core::Level::High,
+                        "請求書PDFを作れません（自社の振込先を読めません）",
+                        "請求書PDFが作られず、取引先へ送れない・送った PDF を残せない状態です（同じ実行では以後の通知を重ねません）",
+                        "DB の s_company_info と暗号化の鍵の設定を確認してください。詳細はサーバのログを確認",
+                    );
+                    crate::domain::services::chat_notifier::post(&incident).await;
+                }
+                continue;
+            }
+        };
         let (company_name, company_addr, company_tel, postal_code, fax, rep_title, rep_name, reg_number) =
             (company.name, company.address, company.tel, company.postal_code, company.fax, company.representative_title, company.representative_name, company.registration_number);
         let (bank_name, bank_branch, account_type, account_number, account_name) =

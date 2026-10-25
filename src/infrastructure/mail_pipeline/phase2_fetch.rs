@@ -16,7 +16,7 @@
 
 use sqlx::PgPool;
 
-use super::imap_util::{fetch_attachments_blocking, Attachment, ImapConfig};
+use super::imap_util::{fetch_attachments_blocking, load_imap_config, Attachment};
 use super::ops_message;
 use crate::domain::models::mail_pipeline::MAX_RETRY;
 
@@ -98,7 +98,7 @@ async fn fetch_attachment_sources(pool: &PgPool, result: &mut Phase2Result) {
         return;
     }
 
-    let config = match ImapConfig::load(pool).await {
+    let config = match load_imap_config(pool).await {
         Ok(c) => c,
         Err(e) => {
             let kind = ops_message::classify_phase1_fatal(&e);
@@ -119,7 +119,7 @@ async fn fetch_attachment_sources(pool: &PgPool, result: &mut Phase2Result) {
     };
 
     // IMAP通信(接続・検索・取得)は同期処理のため、Tokioのワーカースレッドをブロックしないよう
-    // spawn_blocking上でまとめて実行する（#073再発防止、開発標準書§2.3）。
+    // spawn_blocking上でまとめて実行する（#073再発防止、社内標準リポの開発標準書 §2.3）。
     let message_ids: Vec<String> = pending.iter().map(|p| p.message_id.clone()).collect();
     let fetch_results = match tokio::task::spawn_blocking(move || {
         fetch_attachments_blocking(&config, &message_ids)

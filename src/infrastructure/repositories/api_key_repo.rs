@@ -14,6 +14,8 @@ pub struct ApiKeyRow {
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 有効期限(NULL=無期限)
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// パーティ（クライアント）に属する全APIキーを取得
@@ -23,7 +25,7 @@ pub async fn list_by_party(
     party_id: &str,
 ) -> anyhow::Result<Vec<ApiKeyRow>> {
     let rows = sqlx::query_as::<_, ApiKeyRow>(
-        "SELECT id, party_type, party_id, key_prefix, scope, name, is_active, last_used_at, created_at, revoked_at \
+        "SELECT id, party_type, party_id, key_prefix, scope, name, is_active, last_used_at, created_at, revoked_at, expires_at \
          FROM t_company_api_key WHERE party_type = $1 AND party_id = $2 ORDER BY created_at DESC"
     )
     .bind(party_type)
@@ -42,11 +44,12 @@ pub async fn insert_key(
     api_key_hash: &str,
     scope: &str,
     name: &str,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO t_company_api_key (id, party_type, party_id, key_prefix, api_key_hash, scope, name, is_active) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true)"
+        "INSERT INTO t_company_api_key (id, party_type, party_id, key_prefix, api_key_hash, scope, name, is_active, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8)"
     )
     .bind(&id)
     .bind(party_type)
@@ -55,6 +58,7 @@ pub async fn insert_key(
     .bind(api_key_hash)
     .bind(scope)
     .bind(name)
+    .bind(expires_at)
     .execute(pool)
     .await?;
     Ok(id)
@@ -78,7 +82,7 @@ pub async fn find_active_key_meta(
     id: Uuid,
 ) -> anyhow::Result<Option<ApiKeyRow>> {
     let row = sqlx::query_as::<_, ApiKeyRow>(
-        "SELECT id, party_type, party_id, key_prefix, scope, name, is_active, last_used_at, created_at, revoked_at \
+        "SELECT id, party_type, party_id, key_prefix, scope, name, is_active, last_used_at, created_at, revoked_at, expires_at \
          FROM t_company_api_key WHERE id = $1 AND is_active = true"
     )
     .bind(id)

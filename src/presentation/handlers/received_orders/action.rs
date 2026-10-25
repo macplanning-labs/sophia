@@ -5,6 +5,7 @@ use axum::{
 };
 use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
+use crate::domain::authz::stamp::SKIPPED_NO_OWNER_NOTE;
 use crate::domain::services::rollforward;
 use crate::infrastructure::repositories::order_repo;
 use crate::presentation::api_response::AppError;
@@ -27,22 +28,59 @@ pub async fn rollforward_handler(
 }
 
 /// POST /received-orders/rollforward-all — 一括ロールフォワード
+///
+/// 担当が決まらない受注は作らずに続け、件数と案内を返す(`skipped_no_owner`)。
 pub async fn rollforward_all(
     State(pool): State<PgPool>,
-) -> impl IntoResponse {
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
     match rollforward::rollforward_all_recurring(&pool).await {
         Ok(results) => {
-            tracing::info!("一括ロールフォワード: {}件処理", results.len());
+            tracing::info!("一括ロールフォワード: {}件処理, 担当未決定でスキップ{}件", results.created.len(), results.skipped_no_owner);
+            let mut body = serde_json::json!({
+                "success": true,
+                "created": results.created.len(),
+                "skipped_no_owner": results.skipped_no_owner,
+            });
+            if results.skipped_no_owner > 0 {
+                body["message"] = serde_json::json!(SKIPPED_NO_OWNER_NOTE);
+            }
+            return axum::Json(body).into_response();
         }
         Err(e) => {
             tracing::error!("一括ロールフォワードエラー: {}", e);
         }
     }
-    Redirect::to("/received-orders")
+    Redirect::to("/received-orders").into_response()
 }
 
 /// POST /received-orders/{id}/send-report — 報告書メール送付
 pub async fn send_report(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
+    send_report_inner(State(pool), Path(id)).await.into_response()
+}
+
+async fn send_report_inner(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {

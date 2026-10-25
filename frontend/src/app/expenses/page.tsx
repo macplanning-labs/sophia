@@ -13,6 +13,7 @@ import {
 import type { ExpenseItem, ExpenseItemForm } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { PageHeader } from "@/components/ui/page-header";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { DetailModal } from "@/components/ui/detail-modal";
@@ -419,14 +420,16 @@ function ExpensesPageContent() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-center justify-end">
-        <button
-          onClick={openCreate}
-          className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-foreground text-sm font-medium rounded-lg transition-colors"
-        >
-          + 新規申請
-        </button>
-      </div>
+      <PageHeader
+        actions={
+          <button
+            onClick={openCreate}
+            className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-foreground text-sm font-medium rounded-lg transition-colors"
+          >
+            + 新規申請
+          </button>
+        }
+      />
       <div className="bg-card border border-border rounded-lg overflow-hidden">
         {isLoading ? (
           <div className="p-8 space-y-3">{[...Array(4)].map((_, i) => <div key={i} className="h-10 bg-muted/50 rounded animate-pulse" />)}</div>

@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { fetchProjects } from "@/lib/api";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -81,11 +82,13 @@ function ProjectsPageContent() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-center justify-end">
-        <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-foreground gap-1" onClick={() => router.push("/projects/new")}>
-          <Plus className="w-4 h-4" /> 新規作成
-        </Button>
-      </div>
+      <PageHeader
+        actions={
+          <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-foreground gap-1" onClick={() => router.push("/projects/new")}>
+            <Plus className="w-4 h-4" /> 新規作成
+          </Button>
+        }
+      />
       <div className="bg-card border border-border rounded-lg overflow-hidden">
         {isLoading ? (
           <div className="p-8 space-y-3">{[...Array(4)].map((_, i) => <div key={i} className="h-10 bg-muted/50 rounded animate-pulse" />)}</div>

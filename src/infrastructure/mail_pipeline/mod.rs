@@ -145,7 +145,7 @@ enum Phase1Outcome {
 ///   （`MAIL_PIPELINE_IMAP_RETRY_MAX` / `MAIL_PIPELINE_IMAP_RETRY_INTERVAL_SECS`）。
 ///   全試行失敗後にのみ致命アラート対象の Error を返す。
 async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
-    let mailbox = match imap_util::ImapConfig::load(pool).await {
+    let mailbox = match imap_util::load_imap_config(pool).await {
         Ok(c) => c.mailbox_id().to_string(),
         Err(e) => {
             let kind = ops_message::classify_phase1_fatal(&e);
@@ -173,7 +173,7 @@ async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
             return Phase1Outcome::Error {
                 message: error_msg,
                 attempts: vec![alert_policy::AttemptRecord {
-                    time: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    time: crate::domain::services::jst::format(chrono::Utc::now(), "%H:%M:%S"),
                     error: e,
                 }],
             };
@@ -231,7 +231,7 @@ async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
                     )
                 };
                 attempts.push(alert_policy::AttemptRecord {
-                    time: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    time: crate::domain::services::jst::format(chrono::Utc::now(), "%H:%M:%S"),
                     error: e.clone(),
                 });
                 return Phase1Outcome::Error {
@@ -243,7 +243,7 @@ async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
                 if ops_message::is_retryable_phase1_imap_error(&e) && attempt < max_attempts =>
             {
                 attempts.push(alert_policy::AttemptRecord {
-                    time: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    time: crate::domain::services::jst::format(chrono::Utc::now(), "%H:%M:%S"),
                     error: e.clone(),
                 });
                 tracing::warn!(
@@ -254,7 +254,7 @@ async fn run_phase1_with_breaker(pool: &PgPool) -> Phase1Outcome {
             }
             Err(e) => {
                 attempts.push(alert_policy::AttemptRecord {
-                    time: chrono::Local::now().format("%H:%M:%S").to_string(),
+                    time: crate::domain::services::jst::format(chrono::Utc::now(), "%H:%M:%S"),
                     error: e.clone(),
                 });
                 let detail = if attempt > 1 {

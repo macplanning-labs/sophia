@@ -365,7 +365,7 @@ pub async fn api_index(
         serde_json::json!({
             "id": row.id,
             "name": if row.name.is_empty() { "パスキー".to_string() } else { row.name },
-            "created_at": row.created_at.format("%Y-%m-%d %H:%M").to_string(),
+            "created_at": crate::domain::services::jst::format(row.created_at, "%Y-%m-%d %H:%M"),
         })
     }).collect();
 

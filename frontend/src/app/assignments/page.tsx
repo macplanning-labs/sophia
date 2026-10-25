@@ -12,6 +12,7 @@ import { useMounted } from "@/lib/useMounted";
 import { useDebounced } from "@/lib/useDebounced";
 import { useDragLink } from "@/hooks/use-drag-link";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
 import { LinkPickerMenu } from "@/components/ui/link-picker-menu";
 import { AssignmentPanel } from "@/components/assignments/assignment-panel";
 import { AddMemberModal } from "@/components/members/add-member-modal";
@@ -112,7 +113,8 @@ export default function AssignmentsPage() {
 
   return (
     <div className="p-6 space-y-4">
-      <div className="flex items-center justify-between gap-4">
+      <PageHeader
+        start={
         <ol className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm" aria-label="使い方">
           <li className="flex items-center gap-1.5"><span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary">1</span>右の要員をつかんで</li>
           <li aria-hidden className="text-muted-foreground">→</li>
@@ -121,13 +123,16 @@ export default function AssignmentsPage() {
           <li className="flex items-center gap-1.5"><span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/20 text-xs font-semibold text-primary">3</span>開いたパネルで条件を入れて、利益を確認し、アサイン作成</li>
           <li className="basis-full text-xs text-muted-foreground">ドラッグが難しいときは、要員の「案件を選ぶ」、または案件カードの「要員を選ぶ」から選べます。</li>
         </ol>
-        {enabled && (
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => setAddKind("EMPLOYEE")}><Plus className="h-4 w-4" />自社社員追加</Button>
-            <Button variant="outline" size="sm" onClick={() => setAddKind("PARTNER")}><Plus className="h-4 w-4" />パートナー要員追加</Button>
-          </div>
-        )}
-      </div>
+        }
+        actions={
+          enabled && (
+            <>
+              <Button variant="outline" size="sm" onClick={() => setAddKind("EMPLOYEE")}><Plus className="h-4 w-4" />自社社員追加</Button>
+              <Button variant="outline" size="sm" onClick={() => setAddKind("PARTNER")}><Plus className="h-4 w-4" />パートナー要員追加</Button>
+            </>
+          )
+        }
+      />
 
       <div className={`grid gap-6 lg:grid-cols-[1fr_340px] ${form ? "lg:pr-[480px]" : ""}`}>
         {/* 左: 取引先ごとの案件カード */}

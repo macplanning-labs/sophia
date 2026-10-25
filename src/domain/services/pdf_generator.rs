@@ -13,6 +13,9 @@ use serde::Serialize;
 use std::process::Command;
 use std::sync::OnceLock;
 
+use crate::domain::value_objects::account_number::AccountNumber;
+use crate::infrastructure::data_crypto::ensure_no_encrypted_payload;
+
 // ── スクリプトパス ──
 
 /// Pythonスクリプトのパス（Docker内: /app/scripts/pdf/pdf_gen.py）
@@ -92,7 +95,7 @@ pub struct InvoicePdfData {
     pub bank_name: String,
     pub bank_branch: String,
     pub account_type: String,
-    pub account_number: String,
+    pub account_number: AccountNumber,
     pub account_name: String,
 }
 
@@ -233,7 +236,6 @@ pub struct PaymentNoticePdfData {
     pub bank_name: String,
     pub bank_branch: String,
     pub account_type: String,
-    pub account_number: String,
     pub account_name: String,
     // EDI版互換
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -298,6 +300,8 @@ impl PdfGenerator {
 
     /// Python呼び出し共通処理
     fn call_python(pdf_type: &str, json_data: &str) -> Result<Vec<u8>> {
+        // 帳票に暗号文(enc1:)が混ざっていれば、PDF を作らず止める(値は出さない。DEMO-000233 S2-G2-2)
+        ensure_no_encrypted_payload(json_data).map_err(|e| anyhow::anyhow!("{pdf_type}: {e}"))?;
         let script = script_path();
         let python = resolve_python();
         let output = Command::new(python)
@@ -325,6 +329,12 @@ impl PdfGenerator {
     // ================================================================
 
     pub fn generate_invoice_pdf(&self, data: &InvoicePdfData) -> Result<Vec<u8>> {
+        Self::call_python("invoice", &Self::invoice_python_payload(data).to_string())
+    }
+
+    /// 請求書 PDF に渡す JSON(Python テンプレートへの入力)。振込先の口座番号は `bank.account_no` の平文
+    /// (Python 側 scripts/pdf/pdf_gen.py が `account_no` を読む。キー名を変えるときは両方を変えて試験で確かめる)
+    pub fn invoice_python_payload(data: &InvoicePdfData) -> serde_json::Value {
         // Python `invoice` テンプレートは歴史的に「代理請求書」向き:
         //   company = 宛先（御中）、partner = 発行者
         // クライアント向け自社請求では宛先=クライアント・発行者=自社にマッピングする。
@@ -388,11 +398,11 @@ impl PdfGenerator {
                 "bank_name": data.bank_name,
                 "bank_branch": data.bank_branch,
                 "account_type": data.account_type,
-                "account_number": data.account_number,
+                "account_no": data.account_number.expose(),
                 "account_name": data.account_name,
             },
         });
-        Self::call_python("invoice", &python_data.to_string())
+        python_data
     }
 
     // ================================================================
@@ -547,6 +557,11 @@ impl PdfGenerator {
         data: &PaymentNoticePdfData,
         partner: &PartnerInvoiceIssuer,
     ) -> Result<Vec<u8>> {
+        Self::call_python("invoice", &Self::partner_invoice_python_payload(data, partner).to_string())
+    }
+
+    /// 代理請求書 PDF に渡す JSON。振込先の口座番号は `bank.account_no` の平文(請求書と同じキー名)
+    pub fn partner_invoice_python_payload(data: &PaymentNoticePdfData, partner: &PartnerInvoiceIssuer) -> serde_json::Value {
         let python_data = serde_json::json!({
             "invoice_id": data.notice_id,
             "issue_date": data.notice_date.format("%Y年%m月%d日").to_string(),
@@ -589,11 +604,11 @@ impl PdfGenerator {
                 "bank_name": partner.bank_name,
                 "bank_branch": partner.bank_branch,
                 "account_type": partner.account_type,
-                "account_number": partner.account_number,
+                "account_no": partner.account_number.expose(),
                 "account_name": partner.account_name,
             },
         });
-        Self::call_python("invoice", &python_data.to_string())
+        python_data
     }
 }
 
@@ -609,7 +624,7 @@ pub struct PartnerInvoiceIssuer {
     pub bank_name: String,
     pub bank_branch: String,
     pub account_type: String,
-    pub account_number: String,
+    pub account_number: AccountNumber,
     pub account_name: String,
 }
 
@@ -643,6 +658,68 @@ mod tests {
         assert_eq!(format_number(1234567), "1,234,567");
         assert_eq!(format_number(-500), "-500");
         assert_eq!(format_number(-1234567), "-1,234,567");
+    }
+
+    #[test]
+    fn test_call_python_refuses_encrypted_payload_before_running_python() {
+        // 暗号文の形の値が JSON に混ざったら、Python を起動する前に止まり、値を出さない
+        let json = r#"{"bank":{"account_no":"enc1:k1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#;
+        let err = PdfGenerator::call_python("invoice", json).expect_err("暗号文は帳票に出さない");
+        let msg = err.to_string();
+        assert!(msg.contains("暗号化された値"), "理由が分かること: {msg}");
+        assert!(!msg.contains("enc1:"), "値を出さないこと: {msg}");
+    }
+
+    fn invoice_fixture(account: &str) -> InvoicePdfData {
+        InvoicePdfData {
+            invoice_id: "INV-KEY-0001".into(),
+            issue_date: NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            due_date: None,
+            client_name: "取引先株式会社".into(),
+            subject: "試験業務".into(),
+            items: vec![InvoicePdfItem { product_name: "試験業務".into(), man_month: "1.0".into(), unit_price: 100_000, amount: 100_000, ..Default::default() }],
+            subtotal: 100_000,
+            tax_amount: 10_000,
+            total: 110_000,
+            notes: String::new(),
+            company_name: "自社株式会社".into(),
+            company_postal_code: "100-0001".into(),
+            company_address: "東京都千代田区".into(),
+            company_tel: "03-0000-0000".into(),
+            company_fax: String::new(),
+            company_representative_title: "代表取締役".into(),
+            company_representative_name: "試験太郎".into(),
+            registration_number: "T1234567890123".into(),
+            bank_name: "試験銀行".into(),
+            bank_branch: "本店".into(),
+            account_type: "普通".into(),
+            account_number: AccountNumber::new(account).expect("平文として作れる"),
+            account_name: "カ)テスト".into(),
+        }
+    }
+
+    #[test]
+    fn invoice_payload_puts_plain_account_number_under_bank_account_no() {
+        // Python 側(pdf_gen.py)は bank.account_no を読む。キー名がずれると口座番号が空で出るため、ここで縛る
+        let payload = PdfGenerator::invoice_python_payload(&invoice_fixture("0012345"));
+        assert_eq!(payload["bank"]["account_no"], "0012345", "請求書: 平文の口座番号が bank.account_no に入る");
+        assert!(payload["bank"].get("account_number").is_none(), "請求書: 別名のキーを使わない");
+    }
+
+    #[test]
+    fn partner_invoice_payload_puts_plain_account_number_under_bank_account_no() {
+        let partner = PartnerInvoiceIssuer {
+            name: "パートナー株式会社".into(),
+            bank_name: "試験銀行".into(),
+            bank_branch: "支店".into(),
+            account_type: "普通".into(),
+            account_number: AccountNumber::new("7654321").expect("平文として作れる"),
+            account_name: "カ)パートナー".into(),
+            ..Default::default()
+        };
+        let payload = PdfGenerator::partner_invoice_python_payload(&PaymentNoticePdfData::default(), &partner);
+        assert_eq!(payload["bank"]["account_no"], "7654321", "代理請求書: 平文の口座番号が bank.account_no に入る");
+        assert!(payload["bank"].get("account_number").is_none(), "代理請求書: 別名のキーを使わない");
     }
 
     #[test]

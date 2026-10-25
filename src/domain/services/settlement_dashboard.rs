@@ -10,7 +10,9 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::{PgPool, FromRow};
 
+use crate::domain::authz::stamp::is_no_owner;
 use crate::domain::models::partner_contract::ApprovalStatus;
+use crate::domain::services::issue_error::IssueError;
 use crate::domain::models::actionable_error::ActionBlocker;
 use crate::infrastructure::repositories::settlement_repo;
 use crate::infrastructure::db_tx::commit_checked;
@@ -211,6 +213,69 @@ pub fn calculate_preview(rows: Vec<SettlementRow>) -> (Vec<SettlementViewRow>, S
     (view_rows, summary)
 }
 
+/// 見えない側の項目を伏せる(請求側 = 受注契約の金額・条件、支払側 = 発注契約の金額・条件・パートナー)。
+/// 行は、プレビュー計算の前に伏せる(伏せた側の金額は 0 になる)。DEMO-000260。
+pub fn mask_hidden_sides(row: &mut SettlementRow, invoice_visible: bool, payment_visible: bool) {
+    if !invoice_visible {
+        row.received_order_id = None;
+        row.invoice_issued = None;
+        row.billing_base_rate = 0;
+        row.billing_settlement_type = String::new();
+        row.billing_lower_limit = Decimal::ZERO;
+        row.billing_upper_limit = Decimal::ZERO;
+        row.billing_fixed_hours = None;
+        row.billing_deduction_rate = 0;
+        row.billing_overtime_rate = 0;
+        row.billing_effort = Decimal::ZERO;
+        row.billing_payment_terms = String::new();
+    }
+    if !payment_visible {
+        row.partner_id = None;
+        row.partner_name = None;
+        row.partner_contract_id = None;
+        row.notice_issued = None;
+        row.payment_base_rate = None;
+        row.payment_settlement_type = None;
+        row.payment_lower_limit = None;
+        row.payment_upper_limit = None;
+        row.payment_fixed_hours = None;
+        row.payment_deduction_rate = None;
+        row.payment_overtime_rate = None;
+        row.payment_effort = None;
+        row.payment_condition = String::new();
+        row.purchase_order_id = None;
+        row.purchase_order_status = None;
+    }
+}
+
+/// 片側が見えない行は、利益・利益率を出さない(伏せた側が 0 として計算されているため、実際より大きく見える)。
+/// サマリーの利益は、両側が見える行だけで計算し直す。`visibility` は、`calculate_preview` に渡した行と同じ順の `(請求側, 支払側)`。
+pub fn finish_redacted_preview(view_rows: &mut [SettlementViewRow], summary: &mut SettlementSummary, visibility: &[(bool, bool)]) {
+    let mut full_profit: i64 = 0;
+    let mut full_billing: i64 = 0;
+    for (vr, (inv, pay)) in view_rows.iter_mut().zip(visibility) {
+        if *inv && *pay {
+            full_profit += vr.profit as i64;
+            full_billing += vr.billing_amount as i64;
+        } else {
+            vr.profit = 0;
+            vr.profit_rate = 0.0;
+            vr.profit_rate_display = "-".to_string();
+        }
+    }
+    if visibility.iter().any(|(inv, _)| !*inv) {
+        // 請求側が見えない行の発行状況は、数えない(支払通知だけの人に、請求書の発行状況を出さない)
+        let visible: Vec<&SettlementViewRow> = view_rows.iter().zip(visibility).filter(|(_, (inv, _))| *inv).map(|(vr, _)| &*vr).collect();
+        summary.invoice_issued_count = visible.iter().filter(|vr| vr.row.invoice_issued.unwrap_or(false)).count();
+        summary.invoice_pending_count = visible.len() - summary.invoice_issued_count;
+    }
+    if visibility.iter().any(|(inv, pay)| !(*inv && *pay)) {
+        summary.total_profit = full_profit;
+        summary.avg_profit_rate = if full_billing > 0 { full_profit as f64 / full_billing as f64 * 100.0 } else { 0.0 };
+        summary.avg_profit_rate_display = format!("{:.1}", summary.avg_profit_rate);
+    }
+}
+
 /// 上司承認が必要かを判定
 pub async fn get_approval_threshold(pool: &PgPool) -> i32 {
     settlement_repo::get_notice_approval_threshold(pool)
@@ -261,7 +326,7 @@ pub async fn create_notices_by_partner(
     pool: &PgPool,
     view_rows: &[SettlementViewRow],
     target_month: NaiveDate,
-) -> Result<Vec<CreatedNotice>, String> {
+) -> Result<Vec<CreatedNotice>, IssueError> {
     use std::collections::{HashMap, HashSet};
     use crate::infrastructure::repositories::order_repo;
 
@@ -311,7 +376,7 @@ pub async fn create_notices_by_partner(
                         "支払通知: 発注注文書検索エラー partner_contract_id={}: {:?}",
                         pc_id, e
                     );
-                    return Err(format!("発注注文書の検索に失敗しました: {}", e));
+                    return Err(format!("発注注文書の検索に失敗しました: {}", e).into());
                 }
             }
         }
@@ -370,8 +435,12 @@ pub async fn create_notices_by_partner(
             approval_status.as_str(),
         ).await
         .map_err(|e| {
+            // 担当が決まらない(発注・案件・顧客のどれにも担当が無い): 全体を取り消して400にする
+            if is_no_owner(e.as_ref()) {
+                return IssueError::NoOwner;
+            }
             tracing::error!("支払通知書作成エラー: {:?}", e);
-            format!("支払通知書ヘッダの登録に失敗しました: {}", e)
+            IssueError::Message(format!("支払通知書ヘッダの登録に失敗しました: {}", e))
         })?;
 
         // 明細作成
@@ -433,7 +502,7 @@ pub async fn create_notices_by_partner(
             "支払通知の保存を確認できませんでした: 作成数={}, 読み直し数={}",
             results.len(),
             notice_rows.len()
-        ));
+        ).into());
     }
 
     // 読み直したデータでCreatedNoticeを作成する。
@@ -443,7 +512,7 @@ pub async fn create_notices_by_partner(
     for (created_id, partner_id, partner_name, project_id, project_name, count, _, needs_approval) in results {
         let Some(db_total) = db_by_id.get(&created_id).copied() else {
             tracing::error!("支払通知の保存を確認できませんでした: notice_id={} がDBに見つかりません", created_id);
-            return Err(format!("支払通知の保存を確認できませんでした: notice_id={created_id}"));
+            return Err(format!("支払通知の保存を確認できませんでした: notice_id={created_id}").into());
         };
         final_results.push(CreatedNotice {
             notice_id: created_id,
@@ -749,52 +818,12 @@ pub async fn generate_invoice_no(
 /// （m_client_contract.payment_terms のカラムDEFAULTと同じ）
 const DEFAULT_CLIENT_PAYMENT_TERMS: &str = "毎月末日締め翌月末日払い";
 
-/// 支払条件テキストから支払期日を算出する。
+/// 支払条件テキストから支払期日を算出する(読み方は payment_terms に1本化。DEMO-000200)。
 /// 「翌々月15日払い」→ work_end + 2ヶ月の15日 / 「翌月末日払い」→ work_end + 1ヶ月の末日。
-/// 空・未認識はデフォルト（毎月末日締め翌月末日払い）として扱う。
+/// 空・読めないものは既定(毎月末日締め翌月末日払い)として扱う。
 pub fn payment_due_date_from_terms(work_end: NaiveDate, payment_terms: &str) -> NaiveDate {
-    let cond = if payment_terms.trim().is_empty() {
-        DEFAULT_CLIENT_PAYMENT_TERMS
-    } else {
-        payment_terms
-    };
-
-    let pay_day = |c: &str| -> u32 {
-        if c.contains("15日") || c.contains("１５日") {
-            15
-        } else if c.contains("末日払") || c.contains("末払") {
-            0 // 末日
-        } else {
-            // デフォルト相当（翌月末日払い）
-            0
-        }
-    };
-    let add_months = |year: i32, month: u32, add: u32| -> (i32, u32) {
-        let total = month + add;
-        if total > 12 {
-            (year + (total as i32 - 1) / 12, ((total - 1) % 12) + 1)
-        } else {
-            (year, total)
-        }
-    };
-    let last_day = |year: i32, month: u32| -> u32 {
-        let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
-        NaiveDate::from_ymd_opt(ny, nm, 1)
-            .and_then(|d| d.pred_opt())
-            .map(|p| p.day())
-            .unwrap_or(28)
-    };
-
-    let offset = if cond.contains("翌々月") {
-        2
-    } else {
-        // 「翌月…」および未認識 → 翌月
-        1
-    };
-    let (y, m) = add_months(work_end.year(), work_end.month(), offset);
-    let raw_day = pay_day(cond);
-    let day = if raw_day == 0 { last_day(y, m) } else { raw_day };
-    NaiveDate::from_ymd_opt(y, m, day).unwrap_or(work_end)
+    let terms = crate::domain::services::payment_terms::parse_or_default(payment_terms);
+    crate::domain::services::payment_terms::due_date(work_end, &terms)
 }
 
 /// 請求書の単位(取引先ごとの設定 m_client.billing_unit)
@@ -848,11 +877,11 @@ pub async fn create_invoices_by_client(
     pool: &PgPool,
     view_rows: &[SettlementViewRow],
     target_month: NaiveDate,
-) -> Result<Vec<CreatedInvoice>, String> {
+) -> Result<Vec<CreatedInvoice>, IssueError> {
     let mut tx = pool.begin().await.map_err(|e| format!("TX error: {}", e))?;
     let issued = issue_invoices_in_tx(pool, &mut tx, view_rows, target_month).await?;
     commit_checked(tx).await.map_err(|e| format!("トランザクション確定エラー: {}", e))?;
-    verify_issued_invoices(pool, issued).await
+    Ok(verify_issued_invoices(pool, issued).await?)
 }
 
 /// 請求書の税額と税込合計。プレビューと発行で同じ計算を使う(金額がずれないように)
@@ -883,7 +912,7 @@ pub async fn issue_invoices_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     view_rows: &[SettlementViewRow],
     target_month: NaiveDate,
-) -> Result<Vec<IssuedInvoice>, String> {
+) -> Result<Vec<IssuedInvoice>, IssueError> {
     use std::collections::HashMap;
 
     // クライアント単位でグループ化（承認済み、かつ請求書を先方が作る取引先でない行のみ。
@@ -969,14 +998,17 @@ pub async fn issue_invoices_in_tx(
             due_date,
             group_project_id.as_deref(),
             unit.as_str(),
+            rows.iter().find_map(|r| r.row.received_order_id),
         ).await {
             Ok(id) => id,
+            // 担当が決まらない(受注・案件・顧客のどれにも担当が無い): 全体を取り消して400にする
+            Err(e) if is_no_owner(e.as_ref()) => return Err(IssueError::NoOwner),
             Err(e) => {
                 // 1件でも失敗したら全体を取り消して、失敗として返す（途中の失敗を捨てて先へ進むと、
                 // PostgreSQL では以降の文がすべて無効になり、確定しても取り消されて、成功と表示されたのに
                 // 何も保存されない状態になる）
                 tracing::error!("請求書作成エラー: {:?}", e);
-                return Err(format!("請求書ヘッダの登録に失敗しました: {e}"));
+                return Err(format!("請求書ヘッダの登録に失敗しました: {e}").into());
             }
         };
 
@@ -1242,5 +1274,78 @@ mod billing_unit_tests {
             invoice_subject(BillingUnit::Client, "A案件", "株式会社X", month()),
             "株式会社X 2026年10月分 請求書"
         );
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    fn row() -> SettlementRow {
+        SettlementRow {
+            engineer_id: 1, engineer_name: "e".into(), partner_id: Some("P1".into()), partner_name: Some("パートナー".into()),
+            client_name: "c".into(), client_id: 1, client_edi_system_type: String::new(), client_invoice_by_client: false,
+            timesheet_id: Some(1), total_hours: Some(Decimal::from(160)), timesheet_status: Some("APPROVED".into()),
+            client_contract_id: 1, received_order_id: Some(1), billing_base_rate: 700_000, billing_settlement_type: "RANGE".into(),
+            billing_lower_limit: Decimal::from(140), billing_upper_limit: Decimal::from(180), billing_fixed_hours: None,
+            billing_deduction_rate: 4000, billing_overtime_rate: 5000, billing_effort: Decimal::ONE, billing_payment_terms: String::new(),
+            partner_contract_id: Some(2), payment_base_rate: Some(500_000), payment_settlement_type: Some("RANGE".into()),
+            payment_lower_limit: Some(Decimal::from(140)), payment_upper_limit: Some(Decimal::from(180)), payment_fixed_hours: None,
+            payment_deduction_rate: Some(4000), payment_overtime_rate: Some(5000), payment_effort: Some(Decimal::ONE),
+            payment_condition: String::new(), invoice_issued: Some(false), notice_issued: Some(false),
+            purchase_order_id: Some("PO-1".into()), purchase_order_status: Some("ACCEPTED".into()),
+            project_id: "X".into(), project_name: "p".into(), engineer_employee_code: "E".into(),
+        }
+    }
+
+    #[test]
+    fn hidden_payment_side_shows_no_payment_amount_or_profit() {
+        let mut r = row();
+        mask_hidden_sides(&mut r, true, false);
+        assert!(r.partner_name.is_none() && r.payment_base_rate.is_none() && r.purchase_order_id.is_none());
+        let (mut rows, mut summary) = calculate_preview(vec![r]);
+        finish_redacted_preview(&mut rows, &mut summary, &[(true, false)]);
+        assert!(rows[0].billing_amount > 0, "請求側は見える");
+        assert_eq!(rows[0].payment_amount, 0, "支払側は伏せる");
+        assert_eq!(rows[0].profit, 0, "片側しか見えない行は利益を出さない");
+        assert_eq!(summary.total_profit, 0);
+    }
+
+    #[test]
+    fn hidden_invoice_side_shows_no_billing_amount_or_profit() {
+        let mut r = row();
+        mask_hidden_sides(&mut r, false, true);
+        assert_eq!(r.billing_base_rate, 0);
+        let (mut rows, mut summary) = calculate_preview(vec![r]);
+        finish_redacted_preview(&mut rows, &mut summary, &[(false, true)]);
+        assert_eq!(rows[0].billing_amount, 0, "請求側は伏せる");
+        assert!(rows[0].payment_amount > 0, "支払側は見える");
+        assert_eq!(rows[0].profit, 0);
+    }
+
+    #[test]
+    fn hidden_side_hides_issue_status_and_counts() {
+        let mut r = row();
+        r.invoice_issued = Some(true);
+        r.notice_issued = Some(true);
+        let mut hide_pay = r.clone();
+        mask_hidden_sides(&mut hide_pay, true, false);
+        assert!(hide_pay.notice_issued.is_none() && hide_pay.invoice_issued == Some(true));
+        let mut hide_inv = r.clone();
+        mask_hidden_sides(&mut hide_inv, false, true);
+        assert!(hide_inv.invoice_issued.is_none() && hide_inv.notice_issued == Some(true));
+        let (mut rows, mut summary) = calculate_preview(vec![hide_inv]);
+        finish_redacted_preview(&mut rows, &mut summary, &[(false, true)]);
+        assert_eq!(summary.invoice_issued_count + summary.invoice_pending_count, 0, "請求側が見えない行は、請求書の発行件数に数えない");
+    }
+
+    #[test]
+    fn fully_visible_rows_keep_profit() {
+        let mut r = row();
+        mask_hidden_sides(&mut r, true, true);
+        let (mut rows, mut summary) = calculate_preview(vec![r]);
+        finish_redacted_preview(&mut rows, &mut summary, &[(true, true)]);
+        assert!(rows[0].profit > 0);
+        assert_eq!(summary.total_profit, rows[0].profit as i64);
     }
 }

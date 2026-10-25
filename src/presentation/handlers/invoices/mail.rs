@@ -116,6 +116,16 @@ pub async fn send_mail(
         }))).into_response());
     }
 
+    if let Some(r) = super::approval::current_guard(&pool, id).await {
+        return Ok(r);
+    }
+
+    if let Some(msg) = crate::infrastructure::integrations::check::mail_setup_problem(&pool).await {
+        return Ok((axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(serde_json::json!({
+            "success": false, "error": msg
+        }))).into_response());
+    }
+
     // クライアント請求先メール（受注書 → クライアントマスタの順で解決）
     let (to_email, cc_email) = match billing_repo::resolve_invoice_send_recipients(
         &pool, invoice.client_id, invoice.received_order_id,
@@ -167,6 +177,19 @@ pub async fn send_mail(
         &body,
     ).await?;
 
+    // 承諾済みの請求書へ、リンクを送り直したとき(クライアントが失くしたときの救済。DEMO-000223)は、
+    // 書類の中身・送信の記録・状態を変えない(承諾した書類は、そのまま残す。リンクは承諾後は期限なし)。
+    if invoice.client_accepted_at.is_some() {
+        tracing::info!("承諾済みの請求書のリンクを送り直しました: invoice={}", invoice.invoice_no);
+        return Ok(axum::Json(serde_json::json!({
+            "success": true,
+            "message": format!("{}（{}）宛に、承諾済みの請求書のダウンロード用URLをメールで送り直しました(書類の内容は変わりません)", client_name, to_email),
+            "to_email": to_email,
+            "token_url": token_url,
+            "resend_only": true,
+        })).into_response());
+    }
+
     // 請求書ステータスをSENTに、受注ステータスをINVOICED→INVOICE_SENTに更新
     if let Err(e) = billing_repo::mark_invoice_sent(&pool, id, &subject, &body).await {
         tracing::error!("DB error: {:?}", e);
@@ -177,6 +200,9 @@ pub async fn send_mail(
             tracing::error!("DB error: {:?}", e);
         }
     }
+
+    // 送った瞬間の PDF を残す(DEMO-000214。失敗しても送信は成功のまま)
+    super::pdf::record_invoice_sent(&pool, &invoice, &client_name).await;
 
     Ok(axum::Json(serde_json::json!({
         "success": true,
@@ -224,6 +250,12 @@ mod tests {
             sent_at: None,
             sent_subject: String::new(),
             sent_body: String::new(),
+            revision: 1,
+            supersedes_invoice_id: None,
+            revision_reason: None,
+            cancelled_at: None,
+            cancelled_by_id: None,
+            cancel_reason: None,
         }
     }
 

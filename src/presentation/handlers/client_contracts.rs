@@ -84,8 +84,12 @@ async fn load_form_options(pool: &PgPool) -> (Vec<crate::domain::models::project
 
 // SPA用 JSON API
 /// GET /api/client-contracts — 一覧（JSON）
-pub async fn api_index(State(pool): State<PgPool>) -> axum::Json<Vec<ClientContractWithNames>> {
-    let contracts = order_repo::list_client_contracts_with_names(&pool)
+pub async fn api_index(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::Json<Vec<ClientContractWithNames>> {
+    let contracts = order_repo::list_client_contracts_with_names(&pool, &auth_user.list_filter(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ContractView))
         .await
         .unwrap_or_else(|e| { tracing::warn!("client_contracts api: {:?}", e); vec![] });
     axum::Json(contracts)
@@ -99,8 +103,21 @@ async fn is_cc_locked(pool: &PgPool, cc_id: i64) -> bool {
 /// GET /api/client-contracts/{id} — 詳細（JSON）
 pub async fn api_detail(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(AUTHZ_MODE が shadow でも拒否する。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_client_contract(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ContractView, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     let contract = order_repo::find_client_contract_with_names(&pool, id).await.log_err().ok().flatten();
 
     match contract {
@@ -125,6 +142,19 @@ pub async fn api_detail(
 /// POST /api/client-contracts — 作成（JSON）
 pub async fn api_create(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    axum::Json(form): axum::Json<ClientContractForm>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ContractEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_create_inner(State(pool), axum::Json(form)).await)
+}
+
+async fn api_create_inner(
+    State(pool): State<PgPool>,
     axum::Json(form): axum::Json<ClientContractForm>,
 ) -> Result<impl IntoResponse, AppError> {
     let is_active = form.is_active.as_deref() == Some("true") || form.is_active.as_deref() == Some("on");
@@ -139,9 +169,22 @@ pub async fn api_create(
 /// PUT /api/client-contracts/{id} — 更新（JSON）
 pub async fn api_update(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
     axum::Json(form): axum::Json<ClientContractForm>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_client_contract(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ContractEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     // ロックガード
     if is_cc_locked(&pool, id).await {
         return Ok((axum::http::StatusCode::FORBIDDEN, axum::Json(serde_json::json!({
@@ -167,9 +210,22 @@ pub struct ExtendForm {
 /// 期間の延長（現在の終了日より後ろに伸ばすことのみ）は常に許可する。
 pub async fn api_extend(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
     axum::Json(form): axum::Json<ExtendForm>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_client_contract(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ContractEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     let new_end_date = match chrono::NaiveDate::parse_from_str(&form.end_date, "%Y-%m-%d") {
         Ok(d) => d,
         Err(_) => return Ok((axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
@@ -197,7 +253,19 @@ pub async fn api_extend(
 }
 
 /// GET /api/client-contracts/form-data — フォーム用データ（JSON）
-pub async fn api_form_data(State(pool): State<PgPool>) -> impl IntoResponse {
+pub async fn api_form_data(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ContractView) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_form_data_inner(State(pool)).await)
+}
+
+async fn api_form_data_inner(State(pool): State<PgPool>) -> impl IntoResponse {
     let (projects, engineers) = load_form_options(&pool).await;
     axum::Json(serde_json::json!({
         "projects": projects.iter().map(|p| serde_json::json!({
@@ -213,8 +281,21 @@ pub async fn api_form_data(State(pool): State<PgPool>) -> impl IntoResponse {
 /// 承諾済み受注書が紐づく契約は削除不可。それ以外は有効／無効を問わず削除可。
 pub async fn api_delete(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_client_contract(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ContractEdit, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     let Some(_contract) = order_repo::find_client_contract_with_names(&pool, id).await.log_err().ok().flatten() else {
         return (axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({
             "success": false, "error": "該当する受注契約が見つかりません"

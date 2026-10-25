@@ -1,0 +1,26 @@
+[package]
+name = "cf-access-jwt"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Cloudflare Access が付与する JWT(Cf-Access-Jwt-Assertion)の検証と axum Extractor"
+
+[dependencies]
+axum = { version = "0.8", default-features = false }
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# テスト専用: 署名用の RSA 鍵をテスト実行時に生成する(鍵をリポジトリに置かないため)。
+# RUSTSEC-2023-0071(タイミング攻撃)は本番コードに入らないため影響しない(.cargo/audit.toml 参照)。
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
+base64 = "0.22"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+axum = { version = "0.8" }
+tower = { version = "0.5", features = ["util"] }

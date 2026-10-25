@@ -21,8 +21,9 @@
 /// 4. 「本人分のみ許可」系（給与など）は employee_routes に置いた上で、ハンドラ内で
 ///    `AuthUser.employee_id()` と対象データの employee_id が一致するかを個別にチェックする
 /// 5. フロントエンドの fetch URL は lib/useMasterData.ts のキー名一覧を参照
-/// 6. **新規 API は `/api/v1/` 配下に置く**（開発標準書 §14）。画面パスと同階層に API を生やさない
+/// 6. **新規 API は `/api/v1/` 配下に置く**（社内標準リポの開発標準書 §14）。画面パスと同階層に API を生やさない
 use axum::{
+    extract::DefaultBodyLimit,
     http::{header, HeaderValue, Method},
     middleware,
     routing::{delete, get, post, put},
@@ -30,7 +31,6 @@ use axum::{
 };
 use tower_governor::{
     governor::GovernorConfigBuilder,
-    key_extractor::SmartIpKeyExtractor,
     GovernorLayer,
 };
 use crate::infrastructure::db_tx::LogErr;
@@ -38,37 +38,34 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
 use crate::config::AppState;
-use crate::infrastructure::repositories::attempt_lock_store::InMemoryAttemptStore;
+use crate::presentation::auth_messages::SophiaIpKeyExtractor;
 use crate::presentation::handlers;
 use crate::presentation::middleware::api_key_auth::{api_key_auth, ApiKeyExtractor};
 use crate::presentation::middleware::auth::auth_middleware;
 use crate::presentation::middleware::role::{
     admin_required, employee_or_admin_required, partner_required,
 };
-use auth_core::domain::attempt_lock::{
-    AttemptLockConfig, AttemptOutcome, AttemptStore, DefaultAttemptOutcome,
-};
-use auth_core::infrastructure::rate_limit::attempt_lock_middleware;
 use std::sync::Arc;
 
+/// 稼働報告アップロード用の本文サイズ上限。ファイル本体の上限(upload_guard::MAX_UPLOAD_BYTES)に、
+/// multipart の枠(境界線・項目名)の分を足す。axum 既定(2MB)のままだと、5MB までと案内しても届かない。
+pub fn upload_body_limit() -> DefaultBodyLimit {
+    DefaultBodyLimit::max(crate::domain::services::upload_guard::MAX_UPLOAD_BYTES + 256 * 1024)
+}
+
 pub fn create_router(state: AppState) -> Router {
-    // ── 社員/管理者ログイン試行制限（Step3 Phase5-3） ──
-    // login_guard.rs の login_key 相当をauth-coreの汎用ミドルウェアへ置き換え。
+    // ── 社員/管理者ログイン試行制限（DEMO-000233 S2-D: DB 保存） ──
+    // アカウント単位(15分に30回)と IP + アカウント(15分に5回)を、s_login_attempt に記録して数える。
     // /api/auth/login・/api/v1/auth/login にのみ適用するため専用のサブルーターに
     // route_layer で配線する（appチェーン全体に .layer するとリクエストボディを
     // 32KiBまでバッファする処理が全ルートにかかってしまうため、必ずサブルーター経由にする）。
-    let attempt_store: Arc<dyn AttemptStore> = Arc::new(InMemoryAttemptStore::new());
-    let attempt_outcome: Arc<dyn AttemptOutcome> = Arc::new(DefaultAttemptOutcome);
+    let login_pool = state.pool.clone();
     let login_routes = Router::new()
         .route("/api/v1/auth/login", post(handlers::auth::api_login))
         .route("/api/auth/login", post(handlers::auth::api_login))
-        .route_layer(middleware::from_fn(attempt_lock_middleware::<
-            handlers::auth::LoginForm,
-        >(
-            attempt_store,
-            attempt_outcome,
-            AttemptLockConfig::default(),
-        )));
+        .route_layer(middleware::from_fn(move |req: axum::extract::Request, next: middleware::Next| {
+            crate::presentation::middleware::login_attempt::guard(login_pool.clone(), req, next)
+        }));
 
     // ── 1. Admin専用ルート ──
     let admin_routes = Router::new()
@@ -88,6 +85,22 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/notices/{id}/reject",
             post(handlers::notices::api_reject),
+        )
+        .route(
+            "/api/v1/notices/{id}/revise",
+            post(handlers::notices::api_revise),
+        )
+        .route(
+            "/api/notices/{id}/revise",
+            post(handlers::notices::api_revise),
+        )
+        .route(
+            "/api/v1/notices/{id}/cancel",
+            post(handlers::notices::api_cancel),
+        )
+        .route(
+            "/api/notices/{id}/cancel",
+            post(handlers::notices::api_cancel),
         )
         // 給与管理（計算・確認・支払はAdmin専用）— JSON API
         // ※ 一覧/詳細(GET /api/v1/payroll, /api/v1/payroll/{id})は employee_routes 側で
@@ -160,6 +173,9 @@ pub fn create_router(state: AppState) -> Router {
             "/api/users/{id}/reset-password",
             post(handlers::users::api_reset_password),
         )
+        // ── 取引先(顧客)の登録（Admin専用。担当の組織・担当者が必須。DEMO-000173 PR 7a）──
+        .route("/api/v1/clients", post(handlers::clients::api_create))
+        .route("/api/clients", post(handlers::clients::api_create))
         // ── マスタメンテナンス JSON API（Admin専用）──
         .route("/api/v1/masters/meta", get(handlers::masters::api_meta))
         .route("/api/masters/meta", get(handlers::masters::api_meta))
@@ -217,6 +233,22 @@ pub fn create_router(state: AppState) -> Router {
             post(handlers::invoices::api_reject),
         )
         .route(
+            "/api/v1/invoices/{id}/revise",
+            post(handlers::invoices::api_revise),
+        )
+        .route(
+            "/api/invoices/{id}/revise",
+            post(handlers::invoices::api_revise),
+        )
+        .route(
+            "/api/v1/invoices/{id}/cancel",
+            post(handlers::invoices::api_cancel),
+        )
+        .route(
+            "/api/invoices/{id}/cancel",
+            post(handlers::invoices::api_cancel),
+        )
+        .route(
             "/api/v1/invoices/{id}/send",
             post(handlers::invoices::send_mail),
         )
@@ -242,6 +274,10 @@ pub fn create_router(state: AppState) -> Router {
             post(handlers::peppol::send_notice),
         )
         .route(
+            "/api/v1/peppol/status",
+            get(handlers::peppol::status),
+        )
+        .route(
             "/api/v1/peppol/transmissions",
             get(handlers::peppol::list_transmissions),
         )
@@ -258,6 +294,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/assignments", post(handlers::assignments::api_create))
         .route("/api/v1/assignments/preview", post(handlers::assignments::api_preview))
         .route("/api/v1/assignments/overview", get(handlers::assignments::api_overview))
+        .route("/api/v1/status/matrix", get(handlers::status::api_matrix))
         .route("/api/v1/billing/preview", get(handlers::billing::api_preview))
         .route("/api/v1/billing/confirm", post(handlers::billing::api_confirm))
         // ── 自社情報設定（Admin専用。銀行口座・SMTP認証情報を含むため）──
@@ -277,6 +314,17 @@ pub fn create_router(state: AppState) -> Router {
             "/api/company-info/test-email",
             post(handlers::company_info::api_test_email),
         )
+        // ── メール画面の設定・送信の記録（Admin専用。DEMO-000196）──
+        .route(
+            "/api/v1/mail/account",
+            get(handlers::mail_settings::get_account).put(handlers::mail_settings::put_account),
+        )
+        .route(
+            "/api/v1/mail/receive-settings",
+            get(handlers::mail_settings::get_receive_settings).put(handlers::mail_settings::put_receive_settings),
+        )
+        .route("/api/v1/mail/sent", get(handlers::mail_settings::list_sent))
+        .route("/api/v1/mail/sent/{id}", get(handlers::mail_settings::get_sent))
         // ── IMAPサーキットブレイカー（連続認証失敗時の自動ロック解除。Admin専用）──
         .route(
             "/api/v1/mail/imap-lock-status",
@@ -302,6 +350,97 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/v1/settings/api-keys/{id}/revoke",
             post(handlers::settings::api_keys::revoke_api_key),
+        )
+        // ── 外部連携の設定(Admin専用。DEMO-000215)──
+        .route(
+            "/api/v1/settings/integrations",
+            get(handlers::settings::integrations::get_state),
+        )
+        .route(
+            "/api/v1/settings/integrations/alert",
+            get(handlers::settings::integrations::get_alert),
+        )
+        .route(
+            "/api/v1/settings/integrations/check",
+            post(handlers::settings::integrations::run_check),
+        )
+        .route(
+            "/api/v1/settings/integrations/test",
+            post(handlers::settings::integrations::send_test),
+        )
+        .route(
+            "/api/v1/settings/integrations/targets",
+            post(handlers::settings::integrations::add_target),
+        )
+        .route(
+            "/api/v1/settings/integrations/targets/{id}",
+            put(handlers::settings::integrations::update_target),
+        )
+        // ── 組織・ロール・割り当ての管理（Admin専用。DEMO-000173 PR 5）──
+        .route(
+            "/api/v1/admin/permissions",
+            get(handlers::org_admin::roles::catalog),
+        )
+        .route(
+            "/api/v1/admin/org-units",
+            get(handlers::org_admin::orgs::list).post(handlers::org_admin::orgs::create),
+        )
+        .route(
+            "/api/v1/admin/org-units/{id}",
+            put(handlers::org_admin::orgs::update),
+        )
+        .route(
+            "/api/v1/admin/org-units/{id}/move",
+            post(handlers::org_admin::orgs::move_unit),
+        )
+        .route(
+            "/api/v1/admin/org-units/{id}/active",
+            post(handlers::org_admin::orgs::set_active),
+        )
+        .route(
+            "/api/v1/admin/roles",
+            get(handlers::org_admin::roles::list).post(handlers::org_admin::roles::create),
+        )
+        .route(
+            "/api/v1/admin/roles/{id}",
+            put(handlers::org_admin::roles::rename).delete(handlers::org_admin::roles::delete),
+        )
+        .route(
+            "/api/v1/admin/roles/{id}/permissions",
+            get(handlers::org_admin::roles::get_permissions).put(handlers::org_admin::roles::replace_permissions),
+        )
+        .route(
+            "/api/v1/admin/assignments",
+            get(handlers::org_admin::assignments::list).post(handlers::org_admin::assignments::create),
+        )
+        .route(
+            "/api/v1/admin/assignments/{id}",
+            delete(handlers::org_admin::assignments::delete),
+        )
+        // 担当の引き継ぎ(DEMO-000173 PR 6b)
+        .route(
+            "/api/v1/admin/owner-transfer",
+            post(handlers::org_admin::transfer::transfer),
+        )
+        .route(
+            "/api/v1/admin/owner-transfer/by-employee",
+            post(handlers::org_admin::transfer::by_employee),
+        )
+        .route(
+            "/api/v1/admin/owner-transfer/current",
+            get(handlers::org_admin::owner_view::current),
+        )
+        .route(
+            "/api/v1/admin/auto-import-receiver",
+            get(handlers::org_admin::receiver::get).put(handlers::org_admin::receiver::put),
+        )
+        .route(
+            "/api/v1/admin/owner-transfer/by-employee/{employee_id}",
+            get(handlers::org_admin::transfer::owned_by_employee),
+        )
+        .route(
+            "/api/v1/admin/org-role-changes",
+            get(handlers::org_admin::assignments::changes),
         )
         // ── 社員の作成・更新・削除は管理者専用(B1: 一般社員が給与設定を変更できていた不具合の修正)──
         .route(
@@ -560,16 +699,16 @@ pub fn create_router(state: AppState) -> Router {
         // ── 稼働報告アクション ──
         .route(
             "/api/v1/timesheets/upload",
-            post(handlers::timesheets::upload),
+            post(handlers::timesheets::upload).layer(upload_body_limit()),
         )
-        .route("/api/timesheets/upload", post(handlers::timesheets::upload))
+        .route("/api/timesheets/upload", post(handlers::timesheets::upload).layer(upload_body_limit()))
         .route(
             "/api/v1/timesheets/confirm",
-            post(handlers::timesheets::confirm_upload),
+            post(handlers::timesheets::confirm_upload).layer(upload_body_limit()),
         )
         .route(
             "/api/timesheets/confirm",
-            post(handlers::timesheets::confirm_upload),
+            post(handlers::timesheets::confirm_upload).layer(upload_body_limit()),
         )
         .route(
             "/api/v1/timesheets/{id}/approve",
@@ -1092,6 +1231,11 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/timesheets/self-report/sheets/submit",
             post(handlers::timesheet_self_report::api_sheets_submit),
         )
+        // 入口の認可(DEMO-000173 PR4、既定はシャドーモード)。
+        // 順序: AuthUser は最外の auth_middleware が先に入れる。次に employee_or_admin_required(下の .layer)が
+        // 外側、この route_layer が内側(後から足した層が外側になるため、ガードより前に書く)。
+        // よって社員・管理者だと確認された後に実行され、route_layer なので MatchedPath も使える。
+        .route_layer(middleware::from_fn_with_state(state.clone(), crate::presentation::middleware::authz::authz_entry))
         // Employee以上ガード
         .layer(middleware::from_fn(employee_or_admin_required));
 
@@ -1181,19 +1325,19 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/portal/timesheets/upload",
-            post(handlers::partner_portal::api_timesheet_upload),
+            post(handlers::partner_portal::api_timesheet_upload).layer(upload_body_limit()),
         )
         .route(
             "/api/portal/timesheets/upload",
-            post(handlers::partner_portal::api_timesheet_upload),
+            post(handlers::partner_portal::api_timesheet_upload).layer(upload_body_limit()),
         )
         .route(
             "/api/v1/portal/timesheets/confirm",
-            post(handlers::partner_portal::api_timesheet_confirm),
+            post(handlers::partner_portal::api_timesheet_confirm).layer(upload_body_limit()),
         )
         .route(
             "/api/portal/timesheets/confirm",
-            post(handlers::partner_portal::api_timesheet_confirm),
+            post(handlers::partner_portal::api_timesheet_confirm).layer(upload_body_limit()),
         )
         .route(
             "/api/v1/portal/timesheets/{pk}/submit",
@@ -1241,39 +1385,55 @@ pub fn create_router(state: AppState) -> Router {
         // PARTNER専用ガード
         .layer(middleware::from_fn(partner_required));
 
-    // ── Webhook系 IP単位レート制限（tower_governor）──
-    // タイムシート・メール・Peppol の外部Webhook に IP段のトークンバケット制限を適用。
-    // 認証（HMAC/シークレット）とは別の層で、署名検証前の連打（DoS的）を抑止する。
-    // `mail_webhook` を `employee_routes` から外した理由：
-    //   - ロールガード（employee_or_admin_required）下では未認証の外部GASが
-    //     401 Unauthorized またはリダイレクトになり、正常に処理できなくなるため、
-    //     認証なしで到達可能な webhook_router に集約する。
-    // SmartIpKeyExtractor を使う理由は /v1/ IP段と同じ（nginx背後でX-Forwarded-For参照）。
+    // ── Peppol 受信の IP単位レート制限（tower_governor）──
+    // Peppol の外部受信（/api/(v1/)peppol/inbound）に IP段のトークンバケット制限を適用。
+    // 認証（PEPPOL_WEBHOOK_SECRET）とは別の層で、署名検証前の連打（DoS的）を抑止する。
+    // 送り元 IP は SophiaIpKeyExtractor（信用する中継からだけ見出しを採用。/v1/ IP段と同じ判定）。
     let webhook_ip_governor_conf = GovernorConfigBuilder::default()
         .per_second(1) // 60 req/min相当（/v1/ IP段と同値）
         .burst_size(60)
-        .key_extractor(SmartIpKeyExtractor)
+        .key_extractor(SophiaIpKeyExtractor)
         .finish()
         .expect("webhook IP ベースレート制限設定が不正（定数のため起動時に検出）");
 
     let webhook_router = Router::new()
-        .route("/api/v1/webhook/timesheet", post(handlers::api::index))
-        .route("/api/webhook/timesheet", post(handlers::api::index))
-        .route("/api/v1/mail/webhook", post(handlers::home::mail_webhook))
-        .route("/api/mail/webhook", post(handlers::home::mail_webhook))
         .route("/api/v1/peppol/inbound", post(handlers::peppol::inbound))
         .route("/api/peppol/inbound", post(handlers::peppol::inbound))
         .layer(GovernorLayer::new(webhook_ip_governor_conf))
         .with_state(state.clone());
 
+    // ── 社内 SSO ログイン（認証不要・IP 単位のレート制限）──
+    // POST /api/v1/auth/sso/login。Cloudflare Access の JWT を署名検証し、Sophia のログインの証明を発行する
+    // （SSO_ENABLED が true でなければ 404）。既存のログイン用の試行回数制限（login_attempt::guard）は、
+    // 本文を email/password として読むため、本文が空の SSO には使えない。代わりに IP 単位のトークンバケットを付ける。
+    // 画面を開くたびに自動で 1 回試すので、通常の利用では上限に当たらない大きさ（バースト 10・毎秒 1）。
+    // Origin の検査（sophia_origin_check_middleware）は POST 全体にかかる。この経路は除外リストに入れない。
+    let sso_ip_governor_conf = GovernorConfigBuilder::default()
+        .per_second(1)
+        .burst_size(10)
+        .key_extractor(SophiaIpKeyExtractor)
+        .finish()
+        .expect("SSO ログインの IP ベースレート制限設定が不正（定数のため起動時に検出）");
+
+    let sso_router = Router::new()
+        .route("/api/v1/auth/sso/login", post(handlers::auth::api_sso_login))
+        // Cloudflare Access で保護する入口(画面ごと移動する GET)。Access を通ると JWT のヘッダーが付いて届く
+        .route("/api/v1/auth/sso/start", get(handlers::auth::api_sso_start))
+        .layer(GovernorLayer::new(sso_ip_governor_conf))
+        // 画面が「社内アカウントでログイン」を出すかを決める問い合わせ(有効かどうかの真偽だけ。副作用なし)。
+        // 画面を開くたびに呼ぶので、同じ IP(会社の NAT)の一斉アクセスで 429 にならないよう、IP 制限の外に置く。
+        // axum は layer を呼んだ時点で既にある経路だけに適用するため、この経路は layer の後ろで足す。
+        .route("/api/v1/auth/sso/status", get(handlers::auth::api_sso_status))
+        .with_state(state.clone());
+
     // ── 外部向け WebAPI (/v1/invoices, /v1/orders など) ──
     // レート制限設定（tower-governor）
-    // nginx 経由では PeerIp はプロキシIPになるため、X-Forwarded-For 等を参照する SmartIp を使う。
-    // 直接接続時は ConnectInfo にフォールバックする。
+    // nginx 経由では接続元はプロキシIPになるため、信用する中継のときだけ X-Real-IP 等を採用する SophiaIpKeyExtractor を使う。
+    // 接続元は常に ConnectInfo（serve で into_make_service_with_connect_info により入る）。直接接続のときは見出しを見ず接続元の IP を使う。
     let ip_governor_conf = GovernorConfigBuilder::default()
         .per_second(1) // 60 req/min相当
         .burst_size(60)
-        .key_extractor(SmartIpKeyExtractor)
+        .key_extractor(SophiaIpKeyExtractor)
         .finish()
         .expect("IP ベースレート制限設定が不正（定数のため起動時に検出）");
 
@@ -1331,6 +1491,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(v1_router)
         .merge(webhook_router)
         .merge(login_routes)
+        .merge(sso_router)
         .merge(swagger_routes)
         // 認証（SSR互換 — 段階的廃止予定）
         // ※ GET/POST /login は登録しない。本番/ステージングはnginxがNext.jsへ転送するため
@@ -1416,7 +1577,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/token/{uuid}/timesheet",
-            post(handlers::token::api_upload_timesheet),
+            post(handlers::token::api_upload_timesheet).layer(upload_body_limit()),
         )
         // 旧 PDF 直リンク互換（--spa 一体配信時。nginx 環境は Next redirects → /api/v1/...）
         .route("/token/{uuid}/pdf", get(handlers::token::download_pdf))
@@ -1463,8 +1624,25 @@ pub fn create_router(state: AppState) -> Router {
                 ]),
             ),
         ))
+        // トークンURL(パートナー・招待・ポータルのリンク・携帯アップロード)の試行制限(存在しないトークンだけ IP 単位で数え、超えたら 429)と、
+        // 存在するトークンの利用の監査(h_auth_event)。DEMO-000233 S2-E / S2-E2 / 項目7。
+        // probe_log より内側に置く(probe_log は、ここの応答も従来どおり数える)。
+        .layer(middleware::from_fn_with_state(
+            state.pool.clone(),
+            crate::presentation::middleware::token_guard::token_guard,
+        ))
+        // 外部向けトークンリンク(/token, /invite)への無効な試行の記録と、続いたときの通知(DEMO-000167 項目6)。
+        // ブロックはしない。認証・CSRFより外側に置き、弾かれた試行も数える。
+        .layer(middleware::from_fn_with_state(
+            Arc::new(crate::domain::services::probe_monitor::ProbeMonitor::new()),
+            crate::presentation::middleware::probe_log::probe_log,
+        ))
         // 静的ファイル
         .nest_service("/static", ServeDir::new("static"))
+        // JSON 応答に暗号文(enc1:)が混ざったら 500 で止める(DEMO-000233 S2-G2-1)。
+        // desktop_cors より内側に置く。外に置くと、この 500 に CORS ヘッダーが付かず、tauri アプリから
+        // 本来の 500 として見えなくなる。
+        .layer(middleware::from_fn(crate::presentation::middleware::encrypted_output::block_encrypted_json))
         .layer(desktop_cors)
         // 共有ステート
         .with_state(state);

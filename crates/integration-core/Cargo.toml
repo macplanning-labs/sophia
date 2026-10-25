@@ -1,0 +1,15 @@
+[package]
+name = "integration-core"
+version = "0.1.0"
+edition = "2021"
+description = "外部連携の共通の決まり(保存する・知らせるの役割、必要な設定、点検、使う部品の一覧)"
+license = "MIT"
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

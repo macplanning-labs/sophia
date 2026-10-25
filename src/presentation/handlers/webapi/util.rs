@@ -1,29 +1,13 @@
 /// presentation/handlers/webapi/util.rs — WebAPI ユーティリティ
-
 use axum::http::HeaderMap;
 use std::net::SocketAddr;
 
-/// クライアント IP アドレスを抽出（X-Forwarded-For → X-Real-IP → SocketAddr）
+use crate::presentation::auth_messages::client_ip;
+
+/// クライアント IP アドレスを抽出。送り元の決め方は `auth_messages::client_ip` に一本化している
+/// (接続元が信用する中継のときだけ見出しを採用する)。
 pub fn extract_client_ip(headers: &HeaderMap, addr: Option<&SocketAddr>) -> String {
-    if let Some(forwarded) = headers.get("x-forwarded-for") {
-        if let Ok(s) = forwarded.to_str() {
-            if let Some(first_ip) = s.split(',').next() {
-                return first_ip.trim().to_string();
-            }
-        }
-    }
-
-    if let Some(real_ip) = headers.get("x-real-ip") {
-        if let Ok(s) = real_ip.to_str() {
-            return s.to_string();
-        }
-    }
-
-    if let Some(socket_addr) = addr {
-        return socket_addr.ip().to_string();
-    }
-
-    "unknown".to_string()
+    client_ip(addr.copied(), headers)
 }
 
 #[cfg(test)]
@@ -31,20 +15,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_client_ip_x_forwarded_for() {
+    fn spoofed_forwarded_for_is_ignored_without_trusted_proxy() {
+        // 環境変数 TRUSTED_PROXY_CIDRS が無い既定では、見出しを信用しない
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "203.0.113.10, 203.0.113.10".parse().unwrap());
+        let addr: SocketAddr = "203.0.113.9:4000".parse().unwrap();
 
-        let ip = extract_client_ip(&headers, None);
-        assert_eq!(ip, "203.0.113.10");
+        let ip = extract_client_ip(&headers, Some(&addr));
+        assert_eq!(ip, "203.0.113.9");
     }
 
     #[test]
-    fn test_extract_client_ip_x_real_ip() {
+    fn missing_peer_is_unknown() {
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", "203.0.113.10".parse().unwrap());
 
         let ip = extract_client_ip(&headers, None);
-        assert_eq!(ip, "203.0.113.10");
+        assert_eq!(ip, "unknown");
     }
 }

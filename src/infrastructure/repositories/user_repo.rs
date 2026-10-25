@@ -3,6 +3,10 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
+use super::org_assignment_repo::{self, AssignmentRecord};
+use super::org_change_log_repo;
+use crate::domain::services::user_deactivation::{check_deactivation, DeactivationRefusal};
+
 /// 一覧・詳細共通の表示用行
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct UserRow {
@@ -113,24 +117,91 @@ pub async fn update_password(pool: &PgPool, id: i64, password_hash: &str) -> Res
     Ok(())
 }
 
-/// ユーザーのアクティブフラグをトグルする（SSR用。結果値は返さない）
-pub async fn toggle_active(pool: &PgPool, id: i64) -> Result<()> {
-    sqlx::query("UPDATE s_user SET is_active = NOT is_active, updated_at = NOW() WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await?;
-    Ok(())
+/// ユーザーの有効/無効を切り替える。戻り値は切り替え後の値と、無効化に伴って外した割り当て。
+///
+/// 無効にするときは、同じトランザクションの中で、そのユーザーの割り当て(s_user_org_role)をすべて外し、
+/// 外した1件ごとに変更履歴(h_org_role_change)を残す。無効になったユーザーに権限が残らないようにするため
+/// (DEMO-000173 T5-6)。ユーザーが存在しなければ `None`。
+pub async fn toggle_active_with_cleanup(
+    pool: &PgPool,
+    id: i64,
+    changed_by: i64,
+) -> Result<Option<(bool, Vec<AssignmentRecord>)>> {
+    let mut tx = pool.begin().await?;
+    org_change_log_repo::lock_admin_changes(&mut tx).await?;
+    let result = toggle_active_in_tx(&mut tx, id, changed_by).await?;
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
+    Ok(result)
 }
 
-/// ユーザーのアクティブフラグをトグルする（SPA用。トグル後の値を返す）
-pub async fn toggle_active_returning(pool: &PgPool, id: i64) -> Result<bool> {
-    let is_active: bool = sqlx::query_scalar(
-        "UPDATE s_user SET is_active = NOT is_active, updated_at = NOW() WHERE id = $1 RETURNING is_active"
+/// ユーザーの今の有効状態と、結びついた社員のID。ユーザーがいなければ `None`。
+pub async fn active_and_employee(conn: &mut sqlx::PgConnection, id: i64) -> Result<Option<(bool, Option<i64>)>> {
+    let row: Option<(bool, Option<i64>)> = sqlx::query_as(
+        "SELECT u.is_active, p.employee_id FROM s_user u LEFT JOIN s_user_profile p ON p.user_id = u.id WHERE u.id = $1",
     )
     .bind(id)
-    .fetch_one(pool)
+    .fetch_optional(&mut *conn)
     .await?;
-    Ok(is_active)
+    Ok(row)
+}
+
+/// 有効なユーザーを無効にしてよいか(自分自身・最後の有効な管理者は不可。DEMO-000186)。
+/// ユーザーが存在しない、または既に無効なら Ok(Ok(()))(切り替えは有効化になるため制限しない)。
+pub async fn check_can_deactivate(
+    conn: &mut sqlx::PgConnection,
+    actor_id: i64,
+    target_id: i64,
+) -> Result<std::result::Result<(), DeactivationRefusal>> {
+    let row: Option<(bool, bool)> = sqlx::query_as("SELECT is_active, is_staff FROM s_user WHERE id = $1")
+        .bind(target_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some((true, is_staff)) = row else {
+        return Ok(Ok(()));
+    };
+    let others: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM s_user WHERE is_staff = TRUE AND is_active = TRUE AND id <> $1")
+        .bind(target_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(check_deactivation(actor_id, target_id, is_staff, others))
+}
+
+/// `toggle_active_with_cleanup` の本体。呼び出し側が開いた(管理操作のロック済みの)トランザクションの中で行う。
+/// 自分自身・最後の有効な管理者を無効にしようとしたら、`DeactivationRefusal` のエラーで止める(何も変えない)。
+pub async fn toggle_active_in_tx(
+    tx: &mut sqlx::PgConnection,
+    id: i64,
+    changed_by: i64,
+) -> Result<Option<(bool, Vec<AssignmentRecord>)>> {
+    if let Err(refusal) = check_can_deactivate(&mut *tx, changed_by, id).await? {
+        return Err(anyhow::Error::new(refusal));
+    }
+    let is_active: Option<bool> = sqlx::query_scalar(
+        "UPDATE s_user SET is_active = NOT is_active, updated_at = NOW() WHERE id = $1 RETURNING is_active",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(is_active) = is_active else {
+        return Ok(None);
+    };
+    let mut removed = Vec::new();
+    if !is_active {
+        removed = org_assignment_repo::delete_all_for_user(&mut *tx, id).await?;
+        for r in &removed {
+            org_change_log_repo::insert(
+                &mut *tx,
+                changed_by,
+                "assignment",
+                Some(r.id),
+                "delete",
+                Some(serde_json::to_value(r)?),
+                Some(serde_json::json!({"reason": "user deactivated", "user_id": id})),
+            )
+            .await?;
+        }
+    }
+    Ok(Some((is_active, removed)))
 }
 
 /// ユーザー一覧（社員名・パートナー名JOIN済み）
@@ -202,13 +273,36 @@ pub async fn count_by_email_excluding(pool: &PgPool, email: &str, exclude_id: i6
     Ok(count)
 }
 
-/// ユーザーを削除する（更新件数を返す）
+/// ユーザーを削除する。戻り値は、削除したユーザー数(0 or 1)と、先に外した割り当て。
 ///
+/// 同じトランザクションの中で、先にそのユーザーの割り当て(s_user_org_role)をすべて外し、
+/// 外した1件ごとに変更履歴(h_org_role_change)を残してから、ユーザーを削除する
+/// (DEMO-000173 T5-6b)。ユーザーが存在しなければ何も変更せず `(0, 空)` を返す。
 /// s_user_profile / s_session / MFA関連テーブルは ON DELETE CASCADE で自動削除される。
-pub async fn delete_user(pool: &PgPool, id: i64) -> Result<u64> {
+pub async fn delete_user_with_cleanup(
+    pool: &PgPool,
+    id: i64,
+    changed_by: i64,
+) -> Result<(u64, Vec<AssignmentRecord>)> {
+    let mut tx = pool.begin().await?;
+    org_change_log_repo::lock_admin_changes(&mut tx).await?;
+    let removed = org_assignment_repo::delete_all_for_user(&mut tx, id).await?;
+    for r in &removed {
+        org_change_log_repo::insert(
+            &mut tx,
+            changed_by,
+            "assignment",
+            Some(r.id),
+            "delete",
+            Some(serde_json::to_value(r)?),
+            Some(serde_json::json!({"reason": "user deleted", "user_id": id})),
+        )
+        .await?;
+    }
     let result = sqlx::query("DELETE FROM s_user WHERE id = $1")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    Ok(result.rows_affected())
+    crate::infrastructure::db_tx::commit_checked(tx).await?;
+    Ok((result.rows_affected(), removed))
 }

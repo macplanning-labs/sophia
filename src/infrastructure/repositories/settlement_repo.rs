@@ -5,6 +5,9 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 
+use super::stamp_repo;
+use crate::domain::authz::stamp::StampMode;
+
 use crate::domain::services::settlement_dashboard::{SettlementRow, SettlementFilter};
 use crate::domain::services::month_range::first_of_next_month;
 
@@ -56,18 +59,21 @@ pub async fn list_settlement_rows(
                 JOIN t_received_order ro ON bi.received_order_id = ro.id
                 WHERE ro.client_contract_id = cc.id
                   AND ro.target_month = $1
+                  AND bi.cancelled_at IS NULL
             ) OR EXISTS(
                 SELECT 1 FROM t_billing_invoice_item bii
                 JOIN t_billing_invoice bi ON bi.id = bii.invoice_id
                 WHERE bii.engineer_id = e.id
                   AND bi.client_id = cl.id
                   AND bi.target_month = $1
+                  AND bi.cancelled_at IS NULL
             )) AS invoice_issued,
             (CASE WHEN pc.id IS NULL THEN NULL ELSE EXISTS(
                 SELECT 1 FROM t_payment_notice pn
                 JOIN t_payment_notice_item pni ON pn.notice_id = pni.notice_id
                 WHERE pni.partner_contract_id = pc.id
                   AND pn.target_month = $1
+                  AND pn.cancelled_at IS NULL
             ) END) AS notice_issued,
             po_info.order_id AS purchase_order_id,
             po_info.status AS purchase_order_status
@@ -233,14 +239,16 @@ pub async fn insert_payment_notice(
     total: i32,
     approval_status: &str,
 ) -> Result<()> {
+    // 担当スタンプ: 発注 → 案件 → 顧客の順に写す(設計書 §6.6)
+    let stamp = stamp_repo::for_payment_notice(&mut **tx, purchase_order_id, StampMode::Manual).await?;
     sqlx::query(
         r#"
         INSERT INTO t_payment_notice (
             notice_id, uuid, purchase_order_id, partner_id, target_month,
             notice_date, payment_due_date, subtotal, tax_amount, total, approval_status,
-            purchase_order_pk
+            purchase_order_pk, owner_org_unit_id, owner_employee_id
         ) VALUES ($1, gen_random_uuid(), $2, $3, $4, CURRENT_DATE, $5, $6, $7, $8, $9,
-                  (SELECT id FROM t_purchase_order WHERE order_id = $2))
+                  (SELECT id FROM t_purchase_order WHERE order_id = $2), $10, $11)
         "#
     )
     .bind(notice_id)
@@ -252,6 +260,8 @@ pub async fn insert_payment_notice(
     .bind(tax_amount)
     .bind(total)
     .bind(approval_status)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -332,14 +342,18 @@ pub async fn insert_invoice_header(
     due_date: NaiveDate,
     project_id: Option<&str>,
     billing_unit: &str,
+    received_order_id: Option<i64>,
 ) -> Result<i64> {
+    // 担当スタンプ: 受注 → 案件 → 顧客の順に写す(設計書 §6.6)。
+    // `received_order_id` は担当を決めるためだけに使う(受注との紐づけは、明細の作成後に別途行う)
+    let stamp = stamp_repo::for_invoice(&mut **tx, received_order_id, project_id, client_id, StampMode::Manual).await?;
     let invoice_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO t_billing_invoice (
             invoice_no, client_id, target_month, work_start, work_end,
             subject, subtotal, tax_amount, total, due_date, source, status,
-            project_id, billing_unit
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'SELF', 'PENDING_APPROVAL', $11, $12)
+            project_id, billing_unit, owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'SELF', 'PENDING_APPROVAL', $11, $12, $13, $14)
         RETURNING id
         "#
     )
@@ -355,6 +369,8 @@ pub async fn insert_invoice_header(
     .bind(due_date)
     .bind(project_id)
     .bind(billing_unit)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(&mut **tx)
     .await?;
     Ok(invoice_id)

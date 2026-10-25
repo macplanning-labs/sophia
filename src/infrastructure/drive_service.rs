@@ -8,24 +8,29 @@
 ///     ├── パートナー管理/
 ///     │   └── {会社名}/
 ///     │       ├── 契約書/
-///     │       ├── 注文書/
+///     │       ├── 注文書（当社発行）/
+///     │       ├── 支払通知書/
 ///     │       └── 稼働報告書/
 ///     └── クライアント管理/
 ///         └── {会社名}/
-///             ├── 注文書/
+///             ├── 注文書（クライアント発行）/
 ///             ├── 稼働報告書/
 ///             └── 請求書/
+///
+/// 発行した書類(送った瞬間の PDF)の保存は domain/services/issued_document.rs(DEMO-000214)。
 
 use anyhow::Result;
-use serde::Deserialize;
 use tracing::info;
 
 // ── ドキュメント種別ラベル ──
 
-fn doc_type_label(doc_type: &str) -> &str {
+/// 書類の種類のフォルダ名(決定事項 2026-10-11。括弧は全角)
+/// 注文書は、クライアントから受けたものとパートナーへ出したもので分ける。
+fn doc_type_label<'a>(management_type: &str, doc_type: &'a str) -> &'a str {
     match doc_type {
         "contract" => "契約書",
-        "order" => "注文書",
+        "order" if management_type == "partner" => "注文書（当社発行）",
+        "order" => "注文書（クライアント発行）",
         "work_report" => "稼働報告書",
         "invoice" => "請求書",
         "payment" => "支払通知書",
@@ -42,167 +47,14 @@ pub(crate) async fn get_scoped_access_token(scope: &str) -> Result<Option<String
         .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
-// ============================================================
-// Drive API ヘルパー
-// ============================================================
-
-#[derive(Debug, Deserialize)]
-struct DriveFile {
-    id: String,
-    #[serde(rename = "webViewLink", default)]
-    web_view_link: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DriveFileList {
-    files: Vec<DriveFile>,
-}
-
-/// フォルダを検索し、なければ作成する
-async fn find_or_create_folder(
-    client: &reqwest::Client,
-    token: &str,
-    folder_name: &str,
-    parent_id: &str,
-) -> Result<String> {
-    let query = format!(
-        "name='{}' and '{}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        folder_name, parent_id
-    );
-
-    let resp: DriveFileList = client
-        .get("https://www.googleapis.com/drive/v3/files")
-        .bearer_auth(token)
-        .query(&[
-            ("q", query.as_str()),
-            ("spaces", "drive"),
-            ("fields", "files(id,name)"),
-            ("pageSize", "1"),
-            ("supportsAllDrives", "true"),
-            ("includeItemsFromAllDrives", "true"),
-        ])
-        .send().await?
-        .json().await?;
-
-    if let Some(f) = resp.files.first() {
-        return Ok(f.id.clone());
+fn guess_mime(filename: &str) -> &'static str {
+    if filename.ends_with(".xlsx") || filename.ends_with(".xlsm") {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    } else if filename.ends_with(".html") {
+        "text/html"
+    } else {
+        "application/pdf"
     }
-
-    // フォルダ作成
-    let metadata = serde_json::json!({
-        "name": folder_name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id],
-    });
-
-    let created: DriveFile = client
-        .post("https://www.googleapis.com/drive/v3/files")
-        .bearer_auth(token)
-        .query(&[("supportsAllDrives", "true"), ("fields", "id")])
-        .json(&metadata)
-        .send().await?
-        .json().await?;
-
-    info!("[Google Drive] フォルダ作成: {} (ID: {})", folder_name, created.id);
-    Ok(created.id)
-}
-
-/// ファイルをアップロードする
-async fn upload_file(
-    client: &reqwest::Client,
-    token: &str,
-    content: &[u8],
-    filename: &str,
-    parent_id: &str,
-    mimetype: &str,
-) -> Result<(String, String)> {
-    let metadata = serde_json::json!({
-        "name": filename,
-        "parents": [parent_id],
-    });
-
-    let form = reqwest::multipart::Form::new()
-        .part("metadata", reqwest::multipart::Part::text(metadata.to_string())
-            .mime_str("application/json")?)
-        .part("file", reqwest::multipart::Part::bytes(content.to_vec())
-            .file_name(filename.to_string())
-            .mime_str(mimetype)?);
-
-    let uploaded: DriveFile = client
-        .post("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,webViewLink")
-        .bearer_auth(token)
-        .multipart(form)
-        .send().await?
-        .json().await?;
-
-    let link = if uploaded.web_view_link.is_empty() {
-        format!("https://drive.google.com/file/d/{}/view", uploaded.id)
-    } else {
-        uploaded.web_view_link
-    };
-
-    info!("[Google Drive] アップロード成功: {} (ID: {})", filename, uploaded.id);
-    Ok((uploaded.id, link))
-}
-
-/// 既存ファイルを検索する
-async fn find_existing_file(
-    client: &reqwest::Client,
-    token: &str,
-    filename: &str,
-    parent_id: &str,
-) -> Result<Option<String>> {
-    let query = format!(
-        "name='{}' and '{}' in parents and trashed=false",
-        filename, parent_id
-    );
-
-    let resp: DriveFileList = client
-        .get("https://www.googleapis.com/drive/v3/files")
-        .bearer_auth(token)
-        .query(&[
-            ("q", query.as_str()),
-            ("spaces", "drive"),
-            ("fields", "files(id)"),
-            ("pageSize", "1"),
-            ("supportsAllDrives", "true"),
-            ("includeItemsFromAllDrives", "true"),
-        ])
-        .send().await?
-        .json().await?;
-
-    Ok(resp.files.first().map(|f| f.id.clone()))
-}
-
-/// 既存ファイルを上書き更新する
-async fn update_file(
-    client: &reqwest::Client,
-    token: &str,
-    file_id: &str,
-    content: &[u8],
-    mimetype: &str,
-) -> Result<(String, String)> {
-    let _form = reqwest::multipart::Part::bytes(content.to_vec())
-        .mime_str(mimetype)?;
-
-    let updated: DriveFile = client
-        .patch(&format!(
-            "https://www.googleapis.com/upload/drive/v3/files/{}?uploadType=media&supportsAllDrives=true&fields=id,webViewLink",
-            file_id
-        ))
-        .bearer_auth(token)
-        .header("Content-Type", mimetype)
-        .body(content.to_vec())
-        .send().await?
-        .json().await?;
-
-    info!("[Google Drive] 更新成功: {}", file_id);
-    let link = if updated.web_view_link.is_empty() {
-        format!("https://drive.google.com/file/d/{}/view", updated.id)
-    } else {
-        updated.web_view_link
-    };
-    Ok((updated.id, link))
 }
 
 // ============================================================
@@ -214,6 +66,10 @@ async fn update_file(
 /// management_type: "partner" or "client"
 /// company_name: パートナー名 or クライアント名
 /// doc_type: "contract", "order", "work_report", "invoice", "payment"
+///
+/// 保存は外部連携の部品（`integrations::file_store`、Google Drive）で行う（DEMO-000213）。
+/// 同名ファイルは上書きする（受信メールの添付の再取込で重複させないため。従来どおり）。
+/// 保存先が未設定なら何もせず空の (file_id, link) を返す（従来どおり。欠けは起動時の点検で知らせる）。
 pub async fn upload_document(
     management_type: &str,
     company_name: &str,
@@ -222,46 +78,29 @@ pub async fn upload_document(
     file_bytes: &[u8],
     mimetype: Option<&str>,
 ) -> Result<(String, String)> {
-    let root_folder_id = std::env::var("GOOGLE_DRIVE_ROOT_FOLDER_ID").unwrap_or_default();
-    if root_folder_id.is_empty() {
-        info!("[Google Drive] ROOT_FOLDER_IDが未設定のためスキップ");
-        return Ok((String::new(), String::new()));
-    }
-
-    let Some(token) = get_scoped_access_token("https://www.googleapis.com/auth/drive").await? else {
-        info!("[Google Drive] サービスアカウントキーが未設定のためスキップ");
-        return Ok((String::new(), String::new()));
+    let store = match crate::infrastructure::integrations::file_store() {
+        Ok(s) => s,
+        Err(why) => {
+            info!("[Google Drive] 保存先が未設定のためスキップ（{}）", why);
+            return Ok((String::new(), String::new()));
+        }
     };
-    let client = reqwest::Client::new();
 
-    // フォルダ階層を構築
     let mgmt_label = if management_type == "partner" {
         "パートナー管理"
     } else {
         "クライアント管理"
     };
-    let mgmt_folder_id = find_or_create_folder(&client, &token, mgmt_label, &root_folder_id).await?;
-    let company_folder_id = find_or_create_folder(&client, &token, company_name, &mgmt_folder_id).await?;
-    let doc_label = doc_type_label(doc_type);
-    let doc_folder_id = find_or_create_folder(&client, &token, doc_label, &company_folder_id).await?;
+    let folder = [mgmt_label, company_name, doc_type_label(management_type, doc_type)];
+    let mime = mimetype.unwrap_or_else(|| guess_mime(filename));
 
-    // MIMEタイプ推定
-    let mime = mimetype.unwrap_or_else(|| {
-        if filename.ends_with(".xlsx") || filename.ends_with(".xlsm") {
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        } else if filename.ends_with(".html") {
-            "text/html"
-        } else {
-            "application/pdf"
-        }
-    });
-
-    // 既存ファイルがあれば上書き
-    if let Some(existing_id) = find_existing_file(&client, &token, filename, &doc_folder_id).await? {
-        return update_file(&client, &token, &existing_id, file_bytes, mime).await;
-    }
-
-    upload_file(&client, &token, file_bytes, filename, &doc_folder_id, mime).await
+    let stored = store
+        .put_overwrite(&folder, filename, file_bytes, mime)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    info!("[Google Drive] 保存しました: {}/{}/{}/{} (ID: {})", folder[0], folder[1], folder[2], stored.name, stored.id);
+    let link = stored.url.unwrap_or_else(|| get_drive_file_url(&stored.id));
+    Ok((stored.id, link))
 }
 
 // ============================================================
@@ -300,5 +139,18 @@ pub fn get_drive_file_url(file_id: &str) -> String {
         String::new()
     } else {
         format!("https://drive.google.com/file/d/{}/view", file_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::doc_type_label;
+
+    #[test]
+    fn order_folders_split_by_party() {
+        assert_eq!(doc_type_label("client", "order"), "注文書（クライアント発行）");
+        assert_eq!(doc_type_label("partner", "order"), "注文書（当社発行）");
+        assert_eq!(doc_type_label("partner", "work_report"), "稼働報告書");
+        assert_eq!(doc_type_label("client", "invoice"), "請求書");
     }
 }

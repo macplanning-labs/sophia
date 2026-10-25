@@ -35,21 +35,6 @@ macro_rules! impl_find_by_id {
     };
 }
 
-/// SELECT * FROM {table} WHERE {pk} = $1 — 文字列PKで1件取得
-macro_rules! impl_find_by_str_id {
-    ($fn_name:ident, $type:ty, $table:expr, $pk:expr) => {
-        pub async fn $fn_name(pool: &::sqlx::PgPool, id: &str) -> ::anyhow::Result<Option<$type>> {
-            let row = ::sqlx::query_as::<_, $type>(
-                concat!("SELECT * FROM ", $table, " WHERE ", $pk, " = $1"),
-            )
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-            Ok(row)
-        }
-    };
-}
-
 /// SELECT COUNT(*) FROM {table} — 件数取得
 macro_rules! impl_count {
     ($fn_name:ident, $table:expr) => {

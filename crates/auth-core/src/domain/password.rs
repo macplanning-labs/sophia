@@ -10,9 +10,8 @@
 //!
 //! 方針ドキュメント3.2節はこれを一般化した `verify_and_needs_rehash` を
 //! 提案している。ここでは「旧ハッシュ方式の検証器」を `LegacyHashVerifier`
-//! トレイトとして差し替え可能にし、WIP用のDjango PBKDF2検証器を移植した。
-//! Sophia用のbcrypt検証器はStep 3（Sophia適用）で、Sophia側の実際のbcrypt
-//! パラメータを確認した上で追加する（この時点では未確認のため実装しない）。
+//! トレイトとして差し替え可能にし、Django PBKDF2検証器を用意している。
+//! bcrypt等の他方式が必要な場合は同じトレイトを実装して追加する。
 
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
@@ -41,7 +40,7 @@ pub fn verify_argon2(password: &str, stored_hash: &str) -> Result<bool, AuthErro
         .is_ok())
 }
 
-/// 旧ハッシュ方式（Django PBKDF2、Sophiaのbcrypt等）を判定・検証するトレイト。
+/// 旧ハッシュ方式（Django PBKDF2、bcrypt等）を判定・検証するトレイト。
 /// 「自分が対象とするハッシュか」を`matches`で判定し、対象であれば`verify`で
 /// 実際の検証を行う。`password::verify_and_needs_rehash`はこの実装を差し替えて
 /// アプリごとの移行元ハッシュに対応する。

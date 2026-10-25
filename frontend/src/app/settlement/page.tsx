@@ -1,7 +1,9 @@
 "use client";
 
-import { Suspense, useState, useMemo, useCallback } from "react";
-import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState, useMemo, useCallback } from "react";
+import { useCurrentMonth } from "@/lib/MonthContext";
+import { monthFromParam } from "@/lib/settlement-month";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useSettlement, useFilters, useIssueInvoices, useIssueNotices } from "@/hooks/use-settlement";
 import { SummaryCards } from "@/components/settlement/summary-cards";
@@ -29,18 +31,30 @@ export default function SettlementPage() {
 
 function SettlementPageContent() {
   const searchParams = useSearchParams();
+  const router = useRouter();
 
-  const [month, setMonth] = useState<string>(() => {
-    const fromUrl = searchParams.get("month");
-    if (fromUrl) return fromUrl;
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-  });
+  // 対象月は、画面右上の月(共通の月の切り替え)と同じにする。どの入口から来ても、選んでいた月が出るように(DEMO-000202)。
+  // URL に ?month= があれば、右上の月をそれに合わせてから URL から外す(残すと、右上で月を変えても固定されたままになる)
+  const { month: headerMonth, setMonth: setHeaderMonth } = useCurrentMonth();
+  const urlMonth = monthFromParam(searchParams.get("month"));
+  useEffect(() => {
+    if (!urlMonth) return;
+    setHeaderMonth(urlMonth);
+    const q = new URLSearchParams(searchParams.toString());
+    q.delete("month");
+    const qs = q.toString();
+    router.replace(qs ? `?${qs}` : "?", { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlMonth]);
+  const month = `${urlMonth ?? headerMonth}-01`;
   const [clientId, setClientId] = useState<string>("");
   const [partnerId, setPartnerId] = useState<string>("");
   const [projectId] = useState<string>(() => searchParams.get("project_id") ?? "");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [viewMode, setViewMode] = useState<SettlementViewMode>("billing");
+  // ?view=payment で支払タブを開く(月別状況の「支払通知を作成」から。DEMO-000189)
+  const [viewMode, setViewMode] = useState<SettlementViewMode>(() =>
+    searchParams.get("view") === "payment" ? "payment" : "billing"
+  );
   const [createdInvoices, setCreatedInvoices] = useState<CreatedInvoice[]>([]);
   const [createdNotices, setCreatedNotices] = useState<CreatedNotice[]>([]);
 
@@ -66,8 +80,9 @@ function SettlementPageContent() {
   }, []);
 
   const handleMonthChange = useCallback((value: string) => {
-    if (value) setMonth(value);
-  }, []);
+    const m = monthFromParam(value);
+    if (m) setHeaderMonth(m);
+  }, [setHeaderMonth]);
 
   const clientOptions = useMemo(
     () => (filters?.clients ?? []).map((c) => ({ value: String(c.id), label: c.name })),

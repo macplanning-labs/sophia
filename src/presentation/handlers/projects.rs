@@ -59,8 +59,12 @@ fn validate_commercial_flow(value: &str) -> bool {
 // ══════════════════════════════════════════════════════════
 
 /// GET /api/projects — 一覧(JSON)
-pub async fn api_index(State(pool): State<PgPool>) -> impl IntoResponse {
-    let projects = project_repo::list_projects(&pool)
+pub async fn api_index(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> impl IntoResponse {
+    let projects = project_repo::list_projects(&pool, &auth_user.list_filter(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ProjectView))
         .await
         .unwrap_or_else(|e| { tracing::warn!("projects api_index: {:?}", e); vec![] });
     Json(projects)
@@ -69,8 +73,21 @@ pub async fn api_index(State(pool): State<PgPool>) -> impl IntoResponse {
 /// GET /api/projects/{project_id} — 詳細(JSON。紐づく契約の要約含む)
 pub async fn api_detail(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(AUTHZ_MODE が shadow でも拒否する。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_project(&pool, &project_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ProjectView, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     let project = match project_repo::find_project_detail(&pool, &project_id).await {
         Ok(Some(p)) => p,
         Ok(None) => return Ok((axum::http::StatusCode::NOT_FOUND, "not found").into_response()),
@@ -112,9 +129,22 @@ pub struct ProjectUpdateBody {
 /// PUT /api/projects/{project_id} — 案件情報のみ更新(JSON)
 pub async fn api_update(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(project_id): Path<String>,
     Json(body): Json<ProjectUpdateBody>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_project(&pool, &project_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ProjectEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     // commercial_flow の検証
     if let Some(ref cf) = body.commercial_flow {
         if !validate_commercial_flow(cf) {
@@ -154,8 +184,21 @@ pub async fn api_update(
 /// DELETE /api/projects/{project_id} — 無効（is_active=false）の案件のみ削除可
 pub async fn api_delete(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(project_id): Path<String>,
 ) -> impl IntoResponse {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_project(&pool, &project_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ProjectEdit, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     let Some(project) = project_repo::find_project_detail(&pool, &project_id).await.log_err().ok().flatten() else {
         return (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({
             "success": false, "error": "該当する案件が見つかりません"
@@ -203,7 +246,19 @@ pub async fn api_delete(
 // ══════════════════════════════════════════════════════════
 
 /// GET /api/projects/wizard/form-data — ウィザード用マスタデータ(JSON)
-pub async fn api_wizard_form_data(State(pool): State<PgPool>) -> impl IntoResponse {
+pub async fn api_wizard_form_data(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ProjectView) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_wizard_form_data_inner(State(pool)).await)
+}
+
+async fn api_wizard_form_data_inner(State(pool): State<PgPool>) -> impl IntoResponse {
     let clients = project_repo::list_client_id_name_options(&pool).await
         .unwrap_or_else(|e| { tracing::warn!("projects wizard form-data (clients): {:?}", e); vec![] });
     let engineers = order_repo::list_all_engineer_id_name_options(&pool).await
@@ -214,7 +269,7 @@ pub async fn api_wizard_form_data(State(pool): State<PgPool>) -> impl IntoRespon
         .unwrap_or_else(|e| { tracing::warn!("projects wizard form-data (work_locations): {:?}", e); vec![] });
 
     Json(serde_json::json!({
-        "clients": clients.iter().map(|(id, name)| serde_json::json!({ "value": id, "label": name })).collect::<Vec<_>>(),
+        "clients": clients.iter().map(|(id, name, has_owner)| serde_json::json!({ "value": id, "label": name, "has_owner": has_owner })).collect::<Vec<_>>(),
         "engineers": engineers.iter().map(|(id, name)| serde_json::json!({ "value": id, "label": name })).collect::<Vec<_>>(),
         "partners": partners.iter().map(|(id, name)| serde_json::json!({ "value": id, "label": name })).collect::<Vec<_>>(),
         "work_locations": work_locations.iter().map(|(id, name)| serde_json::json!({ "value": id, "label": name })).collect::<Vec<_>>(),
@@ -316,6 +371,19 @@ pub struct WizardRequestBody {
 
 /// POST /api/projects/wizard — 案件作成ウィザード一括作成(JSON)
 pub async fn api_wizard_create(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Json(body): Json<WizardRequestBody>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::ProjectEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_wizard_create_inner(State(pool), Json(body)).await)
+}
+
+async fn api_wizard_create_inner(
     State(pool): State<PgPool>,
     Json(body): Json<WizardRequestBody>,
 ) -> Result<impl IntoResponse, AppError> {

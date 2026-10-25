@@ -106,11 +106,13 @@ export default function PayrollDetailPage({ id: idProp, embedded = false }: Prop
           {recalcDeductions.isPending ? "計算・保存中…" : "控除を再計算して保存"}
         </button>
       )}
-      {canViewAllPayroll && pay?.status !== "PAID" && (
+      {/* 支払済みにするは一度きり: 支払済みになったあとも、消さずに非活性にする(押した印) */}
+      {canViewAllPayroll && (
         <button
           type="button"
           onClick={() => setConfirmAction("markPaid")}
-          disabled={markPaid.isPending}
+          disabled={pay?.status === "PAID" || markPaid.isPending}
+          title={pay?.status === "PAID" ? "支払済みです" : undefined}
           className="px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
         >
           ✅ 支払済みにする

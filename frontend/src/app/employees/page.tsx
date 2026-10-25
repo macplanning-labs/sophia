@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { fetchEmployees } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { FormModal } from "@/components/ui/form-modal";
 import { DetailModal } from "@/components/ui/detail-modal";
@@ -152,13 +153,15 @@ function EmployeesPageContent() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-center justify-end">
-        {showAdmin && !userLoading && (
-          <Button size="sm" onClick={() => setShowCreate(true)} className="gap-1.5">
-            <Plus className="w-3.5 h-3.5" /> 新規作成
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        actions={
+          showAdmin && !userLoading && (
+            <Button size="sm" onClick={() => setShowCreate(true)} className="gap-1.5">
+              <Plus className="w-3.5 h-3.5" /> 新規作成
+            </Button>
+          )
+        }
+      />
       <div className="bg-card border border-border rounded-lg overflow-hidden">
         {isLoading ? (
           <div className="p-8 space-y-3">{[...Array(4)].map((_, i) => <div key={i} className="h-10 bg-muted/50 rounded animate-pulse" />)}</div>
@@ -213,7 +216,7 @@ function EmployeesPageContent() {
                   <TableCell className="text-sm text-muted-foreground">{EMPLOYMENT_TYPE_LABELS[e.employment_type] ?? e.employment_type}</TableCell>
                   <TableCell className="text-sm text-muted-foreground">{e.hire_date ?? "—"}</TableCell>
                   <TableCell className="text-[11px] text-muted-foreground">{e.email}</TableCell>
-                  <TableCell className="text-right text-sm tabular-nums">¥{e.base_salary.toLocaleString()}</TableCell>
+                  <TableCell className="text-right text-sm tabular-nums">{e.base_salary == null ? "—" : `¥${e.base_salary.toLocaleString()}`}</TableCell>
                   <TableCell className="text-center">
                     {e.is_active ? <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-[10px]">在籍</Badge>
                      : <Badge variant="outline" className="border-border text-muted-foreground text-[10px]">退職</Badge>}

@@ -12,6 +12,7 @@ use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use serde::Deserialize;
 
+use crate::domain::services::sent_document_lock;
 use crate::infrastructure::repositories::billing_repo;
 use crate::presentation::api_response::AppError;
 
@@ -25,9 +26,22 @@ pub struct ApiUpdateInvoiceHeaderForm {
 /// PUT /api/v1/invoices/{id} — ヘッダ情報の更新（JSON。明細は対象外・件名/発行日/支払期日のみ）
 pub async fn api_update(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
     Json(form): Json<ApiUpdateInvoiceHeaderForm>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_invoice(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingInvoiceEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     let issue_date = match chrono::NaiveDate::parse_from_str(&form.issue_date, "%Y-%m-%d") {
         Ok(d) => d,
         Err(_) => {
@@ -40,6 +54,21 @@ pub async fn api_update(
         .filter(|s| !s.is_empty())
         .and_then(|s| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").ok());
 
+    // 相手に送ったあとは書き換えない(DEMO-000223)
+    match billing_repo::find_invoice(&pool, id).await.log_err().ok().flatten() {
+        Some(inv) if sent_document_lock::invoice_is_locked(inv.sent_at, inv.client_accepted_at) => {
+            return Ok((axum::http::StatusCode::CONFLICT, Json(serde_json::json!({
+                "success": false, "error": sent_document_lock::edit_denied_message("請求書")
+            }))).into_response());
+        }
+        Some(_) => {}
+        None => {
+            return Ok((axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({
+                "success": false, "error": "請求書が見つかりません"
+            }))).into_response());
+        }
+    }
+
     billing_repo::update_invoice_header(&pool, id, issue_date, due_date, &form.subject).await?;
     tracing::info!("請求書ヘッダ更新: id={}", id);
 
@@ -49,17 +78,29 @@ pub async fn api_update(
 /// POST /invoices/{id}/delete — 削除
 pub async fn delete(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    // 支払通知(パートナー未受諾のみ削除可)と同じ方針: クライアントが受領確認する前なら、
-    // 承認済み・送付済みでも削除可とする（送付＝メールが届いただけで、相手方が実際に
-    // 見て確定させたとは限らないため。受領確認済みは正式な文書として扱い削除不可）。
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(AUTHZ_MODE が shadow でも拒否する。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_invoice(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingInvoiceEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
+    // 相手に送る前だけ削除できる。送ったあと・承諾したあとは、削除しない(何がダメだったかが分からなくなるため。
+    // 内容を変えるときは、新しい版を作って、もう一度送る)。DEMO-000223
     let invoice = billing_repo::find_invoice(&pool, id).await.log_err().ok().flatten();
     match invoice {
-        Some(ref inv) if inv.client_accepted_at.is_none() => {}
+        Some(ref inv) if !sent_document_lock::invoice_is_locked(inv.sent_at, inv.client_accepted_at) => {}
         Some(_) => {
-            return Ok((axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
-                "success": false, "error": "クライアント受領確認前の請求書のみ削除できます"
+            return Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
+                "success": false, "error": sent_document_lock::delete_denied_message("請求書")
             }))).into_response());
         }
         None => {}

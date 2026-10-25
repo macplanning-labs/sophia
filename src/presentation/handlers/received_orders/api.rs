@@ -6,6 +6,7 @@ use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use crate::infrastructure::repositories::order_repo::{self, ReceivedOrderRow};
 use crate::domain::models::client_contract::ReceivedOrderStatus;
+use crate::domain::authz::stamp::{is_no_owner, NO_OWNER_MESSAGE};
 use crate::presentation::api_response::AppError;
 
 #[derive(Debug, serde::Deserialize)]
@@ -19,8 +20,12 @@ pub struct ApiCreateOrderForm {
 // SPA用 JSON API
 
 /// GET /api/received-orders — 一覧（JSON）
-pub async fn api_index(State(pool): State<PgPool>) -> axum::Json<Vec<ReceivedOrderRow>> {
-    let rows = order_repo::list_received_order_rows(&pool).await
+pub async fn api_index(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::Json<Vec<ReceivedOrderRow>> {
+    let rows = order_repo::list_received_order_rows(&pool, &auth_user.list_filter(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedView)).await
         .unwrap_or_else(|e| { tracing::warn!("received_orders api: {:?}", e); vec![] });
     axum::Json(rows)
 }
@@ -30,6 +35,19 @@ pub async fn api_index(State(pool): State<PgPool>) -> axum::Json<Vec<ReceivedOrd
 /// 受注契約(m_client_contract)を1件指定し、その精算条件をスナップショットした
 /// 受注書(t_received_order)+受注明細(t_received_order_item)を1件作成する。
 pub async fn api_create(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    axum::Json(form): axum::Json<ApiCreateOrderForm>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_create_inner(State(pool), axum::Json(form)).await)
+}
+
+async fn api_create_inner(
     State(pool): State<PgPool>,
     axum::Json(form): axum::Json<ApiCreateOrderForm>,
 ) -> impl IntoResponse {
@@ -123,6 +141,13 @@ pub async fn api_create(
         &mut tx, &received_order_no, c.client_id, c.engineer_id, c.id, target_month, work_start, work_end, &c.project_name,
     ).await {
         Ok(id) => id,
+        // 担当が決まらない: 400(顧客の担当を設定してから作り直す)
+        Err(e) if is_no_owner(e.as_ref()) => {
+            tracing::warn!("受注書作成: 担当が決まらないため拒否しました");
+            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
+                "error": NO_OWNER_MESSAGE
+            }))).into_response();
+        }
         Err(e) => {
             tracing::error!("受注書作成: INSERT失敗: {:?}", e);
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({
@@ -154,8 +179,21 @@ pub async fn api_create(
 /// GET /api/received-orders/{id} — 詳細（JSON）
 pub async fn api_detail(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(AUTHZ_MODE が shadow でも拒否する。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedView, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     let order = order_repo::find_received_order(&pool, id).await.log_err().ok().flatten();
 
     match order {
@@ -205,9 +243,22 @@ pub struct CreateContractBody {
 /// 案件・技術者は、指定が無ければ、注文書の案件名（別名）・技術者名から一意に決まるときだけ補う。
 pub async fn api_create_contract(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
     body: Option<axum::Json<CreateContractBody>>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     let body = body.map(|b| b.0).unwrap_or_default();
     match order_repo::create_contract_from_received_order(&pool, id, body.project_id.as_deref(), body.engineer_id).await {
         Ok(Some(contract_id)) => Ok(axum::Json(serde_json::json!({
@@ -229,9 +280,22 @@ pub async fn api_create_contract(
 /// POST /api/received-orders/{id}/link-contract — オペレーターが受注契約を手動紐付け
 pub async fn api_link_contract(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
     axum::Json(body): axum::Json<LinkContractBody>,
 ) -> impl IntoResponse {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     // link_received_order_to_contractのエラーはanyhow::bail!によるユーザー向け業務メッセージ
     // （紐付け条件を満たさない旨の案内）であり、DB例外の生漏洩ではないためAppError化しない
     // （品質改善P2-1の対象外。他の2関数=api_delete/api_updateとは性質が異なる）。
@@ -258,8 +322,21 @@ pub async fn api_link_contract(
 /// POST /api/received-orders/{id}/rollforward — 翌月ロールフォワード（JSON）
 pub async fn api_rollforward(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     // rollforward_orderのエラーはanyhow::bail!によるユーザー向け業務メッセージ（重複月の案内）
     // を含むため、api_link_contractと同じ理由でAppError化しない（品質改善P2-1の対象外）。
     match crate::domain::services::rollforward::rollforward_order(&pool, id).await {
@@ -269,6 +346,13 @@ pub async fn api_rollforward(
             (axum::http::StatusCode::CREATED, axum::Json(serde_json::json!({
                 "success": true, "id": new_id, "received_order_no": received_order_no,
                 "message": "翌月の受注書を作成しました"
+            }))).into_response()
+        }
+        // 担当が決まらない(元の受注の顧客に担当が無い): 400
+        Err(e) if is_no_owner(e.as_ref()) => {
+            tracing::warn!("受注書ロールフォワードを拒否(担当が決まらない): {:?}", e);
+            (axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
+                "success": false, "error": NO_OWNER_MESSAGE
             }))).into_response()
         }
         Err(e) => {
@@ -283,9 +367,22 @@ pub async fn api_rollforward(
 /// PUT /api/received-orders/{id} — 受注書ヘッダー・明細更新（JSON）
 pub async fn api_update(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     let fields = order_repo::ReceivedOrderUpdateFields {
         status: payload["status"].as_str(),
         target_month: payload["target_month"].as_str(),
@@ -349,8 +446,21 @@ pub async fn api_update(
 /// 「削除可能な状態」として扱う（orders/api.rs::api_deleteのDRAFT相当）。
 pub async fn api_delete(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     let status = order_repo::find_received_order_status(&pool, id).await.log_err().ok().flatten();
 
     match status.as_deref() {

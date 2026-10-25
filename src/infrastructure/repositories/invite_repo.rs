@@ -90,13 +90,16 @@ pub async fn find_unused_invitation_with_reg_state(pool: &PgPool, token: Uuid) -
     Ok(row)
 }
 
-/// 招待を使用済みにする
-pub async fn mark_invitation_used(pool: &PgPool, id: i32) -> Result<()> {
-    sqlx::query("UPDATE s_partner_invitation SET is_used = true WHERE id = $1")
+/// 招待を「未使用 → 使用済み」に原子的に切り替える。切り替えられた(=自分が最初に使った)ときだけ true。
+///
+/// 同時に2回開かれても、セッションを受け取れるのは1回だけにするため、読んでから更新するのではなく
+/// 更新の件数で勝ち負けを決める(DEMO-000167 項目1)。
+pub async fn consume_invitation(pool: &PgPool, id: i32) -> Result<bool> {
+    let res = sqlx::query("UPDATE s_partner_invitation SET is_used = true WHERE id = $1 AND is_used = false")
         .bind(id)
         .execute(pool)
         .await?;
-    Ok(())
+    Ok(res.rows_affected() == 1)
 }
 
 /// 招待にWebAuthn登録用stateを一時保存する（セッションが無いため招待テーブルを流用）

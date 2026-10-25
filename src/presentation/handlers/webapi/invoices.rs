@@ -15,9 +15,46 @@ use utoipa::{ToSchema, IntoParams};
 use crate::presentation::middleware::api_key_auth::AuthApiKey;
 use crate::infrastructure::repositories::{api_access_log_repo, billing_repo, client_repo, company_info_repo, order_repo};
 use crate::domain::services::jp_pint_mapper;
-use crate::domain::services::pdf_generator::PdfGenerator;
 use super::dto::{ApiInvoiceResponse, ApiErrorResponse, map_jp_pint_to_api};
 use super::util::extract_client_ip;
+
+/// APIアクセスログを1件記録する。応答は妨げない（記録失敗は応答に影響させず、ERRORログに残す）。
+/// 500系の応答は記録しない（DBエラー時は記録自体も失敗しやすいため）。
+/// 記録するのはキーID・操作・表とID・状態コード・IPだけ（金額や取引先名は書かない）。
+async fn log_access(
+    pool: &PgPool,
+    auth: &AuthApiKey,
+    action: &str,
+    related_id: &str,
+    status: StatusCode,
+    ip: &str,
+) {
+    if status.is_server_error() {
+        return;
+    }
+    if let Err(e) = api_access_log_repo::insert_log(
+        pool,
+        auth.id,
+        action,
+        "t_billing_invoice",
+        related_id,
+        status.as_u16() as i16,
+        ip,
+    ).await {
+        tracing::error!(
+            "[WebAPI/アクセスログ] 処理=記録 結果=失敗 影響=利用記録が欠落 | action={} {:?}",
+            action, e
+        );
+    }
+}
+
+/// 応答の状態コードを取り出す（成功は200）
+fn status_of<T>(result: &Result<T, (StatusCode, Json<ApiErrorResponse>)>) -> StatusCode {
+    match result {
+        Ok(_) => StatusCode::OK,
+        Err((status, _)) => *status,
+    }
+}
 
 /// 請求書一覧クエリパラメータ
 #[derive(Debug, Deserialize, ToSchema, IntoParams)]
@@ -44,6 +81,8 @@ pub async fn list_invoices(
     State(pool): State<PgPool>,
     Extension(auth): Extension<AuthApiKey>,
     Query(params): Query<InvoiceListQuery>,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> Result<Json<Vec<ApiInvoiceResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     if auth.party_type != "CLIENT" {
         return Err((
@@ -77,7 +116,7 @@ pub async fn list_invoices(
         ));
     }
 
-    let company = match company_info_repo::get_company_info(&pool).await {
+    let company = match company_info_repo::get_company_info_basic(&pool).await {
         Ok(Some(co)) => co,
         Ok(None) => {
             return Err((
@@ -162,6 +201,9 @@ pub async fn list_invoices(
         results.push(api_invoice);
     }
 
+    let ip = extract_client_ip(&headers, Some(&addr));
+    log_access(&pool, &auth, "LIST_INVOICES", "", StatusCode::OK, &ip).await;
+
     Ok(Json(results))
 }
 
@@ -186,6 +228,18 @@ pub async fn get_invoice(
     Path(id): Path<i64>,
     headers: axum::http::HeaderMap,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Result<Json<ApiInvoiceResponse>, (StatusCode, Json<ApiErrorResponse>)> {
+    let result = get_invoice_inner(&pool, &auth, id).await;
+    let ip = extract_client_ip(&headers, Some(&addr));
+    log_access(&pool, &auth, "GET_INVOICE", &id.to_string(), status_of(&result), &ip).await;
+    result
+}
+
+/// GET /v1/invoices/{id} の本体（利用記録は呼び出し元の `get_invoice` で行う）
+async fn get_invoice_inner(
+    pool: &PgPool,
+    auth: &AuthApiKey,
+    id: i64,
 ) -> Result<Json<ApiInvoiceResponse>, (StatusCode, Json<ApiErrorResponse>)> {
     if auth.party_type != "CLIENT" {
         return Err((
@@ -237,7 +291,7 @@ pub async fn get_invoice(
                 message: Some("Client information not found".to_string()),
             }),
         ))?;
-    let company = company_info_repo::get_company_info(&pool).await
+    let company = company_info_repo::get_company_info_basic(&pool).await
         .ok()
         .flatten()
         .ok_or_else(|| (
@@ -251,19 +305,6 @@ pub async fn get_invoice(
     let own_participant_id = "0115:1000000000123";
     let jp_invoice = jp_pint_mapper::map_sales_invoice(&invoice, &items, &client, &company, &own_participant_id);
     let api_invoice = map_jp_pint_to_api(&jp_invoice, &invoice.status, invoice.client_accepted_at);
-
-    let ip = extract_client_ip(&headers, Some(&addr));
-    if let Err(e) = api_access_log_repo::insert_log(
-        &pool,
-        auth.id,
-        "GET_INVOICE",
-        "t_billing_invoice",
-        &id.to_string(),
-        200,
-        &ip,
-    ).await {
-        tracing::error!("Failed to insert access log: {:?}", e);
-    }
 
     Ok(Json(api_invoice))
 }
@@ -290,6 +331,18 @@ pub async fn accept_invoice(
     Path(id): Path<i64>,
     headers: axum::http::HeaderMap,
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
+    let result = accept_invoice_inner(&pool, &auth, id).await;
+    let ip = extract_client_ip(&headers, Some(&addr));
+    log_access(&pool, &auth, "ACCEPT_INVOICE", &id.to_string(), status_of(&result), &ip).await;
+    result
+}
+
+/// POST /v1/invoices/{id}/accept の本体（利用記録は呼び出し元の `accept_invoice` で行う）
+async fn accept_invoice_inner(
+    pool: &PgPool,
+    auth: &AuthApiKey,
+    id: i64,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
     if auth.scope != "READ_WRITE" {
         return Err((
@@ -351,9 +404,20 @@ pub async fn accept_invoice(
 
     let client_name = order_repo::find_client_name(&pool, invoice.client_id).await
         .log_err().unwrap_or_default();
-    let pdf_data = crate::presentation::handlers::invoices::pdf::build_client_invoice_pdf_data(&pool, &invoice, &client_name).await;
-    let gen = PdfGenerator::new();
-    let pdf_bytes = gen.generate_invoice_pdf(&pdf_data).unwrap_or_default();
+    // 作れなければ承諾しない(空の PDF のハッシュを記録しない)
+    let pdf_bytes = match crate::presentation::handlers::invoices::pdf::client_invoice_pdf_bytes(&pool, &invoice, &client_name).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("請求書PDF生成エラー(承諾): {e}");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse {
+                    error: "pdf_failed".to_string(),
+                    message: Some("請求書PDFを作れないため、承諾できません".to_string()),
+                }),
+            ));
+        }
+    };
 
     let mut hasher = Sha256::new();
     hasher.update(&pdf_bytes);
@@ -374,19 +438,6 @@ pub async fn accept_invoice(
         if let Err(e) = order_repo::mark_received_order_invoice_confirmed(&pool, ro_id).await {
             tracing::error!("Failed to mark received order: {:?}", e);
         }
-    }
-
-    let ip = extract_client_ip(&headers, Some(&addr));
-    if let Err(e) = api_access_log_repo::insert_log(
-        &pool,
-        auth.id,
-        "ACCEPT_INVOICE",
-        "t_billing_invoice",
-        &id.to_string(),
-        200,
-        &ip,
-    ).await {
-        tracing::error!("Failed to insert access log: {:?}", e);
     }
 
     Ok(StatusCode::OK)

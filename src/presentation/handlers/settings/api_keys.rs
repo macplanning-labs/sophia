@@ -24,6 +24,9 @@ pub struct GenerateApiKeyRequest {
     pub name: String,
     pub scope: String,
     pub environment: String,
+    /// 有効日数(1〜3650)。省略=無期限
+    #[serde(default)]
+    pub expires_in_days: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -35,6 +38,8 @@ pub struct ApiKeyResponse {
     pub is_active: bool,
     pub created_at: String,
     pub revoked_at: Option<String>,
+    /// 有効期限。null=無期限
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +89,7 @@ pub async fn list_api_keys(
         is_active: k.is_active,
         created_at: k.created_at.to_rfc3339(),
         revoked_at: k.revoked_at.map(|dt| dt.to_rfc3339()),
+        expires_at: k.expires_at.map(|dt| dt.to_rfc3339()),
     }).collect();
 
     Ok(Json(responses))
@@ -113,6 +119,18 @@ pub async fn generate_api_key(
             }),
         ));
     }
+
+    let expires_at = crate::domain::services::api_key_policy::expiry_from_days(
+        payload.expires_in_days,
+        chrono::Utc::now(),
+    )
+    .map_err(|msg| (
+        StatusCode::BAD_REQUEST,
+        Json(ApiErrorResponse {
+            error: "invalid_parameter".to_string(),
+            message: Some(msg.to_string()),
+        }),
+    ))?;
 
     let key_prefix = match payload.environment.as_str() {
         "live" => "sk_live_",
@@ -153,6 +171,7 @@ pub async fn generate_api_key(
         &api_key_hash,
         &payload.scope,
         payload.name.trim(),
+        expires_at,
     )
     .await
     .map_err(|e| {

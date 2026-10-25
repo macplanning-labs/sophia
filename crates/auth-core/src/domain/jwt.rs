@@ -55,7 +55,7 @@ pub fn decode_claims<C: DeserializeOwned>(token: &str, secret: &str) -> Result<C
 // ---------------------------------------------------------------------------
 
 /// アプリ非依存の汎用JWTクレーム。`extra` にアプリ固有クレーム
-/// （例: Sophiaの `can_view_all_payroll`）をフラットに埋め込む。
+/// （例: `can_view_all_payroll` のような権限フラグ）をフラットに埋め込む。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
@@ -86,7 +86,7 @@ impl Default for TokenPolicy {
 }
 
 /// audience（もしくはロール名）ごとに `TokenPolicy` を保持するレジストリ。
-/// 例: Sophiaの「社員24時間 / パートナー30日」のような役割別ポリシーを
+/// 例:「社員は24時間、外部パートナーは30日」のような役割別ポリシーを
 /// 起動時設定（環境変数 or DBマスタ）から注入する。
 #[derive(Debug, Clone, Default)]
 pub struct TokenPolicyRegistry {

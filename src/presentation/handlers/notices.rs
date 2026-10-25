@@ -21,6 +21,7 @@ use sqlx::PgPool;
 
 use crate::domain::models::partner_contract::PaymentNotice;
 use crate::domain::services::pdf_generator::{PartnerInvoiceIssuer, PdfGenerator};
+use crate::domain::services::sent_document_lock;
 use crate::infrastructure::repositories::order_repo::{self, NoticeRow, PartnerInvoiceIssuerRow};
 use crate::presentation::api_response::AppError;
 
@@ -143,8 +144,21 @@ async fn build_notice_email_ctx(
 /// 宛先（パートナーメール）・CC（パートナーマスタのCC欄）も返す。
 pub async fn api_email_preview(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(詳細と同じ権限・スタンプ。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_payment_notice(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingPaymentView, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     use crate::domain::services::email_service::EmailService;
 
     let (_notice, partner_name, partner_email, partner_cc, ctx, _token_url) =
@@ -174,12 +188,29 @@ pub struct SendMailBody {
 /// POST /api/notices/{id}/send — 支払通知書メール送付（確認用トークンURL。PDF添付なし）
 pub async fn send_mail(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
     axum::Json(payload): axum::Json<SendMailBody>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_payment_notice(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingPaymentIssue, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     use crate::domain::services::email_service::EmailService;
 
-    let (_notice, _partner_name, partner_email, partner_cc, ctx, token_url) =
+    if let Some(r) = current_guard(&pool, &id).await {
+        return Ok(r);
+    }
+
+    let (notice, partner_name, partner_email, partner_cc, ctx, token_url) =
         match build_notice_email_ctx(&pool, &id).await {
             Ok(v) => v,
             Err((status, msg)) => return Ok((status, axum::Json(serde_json::json!({ "success": false, "error": msg }))).into_response()),
@@ -191,6 +222,12 @@ pub async fn send_mail(
                 "success": false, "error": "承認前（承認待ち・差戻し）の支払通知書は送信できません。先に承認してください。"
             }))).into_response());
         }
+    }
+
+    if let Some(msg) = crate::infrastructure::integrations::check::mail_setup_problem(&pool).await {
+        return Ok((axum::http::StatusCode::UNPROCESSABLE_ENTITY, axum::Json(serde_json::json!({
+            "success": false, "error": msg
+        }))).into_response());
     }
 
     let email_svc = EmailService::new(pool.clone());
@@ -207,6 +244,9 @@ pub async fn send_mail(
     if let Err(e) = order_repo::mark_payment_notice_mail_sent(&pool, &id).await {
         tracing::error!("mail_sent_at更新エラー: {:?}", e);
     }
+
+    // 送った瞬間の PDF を残す(DEMO-000214。失敗しても送信は成功のまま)
+    record_payment_notice_sent(&pool, &notice, &partner_name).await;
 
     Ok(axum::Json(serde_json::json!({
         "success": true,
@@ -244,8 +284,21 @@ fn pdf_error(status: axum::http::StatusCode, msg: String) -> axum::response::Res
 /// GET /api/notices/{id}/pdf — 支払通知書PDF
 pub async fn download_pdf(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(詳細と同じ権限・スタンプ。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_payment_notice(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingPaymentView, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     use axum::http::StatusCode;
 
     let notice = match order_repo::find_payment_notice(&pool, &id).await.log_err().ok().flatten() {
@@ -265,8 +318,21 @@ pub async fn download_pdf(
 /// GET /api/notices/{id}/invoice-pdf — パートナー代理請求書PDF
 pub async fn download_invoice_pdf(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(詳細と同じ権限・スタンプ。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_payment_notice(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingPaymentView, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     use axum::http::StatusCode;
 
     let notice = match order_repo::find_payment_notice(&pool, &id).await.log_err().ok().flatten() {
@@ -274,7 +340,7 @@ pub async fn download_invoice_pdf(
         None => return pdf_error(StatusCode::NOT_FOUND, "支払通知書が見つかりません".into()),
     };
 
-    match generate_partner_invoice_pdf_bytes(&pool, &notice).await {
+    match partner_invoice_pdf_for_view(&pool, &notice).await {
         Ok(bytes) => pdf_response(bytes, &format!("invoice_{}.pdf", notice.notice_id)),
         Err(e) => {
             tracing::error!("{}", e);
@@ -335,10 +401,11 @@ pub async fn build_payment_notice_pdf_data(
     }
 
     let company = order_repo::find_company_bank_info(pool).await.log_err().ok().flatten();
-    let (company_name, bank_name, bank_branch, account_type, account_number, account_name) = company.unwrap_or_default();
+    // 支払通知書の PDF は口座番号を使わない(読まない)
+    let (company_name, bank_name, bank_branch, account_type, account_name) = company.unwrap_or_default();
 
-    // 自社住所等（請求書PDFの宛先表示用）
-    let company_detail = crate::infrastructure::repositories::billing_repo::find_company_invoice_info(pool)
+    // 自社住所等（請求書PDFの宛先表示用。口座番号は読まない）
+    let company_detail = crate::infrastructure::repositories::billing_repo::find_company_invoice_info_basic(pool)
         .await.log_err().ok().flatten();
 
     let project_name = order_repo::find_project_name_by_purchase_order(pool, &notice.purchase_order_id)
@@ -388,13 +455,11 @@ pub async fn build_payment_notice_pdf_data(
         bank_name,
         bank_branch,
         account_type,
-        account_number,
         account_name,
         project_name,
         company_postal_code: company_detail.as_ref().map(|c| c.postal_code.clone()),
         company_address: company_detail.as_ref().map(|c| c.address.clone()),
         company_tel: company_detail.as_ref().map(|c| c.tel.clone()),
-        ..Default::default()
     })
 }
 
@@ -425,6 +490,25 @@ pub async fn generate_payment_notice_pdf_bytes(
         .map_err(|e| format!("支払通知書PDF生成エラー: {}", e))
 }
 
+/// 支払通知書を送った: 送った瞬間の PDF を残す(DEMO-000214)。失敗しても送信は成功のまま
+pub async fn record_payment_notice_sent(pool: &PgPool, notice: &PaymentNotice, partner_name: &str) {
+    use crate::domain::services::issued_document::{record_sent, DocType, Issued};
+    match generate_payment_notice_pdf_bytes(pool, notice).await {
+        Ok(pdf) => {
+            record_sent(pool, Issued {
+                doc_type: DocType::PaymentNotice,
+                doc_ref: &notice.notice_id,
+                party_name: partner_name,
+                target_month: chrono::Datelike::with_day(&notice.target_month, 1),
+                amount: Some(i64::from(notice.total)),
+                pdf: &pdf,
+            })
+            .await
+        }
+        Err(e) => tracing::error!("[発行した書類] 支払通知書 {} の PDF を作れず、残せませんでした: {e}", notice.notice_id),
+    }
+}
+
 /// パートナー代理請求書PDFバイト列を生成する
 pub async fn generate_partner_invoice_pdf_bytes(
     pool: &PgPool,
@@ -432,15 +516,49 @@ pub async fn generate_partner_invoice_pdf_bytes(
 ) -> Result<Vec<u8>, String> {
     let pdf_data = build_payment_notice_pdf_data(pool, notice).await
         .map_err(|e| format!("PDFデータ構築エラー: {}", e))?;
-    let issuer_row = order_repo::find_partner_invoice_issuer(pool, &notice.partner_id).await
-        .log_err().ok().flatten()
-        .unwrap_or_else(|| PartnerInvoiceIssuerRow {
+    // 発行者が無いのは「未登録」として名前だけで作る。読めなかった(復号の失敗を含む)ときは作らない
+    let issuer_row = match order_repo::find_partner_invoice_issuer(pool, &notice.partner_id).await {
+        Ok(Some(row)) => row,
+        Ok(None) => PartnerInvoiceIssuerRow {
             name: pdf_data.partner_name.clone(),
             ..Default::default()
-        });
+        },
+        Err(e) => {
+            tracing::error!("[代理請求書] 発行者(パートナー)の情報を読めず、PDFを作りません: {e:?}");
+            return Err("発行者の情報を読めないため、請求書PDFを作れません".into());
+        }
+    };
     let issuer = issuer_from_row(issuer_row);
     PdfGenerator::new().generate_partner_invoice_pdf(&pdf_data, &issuer)
         .map_err(|e| format!("請求書PDF生成エラー: {}", e))
+}
+
+/// 代理請求書 PDF を表示用に取り出す。承諾済みなら、承諾した時点に残した PDF(DEMO-000087)。
+/// 未承諾、または残しが無い古い書類は、従来どおり作り直す
+pub async fn partner_invoice_pdf_for_view(pool: &PgPool, notice: &PaymentNotice) -> Result<Vec<u8>, String> {
+    use crate::domain::services::issued_document::{frozen_pdf, DocType};
+    if notice.partner_accepted_at.is_some() {
+        if let Some(b) = frozen_pdf(pool, DocType::PartnerInvoice, &notice.notice_id).await {
+            return Ok(b);
+        }
+    }
+    generate_partner_invoice_pdf_bytes(pool, notice).await
+}
+
+/// 支払通知書が承諾された: 承諾した時点の代理請求書 PDF を、消えない場所に残す(DEMO-000087)。
+/// 失敗しても承諾は成功のまま(残せなかったときは error ログと異常の通知)
+pub async fn record_partner_invoice_accepted(pool: &PgPool, notice: &PaymentNotice, pdf: &[u8]) {
+    use crate::domain::services::issued_document::{record_sent, DocType, Issued};
+    let partner_name = order_repo::find_partner_name(pool, &notice.partner_id).await.unwrap_or_default();
+    record_sent(pool, Issued {
+        doc_type: DocType::PartnerInvoice,
+        doc_ref: &notice.notice_id,
+        party_name: &partner_name,
+        target_month: chrono::Datelike::with_day(&notice.target_month, 1),
+        amount: Some(i64::from(notice.total)),
+        pdf,
+    })
+    .await
 }
 
 // ══════════════════════════════════════════════════════════
@@ -450,11 +568,13 @@ pub async fn generate_partner_invoice_pdf_bytes(
 /// GET /api/notices — 一覧（JSON）
 pub async fn api_index(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Query(filter): Query<NoticeFilter>,
 ) -> axum::Json<Vec<NoticeRow>> {
     let partner = filter.partner.filter(|s| !s.is_empty());
 
-    let notices = order_repo::list_notice_rows(&pool, partner.as_deref()).await
+    let notices = order_repo::list_notice_rows(&pool, partner.as_deref(), &auth_user.list_filter(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingPaymentView)).await
         .unwrap_or_else(|e| { tracing::warn!("notices api: {:?}", e); vec![] });
 
     axum::Json(notices)
@@ -467,15 +587,29 @@ pub async fn api_index(
 /// 請求書=PENDING_APPROVALのみ削除可、と同じ「相手方が動く前まで」の方針）。
 pub async fn api_delete(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_payment_notice(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingPaymentEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     let notice = order_repo::find_payment_notice(&pool, &id).await.log_err().ok().flatten();
 
     match notice {
-        Some(n) if n.partner_accepted_at.is_none() => {}
+        // 相手に送る前だけ削除できる(送ったあと・承諾したあとは削除しない。DEMO-000223)
+        Some(n) if !sent_document_lock::notice_is_locked(n.mail_sent_at, n.partner_accepted_at) => {}
         Some(_) => {
-            return Ok((axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
-                "success": false, "error": "パートナー未受諾の支払通知のみ削除できます"
+            return Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
+                "success": false, "error": sent_document_lock::delete_denied_message("支払通知書")
             }))).into_response());
         }
         None => {
@@ -501,9 +635,37 @@ pub struct ApiUpdateNoticeHeaderForm {
 /// PUT /api/v1/notices/{id} — ヘッダ情報の更新（JSON。明細は対象外・通知日/支払期日/備考のみ）
 pub async fn api_update(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
     axum::Json(form): axum::Json<ApiUpdateNoticeHeaderForm>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_payment_notice(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingPaymentEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
+    // 相手に送ったあとは書き換えない(DEMO-000223)
+    match order_repo::find_payment_notice(&pool, &id).await.log_err().ok().flatten() {
+        Some(n) if sent_document_lock::notice_is_locked(n.mail_sent_at, n.partner_accepted_at) => {
+            return Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
+                "success": false, "error": sent_document_lock::edit_denied_message("支払通知書")
+            }))).into_response());
+        }
+        Some(_) => {}
+        None => {
+            return Ok((axum::http::StatusCode::NOT_FOUND, axum::Json(serde_json::json!({
+                "success": false, "error": "支払通知が見つかりません"
+            }))).into_response());
+        }
+    }
+
     let notice_date = match chrono::NaiveDate::parse_from_str(&form.notice_date, "%Y-%m-%d") {
         Ok(d) => d,
         Err(_) => {
@@ -525,8 +687,21 @@ pub async fn api_update(
 /// GET /api/notices/{id} — 詳細（JSON）
 pub async fn api_detail(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(AUTHZ_MODE が shadow でも拒否する。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_payment_notice(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingPaymentView, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     let notice = order_repo::find_payment_notice(&pool, &id).await.log_err().ok().flatten();
 
     match notice {
@@ -545,8 +720,13 @@ pub async fn api_detail(
             let tax_amount = crate::domain::services::tax_calculation::total_tax_amount(&breakdown) as i64;
             let total = subtotal + tax_amount;
 
+            // 新しい版に差し替えられていれば、その版(DEMO-000224)
+            let superseded_by = order_repo::find_superseding_notice(&pool, &id).await.log_err().ok().flatten()
+                .map(|(nid, _, sent, reason)| serde_json::json!({ "id": nid, "sent": sent, "reason": reason }));
+
             axum::Json(serde_json::json!({
                 "notice": notice,
+                "superseded_by": superseded_by,
                 "items": items,
                 "partner_name": partner_name,
                 "target_month_display": target_month_display,
@@ -560,12 +740,80 @@ pub async fn api_detail(
     }
 }
 
+/// 訂正版・取り消しの、理由の入力
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct ReasonBody {
+    pub reason: Option<String>,
+}
+
+fn revision_error_response(code: u16, msg: String) -> axum::response::Response {
+    let status = axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::CONFLICT);
+    (status, axum::Json(serde_json::json!({ "success": false, "error": msg }))).into_response()
+}
+
+/// 取り消し済み・差し替え済みの支払通知書は、承認・差し戻し・送信などをさせない(DEMO-000224)。操作してよければ None
+pub async fn current_guard(pool: &PgPool, id: &str) -> Option<axum::response::Response> {
+    use crate::domain::services::document_revision::{not_current_message, RevisionState};
+    let notice = order_repo::find_payment_notice(pool, id).await.log_err().ok().flatten()?;
+    let superseded = order_repo::find_superseding_notice(pool, id).await.log_err().ok().flatten().is_some();
+    let state = RevisionState::of_notice(notice.mail_sent_at, notice.partner_accepted_at, notice.cancelled_at, superseded);
+    if state.can_operate() {
+        None
+    } else {
+        Some(revision_error_response(409, not_current_message("支払通知書", &state)))
+    }
+}
+
+/// POST /api/notices/{id}/revise — 送った支払通知書の訂正版を作る(Admin限定。DEMO-000224)
+pub async fn api_revise(
+    State(pool): State<PgPool>,
+    Path(id): Path<String>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    axum::Json(body): axum::Json<ReasonBody>,
+) -> Result<impl IntoResponse, AppError> {
+    use crate::domain::services::document_revision::{outcome_error, validate_reason, RevisionOutcome};
+    let reason = match validate_reason(body.reason.as_deref().unwrap_or("")) {
+        Ok(r) => r,
+        Err(m) => return Ok(revision_error_response(400, m.to_string())),
+    };
+    let outcome = order_repo::revise_payment_notice(&pool, &id, &reason, auth_user.user.id).await?;
+    if let Some((code, msg)) = outcome_error("支払通知書", &outcome) {
+        return Ok(revision_error_response(code, msg));
+    }
+    let RevisionOutcome::Done(new_id) = outcome else { return Ok(revision_error_response(500, "訂正版を作れませんでした".into())) };
+    tracing::info!("[訂正版] 支払通知書 {} の訂正版 {} を作りました(理由: {})", id, new_id, reason);
+    Ok(axum::Json(serde_json::json!({ "success": true, "new_notice_id": new_id })).into_response())
+}
+
+/// POST /api/notices/{id}/cancel — 送った支払通知書を取り消す(Admin限定。DEMO-000224)
+pub async fn api_cancel(
+    State(pool): State<PgPool>,
+    Path(id): Path<String>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    axum::Json(body): axum::Json<ReasonBody>,
+) -> Result<impl IntoResponse, AppError> {
+    use crate::domain::services::document_revision::{outcome_error, validate_reason};
+    let reason = match validate_reason(body.reason.as_deref().unwrap_or("")) {
+        Ok(r) => r,
+        Err(m) => return Ok(revision_error_response(400, m.to_string())),
+    };
+    let outcome = order_repo::cancel_payment_notice(&pool, &id, &reason, auth_user.user.id).await?;
+    if let Some((code, msg)) = outcome_error("支払通知書", &outcome) {
+        return Ok(revision_error_response(code, msg));
+    }
+    tracing::info!("[取り消し] 支払通知書 {} を取り消しました(理由: {})", id, reason);
+    Ok(axum::Json(serde_json::json!({ "success": true })).into_response())
+}
+
 /// POST /api/notices/{id}/approve — 承認（Admin限定、PENDING_APPROVAL/REJECTED→APPROVED）
 pub async fn api_approve(
     State(pool): State<PgPool>,
     Path(id): Path<String>,
     axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
 ) -> Result<impl IntoResponse, AppError> {
+    if let Some(r) = current_guard(&pool, &id).await {
+        return Ok(r);
+    }
     match order_repo::approve_payment_notice(&pool, &id, auth_user.user.id).await {
         Ok(true) => Ok(axum::Json(serde_json::json!({ "success": true })).into_response()),
         Ok(false) => Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
@@ -580,10 +828,13 @@ pub async fn api_reject(
     State(pool): State<PgPool>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    if let Some(r) = current_guard(&pool, &id).await {
+        return Ok(r);
+    }
     match order_repo::reject_payment_notice(&pool, &id).await {
         Ok(true) => Ok(axum::Json(serde_json::json!({ "success": true })).into_response()),
         Ok(false) => Ok((axum::http::StatusCode::CONFLICT, axum::Json(serde_json::json!({
-            "success": false, "error": "承認待ちまたは承認済みで、パートナー承諾前の支払通知書のみ差戻しできます"
+            "success": false, "error": "承認待ちまたは承認済みで、相手に送る前の支払通知書のみ差戻しできます(送った書類は、訂正版を作ってください)"
         }))).into_response()),
         Err(e) => Err(AppError::from(e)),
     }

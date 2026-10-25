@@ -18,7 +18,10 @@ pub async fn api_notices(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> impl IntoResponse {
-    let partner_id = auth_user.partner_id().unwrap_or("unknown");
+    // 取引先が特定できないときは、文字列 "unknown" で検索せず、何も返さない(DEMO-000181 項目3)
+    let Some(partner_id) = auth_user.partner_id() else {
+        return axum::Json(serde_json::json!({ "notices": Vec::<serde_json::Value>::new() }));
+    };
 
     let rows = order_repo::list_portal_notices(&pool, partner_id).await.log_err().unwrap_or_default();
 
@@ -48,7 +51,10 @@ pub async fn api_notice_confirm(
 ) -> impl IntoResponse {
     use sha2::{Sha256, Digest};
 
-    let partner_id = auth_user.partner_id().unwrap_or("unknown");
+    // 取引先が特定できないときは、文字列 "unknown" で検索せず、何も返さない(DEMO-000181 項目3)
+    let Some(partner_id) = auth_user.partner_id() else {
+        return axum::Json(serde_json::json!({ "status": "error", "error": "請求書が見つかりません" }));
+    };
 
     // 権限チェック
     let notice = order_repo::find_payment_notice_for_partner(&pool, &notice_id, partner_id).await;
@@ -77,16 +83,8 @@ pub async fn api_notice_confirm(
     hasher.update(&pdf_bytes);
     let document_hash = format!("{:x}", hasher.finalize());
 
-    // PDF永続保存: uploads/invoices/invoice_{notice_id}.pdf
-    let pdf_dir = std::path::Path::new("uploads/invoices");
-    if let Err(e) = std::fs::create_dir_all(pdf_dir) {
-        tracing::error!("PDFディレクトリ作成エラー: {:?}", e);
-    }
-    let pdf_path = pdf_dir.join(format!("invoice_{}.pdf", notice_id));
-    if let Err(e) = std::fs::write(&pdf_path, &pdf_bytes) {
-        tracing::error!("PDF保存エラー: {:?}", e);
-        return axum::Json(serde_json::json!({ "status": "error", "error": "PDFの保存に失敗しました" }));
-    }
+    // 承諾した時点の PDF を、消えない場所(発行した書類の記録)に残す(DEMO-000087)
+    crate::presentation::handlers::notices::record_partner_invoice_accepted(&pool, &notice, &pdf_bytes).await;
 
     // DB更新: partner_accepted_at + document_hash
     if let Err(e) = order_repo::confirm_payment_notice(&pool, &notice_id, &document_hash).await {
@@ -117,7 +115,13 @@ pub async fn api_invoice_pdf(
     use axum::http::{header, StatusCode};
     use crate::presentation::http_util;
 
-    let partner_id = auth_user.partner_id().unwrap_or("unknown");
+    // 取引先が特定できないときは、文字列 "unknown" で検索せず、何も返さない(DEMO-000181 項目3)
+    let Some(partner_id) = auth_user.partner_id() else {
+        return http_util::build_response(
+            Response::builder().status(StatusCode::NOT_FOUND),
+            Body::from("請求書が見つかりません")
+        );
+    };
     let notice = order_repo::find_payment_notice_for_partner(&pool, &notice_id, partner_id).await.log_err().ok().flatten();
 
     let notice = match notice {
@@ -128,7 +132,7 @@ pub async fn api_invoice_pdf(
         ),
     };
 
-    match crate::presentation::handlers::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await {
+    match crate::presentation::handlers::notices::partner_invoice_pdf_for_view(&pool, &notice).await {
         Ok(pdf_bytes) => http_util::build_response(
             Response::builder()
                 .status(StatusCode::OK)
@@ -154,7 +158,13 @@ pub async fn api_payment_notice_pdf(
     use axum::http::{header, StatusCode};
     use crate::presentation::http_util;
 
-    let partner_id = auth_user.partner_id().unwrap_or("unknown");
+    // 取引先が特定できないときは、文字列 "unknown" で検索せず、何も返さない(DEMO-000181 項目3)
+    let Some(partner_id) = auth_user.partner_id() else {
+        return http_util::build_response(
+            Response::builder().status(StatusCode::NOT_FOUND),
+            Body::from("支払通知書が見つかりません")
+        );
+    };
     let notice = order_repo::find_payment_notice_for_partner(&pool, &notice_id, partner_id).await.log_err().ok().flatten();
 
     let notice = match notice {
@@ -165,12 +175,26 @@ pub async fn api_payment_notice_pdf(
         ),
     };
 
+    // 送った瞬間の PDF があれば、それを見せる(DEMO-000214)
+    use crate::domain::services::issued_document::{self, DocType};
+    let name = issued_document::file_name(DocType::PaymentNotice, &notice.notice_id, chrono::Datelike::with_day(&notice.target_month, 1));
+    let disposition = issued_document::content_disposition_inline(&name);
+    if let Some(pdf_bytes) = issued_document::frozen_pdf(&pool, DocType::PaymentNotice, &notice.notice_id).await {
+        return http_util::build_response(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .header(header::CONTENT_DISPOSITION, disposition),
+            Body::from(pdf_bytes)
+        );
+    }
+
     match crate::presentation::handlers::notices::generate_payment_notice_pdf_bytes(&pool, &notice).await {
         Ok(pdf_bytes) => http_util::build_response(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/pdf")
-                .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"notice_{}.pdf\"", notice_id)),
+                .header(header::CONTENT_DISPOSITION, disposition),
             Body::from(pdf_bytes)
         ),
         Err(e) => http_util::build_response(

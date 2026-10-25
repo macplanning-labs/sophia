@@ -25,6 +25,9 @@ use std::collections::HashMap;
 use crate::domain::models::partner_contract::{PaymentNotice, PurchaseOrder};
 use crate::infrastructure::repositories::order_repo;
 use crate::presentation::handlers::timesheet_upload_common;
+use crate::domain::services::token_access;
+use crate::domain::services::document_revision::RevisionState;
+use crate::domain::services::issued_document::{self, DocType};
 
 /// トークンの有効期限チェック（DB設定値から取得）
 async fn is_token_expired(pool: &PgPool, issued_at: Option<chrono::DateTime<chrono::Utc>>) -> bool {
@@ -36,6 +39,76 @@ async fn is_token_expired(pool: &PgPool, issued_at: Option<chrono::DateTime<chro
         }
         None => false,
     }
+}
+
+/// 注文書の承諾を受けてよいか（期限。判定は token_access に集約。注文書が無ければ None）
+async fn order_accept_denial(
+    pool: &PgPool,
+    uuid: &uuid::Uuid,
+) -> anyhow::Result<Option<token_access::TokenDenial>> {
+    let Some(order) = order_repo::find_purchase_order_by_uuid(pool, uuid).await? else {
+        return Ok(None);
+    };
+    let days = crate::domain::services::settlement_dashboard::get_token_expiry_days(pool).await;
+    Ok(token_access::check_order_accept(&order.status, order.token_issued_at, chrono::Utc::now(), days).err())
+}
+
+/// 支払通知書のリンクを使わせてよいか（未承諾の間だけ期限あり）
+async fn notice_denial(pool: &PgPool, notice: &PaymentNotice) -> Option<token_access::TokenDenial> {
+    let days = crate::domain::services::settlement_dashboard::get_token_expiry_days(pool).await;
+    token_access::check_notice_access(notice.partner_accepted_at, notice.mail_sent_at, chrono::Utc::now(), days).err()
+}
+
+/// 請求書のリンクを使わせてよいか（表示・PDF・承諾で同じ判定。未承諾の間だけ送信日時からの期限あり。
+/// 承諾したあとは期限なし。DEMO-000223）
+async fn invoice_accept_denial(
+    pool: &PgPool,
+    invoice: &crate::domain::models::billing::BillingInvoice,
+) -> Option<token_access::TokenDenial> {
+    let days = crate::domain::services::settlement_dashboard::get_token_expiry_days(pool).await;
+    token_access::check_invoice_access(invoice.client_accepted_at, invoice.sent_at, chrono::Utc::now(), days).err()
+}
+
+/// 支払通知書の版・取り消しの状態と、差し替えた新しい版(あれば)。(番号, リンク, メールで送ったか, 理由)(DEMO-000224)
+async fn notice_revision(
+    pool: &PgPool,
+    n: &PaymentNotice,
+) -> (RevisionState, Option<(String, uuid::Uuid, bool, Option<String>)>) {
+    let sup = order_repo::find_superseding_notice(pool, &n.notice_id).await.log_err().ok().flatten();
+    (RevisionState::of_notice(n.mail_sent_at, n.partner_accepted_at, n.cancelled_at, sup.is_some()), sup)
+}
+
+/// 請求書の版・取り消しの状態と、差し替えた新しい版(あれば)。(id, リンク, メールで送ったか)
+async fn invoice_revision(
+    pool: &PgPool,
+    inv: &crate::domain::models::billing::BillingInvoice,
+) -> (RevisionState, Option<(i64, uuid::Uuid, bool, Option<String>)>) {
+    use crate::infrastructure::repositories::billing_repo;
+    let sup = billing_repo::find_superseding_invoice(pool, inv.id).await.log_err().ok().flatten();
+    (RevisionState::of_invoice(inv.sent_at, inv.client_accepted_at, inv.cancelled_at, sup.is_some()), sup)
+}
+
+/// 差し替え済み・取り消し済みの書類を、承諾させないときの文言(相手に見える。取り消しの理由は出さない)
+fn revision_denial_message(state: &RevisionState) -> &'static str {
+    if state.cancelled {
+        "この書類は取り消されました。"
+    } else {
+        "この書類は新しい版に差し替えられました。新しい版を確認してください。"
+    }
+}
+
+/// 相手の画面に出す、版・取り消しの状態。`superseded_by` は、新しい版を、もう送っているときだけ出す(下書きは見せない)
+fn revision_json(
+    state: &RevisionState,
+    revision: i32,
+    sup: Option<(uuid::Uuid, bool)>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "revision": revision,
+        "document_state": state.label().map(|l| if l == "取り消し済み" { "cancelled" } else { "superseded" }),
+        "superseded_by": sup.and_then(|(u, sent)| if sent { Some(serde_json::json!({ "uuid": u })) } else { None }),
+        "superseded_pending": sup.map(|(_, sent)| !sent).unwrap_or(false),
+    })
 }
 
 /// 共通ページ枠（invite.rs / auth/portal.rs と同じダークテーマのカードスタイル）
@@ -120,6 +193,9 @@ pub async fn view(
     // ── 支払通知書を検索 ──
     match order_repo::find_payment_notice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(notice)) => {
+            if let Some(d) = notice_denial(&pool, &notice).await {
+                return Html(error_page(d.message())).into_response();
+            }
             return Html(render_notice_page(&pool, &notice, &uuid).await).into_response();
         }
         Ok(None) => {}
@@ -135,7 +211,7 @@ pub async fn view(
     use crate::infrastructure::repositories::billing_repo;
     match billing_repo::find_invoice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(invoice)) => {
-            if is_token_expired(&pool, invoice.sent_at).await {
+            if invoice_accept_denial(&pool, &invoice).await.is_some() {
                 return Html(error_page(
                     "このリンクの有効期限が切れています。お手数ですが発注元までお問い合わせください。"
                 )).into_response();
@@ -173,7 +249,7 @@ async fn render_invoice_page(pool: &PgPool, invoice: &crate::domain::models::bil
             uuid = uuid
         )
     } else {
-        let accepted = invoice.client_accepted_at.map(|d| d.format("%Y年%m月%d日 %H:%M").to_string()).unwrap_or_default();
+        let accepted = invoice.client_accepted_at.map(|d| crate::domain::services::jst::format(d, "%Y年%m月%d日 %H:%M")).unwrap_or_default();
         format!(
             r#"<div class="banner ok" data-testid="invoice-accepted-banner">この請求書は承諾済みです（{accepted}）。ご対応ありがとうございました。</div>
 <div class="actions">
@@ -228,7 +304,7 @@ async fn render_notice_page(pool: &PgPool, notice: &PaymentNotice, uuid: &str) -
             uuid = uuid
         )
     } else {
-        let finalized = notice.partner_accepted_at.map(|d| d.format("%Y年%m月%d日 %H:%M").to_string()).unwrap_or_default();
+        let finalized = notice.partner_accepted_at.map(|d| crate::domain::services::jst::format(d, "%Y年%m月%d日 %H:%M")).unwrap_or_default();
         format!(
             r#"<div class="banner ok">この支払通知書・請求書は承諾済みです（{finalized}）。ご対応ありがとうございました。</div>
 <div class="actions">
@@ -305,7 +381,7 @@ async fn render_order_page(
             uuid = uuid
         )
     } else {
-        let finalized = order.partner_accepted_at.map(|d| d.format("%Y年%m月%d日 %H:%M").to_string()).unwrap_or_default();
+        let finalized = order.partner_accepted_at.map(|d| crate::domain::services::jst::format(d, "%Y年%m月%d日 %H:%M")).unwrap_or_default();
         format!(
             r#"<div class="banner ok">この注文書は承諾済みです（{finalized}）。ご対応ありがとうございました。</div>
 <div class="actions">
@@ -428,11 +504,27 @@ pub async fn accept(
         Err(_) => return axum::http::StatusCode::NOT_FOUND.into_response(),
     };
 
-    // 注文書の承諾
+    // 注文書の承諾（期限切れのリンクでは承諾させない。表示側と同じ判定）
+    match order_accept_denial(&pool, &uuid_parsed).await {
+        Ok(Some(d)) => {
+            return (axum::http::StatusCode::GONE, Html(error_page(d.message()))).into_response();
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!("[トークンリンク解決] 処理=注文書検索(承諾) 影響=承諾できない | {}", e);
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Html(error_page(
+                "お手数ですが、しばらく時間をおいてからアクセスしてください。"
+            ))).into_response();
+        }
+    }
     let order_result = order_repo::accept_order_by_uuid(&pool, &uuid_parsed).await;
 
     if let Ok(rows) = order_result {
         if rows > 0 {
+            // 承諾の瞬間の注文請書 PDF を残す(DEMO-000214)
+            if let Ok(Some(o)) = order_repo::find_purchase_order_by_uuid(&pool, &uuid_parsed).await {
+                super::orders::record_purchase_order_accepted(&pool, &o).await;
+            }
             send_order_approve_notification(&pool, uuid_parsed).await;
             return Redirect::to(&format!("/token/{}", uuid)).into_response();
         }
@@ -441,18 +533,27 @@ pub async fn accept(
     // 支払通知書の承諾（代理請求書PDFを保存してハッシュ記録）
     match order_repo::find_payment_notice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(notice)) => {
+            if let Some(d) = notice_denial(&pool, &notice).await {
+                return (axum::http::StatusCode::GONE, Html(error_page(d.message()))).into_response();
+            }
             if notice.partner_accepted_at.is_none() {
                 use sha2::{Digest, Sha256};
 
-                let pdf_bytes = super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await.log_err().unwrap_or_default();
+                let pdf_bytes = match super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::error!("[トークンリンク解決] 処理=代理請求書PDF生成(承諾) 影響=承諾を保留 | {}", e);
+                        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Html(error_page(
+                            "お手数ですが、しばらく時間をおいてからアクセスしてください。"
+                        ))).into_response();
+                    }
+                };
                 let mut hasher = Sha256::new();
                 hasher.update(&pdf_bytes);
                 let document_hash = format!("{:x}", hasher.finalize());
 
                 if !pdf_bytes.is_empty() {
-                    let pdf_dir = std::path::Path::new("uploads/invoices");
-                    let _ = std::fs::create_dir_all(pdf_dir);
-                    let _ = std::fs::write(pdf_dir.join(format!("invoice_{}.pdf", notice.notice_id)), &pdf_bytes);
+                    super::notices::record_partner_invoice_accepted(&pool, &notice, &pdf_bytes).await;
                 }
 
                 if let Err(e) = order_repo::confirm_payment_notice(&pool, &notice.notice_id, &document_hash).await {
@@ -480,22 +581,38 @@ pub async fn accept(
     match billing_repo::find_invoice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(invoice)) => {
             if invoice.client_accepted_at.is_none() {
+                if let Some(d) = invoice_accept_denial(&pool, &invoice).await {
+                    return (axum::http::StatusCode::GONE, Html(error_page(d.message()))).into_response();
+                }
                 use sha2::{Digest, Sha256};
-                use crate::domain::services::pdf_generator::PdfGenerator;
 
                 let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.log_err().unwrap_or_default();
-                let pdf_data = super::invoices::build_client_invoice_pdf_data(&pool, &invoice, &client_name).await;
-                let gen = PdfGenerator::new();
-                let pdf_bytes = gen.generate_invoice_pdf(&pdf_data).unwrap_or_default();
+                // 送った瞬間の PDF があれば、それの照合値を記録する(相手が受け取ったものと一致させる。DEMO-000214)
+                let pdf_bytes = match issued_document::frozen_pdf(&pool, DocType::Invoice, &invoice.invoice_no).await {
+                    Some(b) => b,
+                    None => match super::invoices::client_invoice_pdf_bytes(&pool, &invoice, &client_name).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::error!("[承諾] 処理=請求書PDF生成 影響=承諾を保留 | {}", e);
+                            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Html(error_page("お手数ですが、しばらく時間をおいてからアクセスしてください。"))).into_response();
+                        }
+                    },
+                };
 
                 let mut hasher = Sha256::new();
                 hasher.update(&pdf_bytes);
                 let document_hash = format!("{:x}", hasher.finalize());
 
-                if !pdf_bytes.is_empty() {
-                    let pdf_dir = std::path::Path::new("uploads/invoices");
-                    let _ = std::fs::create_dir_all(pdf_dir);
-                    let _ = std::fs::write(pdf_dir.join(format!("invoice_{}.pdf", invoice.invoice_no)), &pdf_bytes);
+                if !pdf_bytes.is_empty() && issued_document::frozen_pdf(&pool, DocType::Invoice, &invoice.invoice_no).await.is_none() {
+                    // 送った瞬間の PDF が無い古い請求書だけ、承諾時の PDF を残す(uploads には書かない。DEMO-000087)
+                    issued_document::record_sent(&pool, issued_document::Issued {
+                        doc_type: DocType::Invoice,
+                        doc_ref: &invoice.invoice_no,
+                        party_name: &client_name,
+                        target_month: chrono::Datelike::with_day(&invoice.target_month, 1),
+                        amount: None,
+                        pdf: &pdf_bytes,
+                    }).await;
                 }
 
                 if let Err(e) = billing_repo::confirm_client_invoice(&pool, invoice.id, &document_hash).await {
@@ -562,6 +679,11 @@ pub async fn upload_timesheet(
         Redirect::to(&format!("/token/{}?{}={}", uuid, param, encode_query_message(&msg))).into_response()
     };
 
+    // 承諾済みの注文書だけ受け付ける（ファイルを読む前に判定する）
+    if let Err(d) = token_access::check_timesheet_upload(&order.status) {
+        return redirect_with(false, d.message().to_string());
+    }
+
     let (bytes, original_filename) = match timesheet_upload_common::extract_upload_file(&mut multipart).await {
         Ok(v) => v,
         Err(e) => return redirect_with(false, extract_error_message(&e)),
@@ -589,6 +711,8 @@ pub async fn upload_timesheet(
 
     match timesheet_upload_common::upsert_parsed_timesheet(
         &pool, contract_id, target_month, &result, &original_filename, "UPLOADED",
+        // 外部(トークンページ)からの提出は拒否しない: 親 → 受け皿 → 担当なし
+        crate::domain::authz::stamp::StampMode::AutoImport,
     ).await {
         Ok(()) => {
             tracing::info!(
@@ -680,15 +804,24 @@ async fn send_invoice_receipt_confirmed_notification(
 }
 
 /// PDFダウンロード（GET /token/:uuid/pdf）
+/// PDF をその場で表示する応答(ファイル名は決まった形。DEMO-000214)
+fn pdf_inline(bytes: Vec<u8>, name: &str) -> axum::response::Response {
+    use axum::http::header;
+    crate::presentation::http_util::build_response(
+        axum::response::Response::builder()
+            .header(header::CONTENT_TYPE, "application/pdf")
+            .header(header::CONTENT_DISPOSITION, issued_document::content_disposition_inline(name)),
+        axum::body::Body::from(bytes),
+    )
+    .into_response()
+}
+
 pub async fn download_pdf(
     State(pool): State<PgPool>,
     Path(uuid): Path<String>,
 ) -> impl IntoResponse {
-    use axum::response::Response;
-    use axum::body::Body;
-    use axum::http::{header, StatusCode};
+    use axum::http::StatusCode;
     use crate::domain::services::pdf_generator::PdfGenerator;
-    use crate::presentation::http_util;
 
     let uuid_parsed = match uuid::Uuid::parse_str(&uuid) {
         Ok(u) => u,
@@ -700,14 +833,14 @@ pub async fn download_pdf(
             if is_token_expired(&pool, o.token_issued_at).await {
                 return StatusCode::FORBIDDEN.into_response();
             }
+            // 送った瞬間の PDF があれば、それを見せる(DEMO-000214)。無い古い書類だけ作り直す
+            let name = issued_document::file_name(DocType::PurchaseOrder, &o.order_id, chrono::Datelike::with_day(&o.work_start, 1));
+            if let Some(bytes) = issued_document::frozen_pdf(&pool, DocType::PurchaseOrder, &o.order_id).await {
+                return pdf_inline(bytes, &name);
+            }
             match super::orders::build_purchase_order_pdf_data(&pool, &o).await {
                 Ok(pdf_data) => match PdfGenerator::new().generate_purchase_order_pdf(&pdf_data) {
-                    Ok(bytes) => return http_util::build_response(
-                        Response::builder()
-                            .header(header::CONTENT_TYPE, "application/pdf")
-                            .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"order_{}.pdf\"", o.order_id)),
-                        Body::from(bytes)
-                    ).into_response(),
+                    Ok(bytes) => return pdf_inline(bytes, &name),
                     Err(e) => { tracing::error!("PDF生成エラー: {}", e); return StatusCode::INTERNAL_SERVER_ERROR.into_response(); }
                 },
                 Err(e) => { tracing::error!("PDFデータ構築エラー: {}", e); return StatusCode::INTERNAL_SERVER_ERROR.into_response(); }
@@ -722,13 +855,15 @@ pub async fn download_pdf(
 
     match order_repo::find_payment_notice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(n)) => {
+            if notice_denial(&pool, &n).await.is_some() {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            let name = issued_document::file_name(DocType::PaymentNotice, &n.notice_id, chrono::Datelike::with_day(&n.target_month, 1));
+            if let Some(bytes) = issued_document::frozen_pdf(&pool, DocType::PaymentNotice, &n.notice_id).await {
+                return pdf_inline(bytes, &name);
+            }
             match super::notices::generate_payment_notice_pdf_bytes(&pool, &n).await {
-                Ok(bytes) => return http_util::build_response(
-                    Response::builder()
-                        .header(header::CONTENT_TYPE, "application/pdf")
-                        .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"notice_{}.pdf\"", n.notice_id)),
-                    Body::from(bytes)
-                ).into_response(),
+                Ok(bytes) => return pdf_inline(bytes, &name),
                 Err(e) => { tracing::error!("{}", e); return StatusCode::INTERNAL_SERVER_ERROR.into_response(); }
             }
         }
@@ -742,18 +877,16 @@ pub async fn download_pdf(
     use crate::infrastructure::repositories::billing_repo;
     match billing_repo::find_invoice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(invoice)) => {
-            if is_token_expired(&pool, invoice.sent_at).await {
+            if invoice_accept_denial(&pool, &invoice).await.is_some() {
                 return StatusCode::FORBIDDEN.into_response();
             }
+            let name = issued_document::file_name(DocType::Invoice, &invoice.invoice_no, chrono::Datelike::with_day(&invoice.target_month, 1));
+            if let Some(bytes) = issued_document::frozen_pdf(&pool, DocType::Invoice, &invoice.invoice_no).await {
+                return pdf_inline(bytes, &name);
+            }
             let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.log_err().unwrap_or_default();
-            let pdf_data = super::invoices::build_client_invoice_pdf_data(&pool, &invoice, &client_name).await;
-            return match PdfGenerator::new().generate_invoice_pdf(&pdf_data) {
-                Ok(bytes) => http_util::build_response(
-                    Response::builder()
-                        .header(header::CONTENT_TYPE, "application/pdf")
-                        .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"invoice_{}.pdf\"", invoice.invoice_no)),
-                    Body::from(bytes)
-                ).into_response(),
+            return match super::invoices::client_invoice_pdf_bytes(&pool, &invoice, &client_name).await {
+                Ok(bytes) => pdf_inline(bytes, &name),
                 Err(e) => { tracing::error!("請求書PDF生成エラー: {}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
             };
         }
@@ -783,7 +916,12 @@ pub async fn download_invoice_pdf(
     };
 
     let notice = match order_repo::find_payment_notice_by_uuid(&pool, &uuid_parsed).await {
-        Ok(Some(n)) => n,
+        Ok(Some(n)) => {
+            if notice_denial(&pool, &n).await.is_some() {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            n
+        }
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!("[トークン 代理請求書PDF取得] 処理=支払通知書検索 影響=PDF取得失敗 | {}", e);
@@ -791,7 +929,7 @@ pub async fn download_invoice_pdf(
         }
     };
 
-    match super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await {
+    match super::notices::partner_invoice_pdf_for_view(&pool, &notice).await {
         Ok(bytes) => http_util::build_response(
             Response::builder()
                 .header(header::CONTENT_TYPE, "application/pdf")
@@ -810,11 +948,8 @@ pub async fn download_acceptance_pdf(
     State(pool): State<PgPool>,
     Path(uuid): Path<String>,
 ) -> impl IntoResponse {
-    use axum::response::Response;
-    use axum::body::Body;
-    use axum::http::{header, StatusCode};
+    use axum::http::StatusCode;
     use crate::domain::services::pdf_generator::PdfGenerator;
-    use crate::presentation::http_util;
 
     let uuid_parsed = match uuid::Uuid::parse_str(&uuid) {
         Ok(u) => u,
@@ -835,14 +970,15 @@ pub async fn download_acceptance_pdf(
         }
     };
 
+    // 承諾の瞬間の PDF があれば、それを見せる(DEMO-000214)
+    let name = issued_document::file_name(DocType::Acceptance, &order.order_id, chrono::Datelike::with_day(&order.work_start, 1));
+    if let Some(bytes) = issued_document::frozen_pdf(&pool, DocType::Acceptance, &order.order_id).await {
+        return pdf_inline(bytes, &name);
+    }
+
     match super::orders::build_purchase_order_pdf_data(&pool, &order).await {
         Ok(pdf_data) => match PdfGenerator::new().generate_acceptance_pdf(&pdf_data) {
-            Ok(bytes) => http_util::build_response(
-                Response::builder()
-                    .header(header::CONTENT_TYPE, "application/pdf")
-                    .header(header::CONTENT_DISPOSITION, format!("inline; filename=\"acceptance_{}.pdf\"", order.order_id)),
-                Body::from(bytes)
-            ).into_response(),
+            Ok(bytes) => pdf_inline(bytes, &name),
             Err(e) => { tracing::error!("注文請書PDF生成エラー: {}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
         },
         Err(e) => { tracing::error!("PDFデータ構築エラー: {}", e); StatusCode::INTERNAL_SERVER_ERROR.into_response() }
@@ -901,7 +1037,7 @@ pub async fn api_view(
                 "order_id": order.order_id,
                 "status": order.status,
                 "accepted": accepted,
-                "finalized_at": order.partner_accepted_at.map(|d| d.format("%Y年%m月%d日 %H:%M").to_string()),
+                "finalized_at": order.partner_accepted_at.map(|d| crate::domain::services::jst::format(d, "%Y年%m月%d日 %H:%M")),
                 "deliverable_text": order.deliverable_text,
                 "payment_condition": order.payment_condition,
                 "work_location": order.work_location,
@@ -923,14 +1059,24 @@ pub async fn api_view(
 
     match order_repo::find_payment_notice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(notice)) => {
+            if let Some(d) = notice_denial(&pool, &notice).await {
+                return (
+                    axum::http::StatusCode::GONE,
+                    Json(serde_json::json!({ "error": d.message() })),
+                )
+                    .into_response();
+            }
             let partner_name = order_repo::find_partner_name_email(&pool, &notice.partner_id)
                 .await.log_err().ok().flatten().map(|(n, _)| n).unwrap_or_default();
             let company_name = order_repo::find_company_name_setting(&pool).await.log_err().unwrap_or_else(|_| "有限会社マックプランニング".into());
             let project_name = order_repo::find_project_name_by_purchase_order(&pool, &notice.purchase_order_id)
                 .await.log_err().ok().flatten().unwrap_or_default();
             let accepted = notice.partner_accepted_at.is_some();
+            let (rev_state, rev_sup) = notice_revision(&pool, &notice).await;
+            let rev = revision_json(&rev_state, notice.revision, rev_sup.as_ref().map(|(_, u, sent, _)| (*u, *sent)));
             return Json(serde_json::json!({
                 "kind": "notice",
+                "revision_info": rev,
                 "uuid": uuid,
                 "partner_name": partner_name,
                 "project_name": project_name,
@@ -940,12 +1086,12 @@ pub async fn api_view(
                 "notice_date": notice.notice_date.format("%Y年%m月%d日").to_string(),
                 "total": notice.total,
                 "accepted": accepted,
-                "confirmed_at": notice.partner_accepted_at.map(|d| d.format("%Y年%m月%d日 %H:%M").to_string()),
+                "confirmed_at": notice.partner_accepted_at.map(|d| crate::domain::services::jst::format(d, "%Y年%m月%d日 %H:%M")),
                 "pdf": {
                     "notice": format!("/api/v1/token/{}/pdf", uuid),
                     "invoice": format!("/api/v1/token/{}/invoice-pdf", uuid),
                 },
-                "can_accept": !accepted,
+                "can_accept": !accepted && rev_state.is_current(),
             })).into_response();
         }
         Ok(None) => {}
@@ -958,7 +1104,7 @@ pub async fn api_view(
     use crate::infrastructure::repositories::billing_repo;
     match billing_repo::find_invoice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(invoice)) => {
-            if is_token_expired(&pool, invoice.sent_at).await {
+            if invoice_accept_denial(&pool, &invoice).await.is_some() {
                 return (
                     axum::http::StatusCode::GONE,
                     Json(serde_json::json!({ "error": "このリンクの有効期限が切れています" })),
@@ -969,8 +1115,11 @@ pub async fn api_view(
             let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.log_err().unwrap_or_default();
             let company_name = order_repo::find_company_name_setting(&pool).await.log_err().unwrap_or_else(|_| "有限会社マックプランニング".into());
             let accepted = invoice.client_accepted_at.is_some();
+            let (rev_state, rev_sup) = invoice_revision(&pool, &invoice).await;
+            let rev = revision_json(&rev_state, invoice.revision, rev_sup.as_ref().map(|(_, u, sent, _)| (*u, *sent)));
             return Json(serde_json::json!({
                 "kind": "invoice",
+                "revision_info": rev,
                 "uuid": uuid,
                 "client_name": client_name,
                 "company_name": company_name,
@@ -980,9 +1129,9 @@ pub async fn api_view(
                 "due_date": invoice.due_date.map(|d| d.format("%Y年%m月%d日").to_string()),
                 "total": invoice.total,
                 "accepted": accepted,
-                "confirmed_at": invoice.client_accepted_at.map(|d| d.format("%Y年%m月%d日 %H:%M").to_string()),
+                "confirmed_at": invoice.client_accepted_at.map(|d| crate::domain::services::jst::format(d, "%Y年%m月%d日 %H:%M")),
                 "pdf": { "invoice": format!("/api/v1/token/{}/pdf", uuid) },
-                "can_accept": !accepted,
+                "can_accept": !accepted && rev_state.is_current(),
             })).into_response();
         }
         Ok(None) => {}
@@ -1015,8 +1164,28 @@ pub async fn api_accept(
         }
     };
 
+    // 注文書の承諾（期限切れのリンクでは承諾させない。表示側と同じ判定）
+    match order_accept_denial(&pool, &uuid_parsed).await {
+        Ok(Some(d)) => {
+            return (
+                axum::http::StatusCode::GONE,
+                Json(serde_json::json!({ "success": false, "error": d.message() })),
+            )
+                .into_response();
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!("[トークンAPI 承諾] 処理=注文書検索 影響=承諾処理失敗 | {}", e);
+            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "success": false, "error": "サーバーエラーが発生しました" }))).into_response();
+        }
+    }
+
     if let Ok(rows) = order_repo::accept_order_by_uuid(&pool, &uuid_parsed).await {
         if rows > 0 {
+            // 承諾の瞬間の注文請書 PDF を残す(DEMO-000214)
+            if let Ok(Some(o)) = order_repo::find_purchase_order_by_uuid(&pool, &uuid_parsed).await {
+                super::orders::record_purchase_order_accepted(&pool, &o).await;
+            }
             send_order_approve_notification(&pool, uuid_parsed).await;
             return Json(serde_json::json!({ "success": true })).into_response();
         }
@@ -1024,16 +1193,36 @@ pub async fn api_accept(
 
     match order_repo::find_payment_notice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(notice)) => {
+            if let Some(d) = notice_denial(&pool, &notice).await {
+                return (
+                    axum::http::StatusCode::GONE,
+                    Json(serde_json::json!({ "success": false, "error": d.message() })),
+                )
+                    .into_response();
+            }
             if notice.partner_accepted_at.is_none() {
+                // 差し替え済み・取り消し済みの書類は、承諾させない(DEMO-000224)
+                let (rev_state, _) = notice_revision(&pool, &notice).await;
+                if !rev_state.is_current() {
+                    return (
+                        axum::http::StatusCode::GONE,
+                        Json(serde_json::json!({ "success": false, "error": revision_denial_message(&rev_state) })),
+                    )
+                        .into_response();
+                }
                 use sha2::{Digest, Sha256};
-                let pdf_bytes = super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await.log_err().unwrap_or_default();
+                let pdf_bytes = match super::notices::generate_partner_invoice_pdf_bytes(&pool, &notice).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::error!("[トークンAPI 承諾] 処理=代理請求書PDF生成 影響=承諾を保留 | {}", e);
+                        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "success": false, "error": "請求書の作成に失敗しました" }))).into_response();
+                    }
+                };
                 let mut hasher = Sha256::new();
                 hasher.update(&pdf_bytes);
                 let document_hash = format!("{:x}", hasher.finalize());
                 if !pdf_bytes.is_empty() {
-                    let pdf_dir = std::path::Path::new("uploads/invoices");
-                    let _ = std::fs::create_dir_all(pdf_dir);
-                    let _ = std::fs::write(pdf_dir.join(format!("invoice_{}.pdf", notice.notice_id)), &pdf_bytes);
+                    super::notices::record_partner_invoice_accepted(&pool, &notice, &pdf_bytes).await;
                 }
                 if let Err(e) = order_repo::confirm_payment_notice(&pool, &notice.notice_id, &document_hash).await {
                     tracing::error!("支払通知承諾DB更新エラー: {:?}", e);
@@ -1061,22 +1250,50 @@ pub async fn api_accept(
     match billing_repo::find_invoice_by_uuid(&pool, &uuid_parsed).await {
         Ok(Some(invoice)) => {
             if invoice.client_accepted_at.is_none() {
+                if let Some(d) = invoice_accept_denial(&pool, &invoice).await {
+                    return (
+                        axum::http::StatusCode::GONE,
+                        Json(serde_json::json!({ "success": false, "error": d.message() })),
+                    )
+                        .into_response();
+                }
+                let (rev_state, _) = invoice_revision(&pool, &invoice).await;
+                if !rev_state.is_current() {
+                    return (
+                        axum::http::StatusCode::GONE,
+                        Json(serde_json::json!({ "success": false, "error": revision_denial_message(&rev_state) })),
+                    )
+                        .into_response();
+                }
                 use sha2::{Digest, Sha256};
-                use crate::domain::services::pdf_generator::PdfGenerator;
 
                 let client_name = order_repo::find_client_name(&pool, invoice.client_id).await.log_err().unwrap_or_default();
-                let pdf_data = super::invoices::build_client_invoice_pdf_data(&pool, &invoice, &client_name).await;
-                let gen = PdfGenerator::new();
-                let pdf_bytes = gen.generate_invoice_pdf(&pdf_data).unwrap_or_default();
+                // 送った瞬間の PDF があれば、それの照合値を記録する(相手が受け取ったものと一致させる。DEMO-000214)
+                let pdf_bytes = match issued_document::frozen_pdf(&pool, DocType::Invoice, &invoice.invoice_no).await {
+                    Some(b) => b,
+                    None => match super::invoices::client_invoice_pdf_bytes(&pool, &invoice, &client_name).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            tracing::error!("[承諾] 処理=請求書PDF生成 影響=承諾を保留 | {}", e);
+                            return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "success": false, "error": "請求書の作成に失敗しました" }))).into_response();
+                        }
+                    },
+                };
 
                 let mut hasher = Sha256::new();
                 hasher.update(&pdf_bytes);
                 let document_hash = format!("{:x}", hasher.finalize());
 
-                if !pdf_bytes.is_empty() {
-                    let pdf_dir = std::path::Path::new("uploads/invoices");
-                    let _ = std::fs::create_dir_all(pdf_dir);
-                    let _ = std::fs::write(pdf_dir.join(format!("invoice_{}.pdf", invoice.invoice_no)), &pdf_bytes);
+                if !pdf_bytes.is_empty() && issued_document::frozen_pdf(&pool, DocType::Invoice, &invoice.invoice_no).await.is_none() {
+                    // 送った瞬間の PDF が無い古い請求書だけ、承諾時の PDF を残す(uploads には書かない。DEMO-000087)
+                    issued_document::record_sent(&pool, issued_document::Issued {
+                        doc_type: DocType::Invoice,
+                        doc_ref: &invoice.invoice_no,
+                        party_name: &client_name,
+                        target_month: chrono::Datelike::with_day(&invoice.target_month, 1),
+                        amount: None,
+                        pdf: &pdf_bytes,
+                    }).await;
                 }
 
                 if let Err(e) = billing_repo::confirm_client_invoice(&pool, invoice.id, &document_hash).await {
@@ -1145,6 +1362,15 @@ pub async fn api_upload_timesheet(
         }
     };
 
+    // 承諾済みの注文書だけ受け付ける（ファイルを読む前に判定する）
+    if let Err(d) = token_access::check_timesheet_upload(&order.status) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "success": false, "error": d.message() })),
+        )
+            .into_response();
+    }
+
     let (bytes, original_filename) = match timesheet_upload_common::extract_upload_file(&mut multipart).await {
         Ok(v) => v,
         Err(e) => {
@@ -1193,6 +1419,8 @@ pub async fn api_upload_timesheet(
 
     match timesheet_upload_common::upsert_parsed_timesheet(
         &pool, contract_id, target_month, &result, &original_filename, "UPLOADED",
+        // 外部(トークンページ)からの提出は拒否しない: 親 → 受け皿 → 担当なし
+        crate::domain::authz::stamp::StampMode::AutoImport,
     ).await {
         Ok(()) => {
             tracing::info!(

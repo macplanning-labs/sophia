@@ -23,6 +23,10 @@ pub const TOKEN_TYPE_ACCESS: &str = "access";
 pub const TOKEN_TYPE_MFA_PENDING: &str = "mfa_pending";
 pub const TOKEN_TYPE_REFRESH: &str = "refresh";
 
+/// ログイン方式の値。社内 SSO（Cloudflare Access の JWT）でログインしたときだけ付く。
+/// パスワード・パスキー・マジックリンクのトークンには付けない（項目なし）。
+pub const AUTH_METHOD_SSO: &str = "sso";
+
 /// デフォルトポリシー（access 30分 / refresh 7日）を返す
 pub fn sophia_token_policy() -> TokenPolicy {
     TokenPolicy::default()
@@ -56,6 +60,19 @@ pub struct SophiaExtraClaims {
     pub jti: String,
     /// トークンタイプ（TOKEN_TYPE_ACCESS / TOKEN_TYPE_MFA_PENDING / TOKEN_TYPE_REFRESH）
     pub token_type: String,
+    /// ログイン方式。社内 SSO のときだけ Some("sso")。
+    /// 項目が無い古いトークンも読める（None）。サイレントリフレッシュでも引き継ぐ（欠けると 30 分後に
+    /// MFA の登録を求められてしまう）。SSO は IdP が本人確認を済ませているため、Sophia の MFA の登録を免除する
+    /// （DEMO-000226 決定 6。免除はこの項目が付いたトークンだけ。DB の mfa_enabled は変えない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_method: Option<String>,
+}
+
+impl SophiaExtraClaims {
+    /// 社内 SSO でログインしたトークンか。
+    pub fn is_sso(&self) -> bool {
+        self.auth_method.as_deref() == Some(AUTH_METHOD_SSO)
+    }
 }
 
 /// ログイン成功時に発行される access + refresh トークンペア
@@ -76,12 +93,23 @@ pub fn issue_sophia_access_claims(
     role: &str,
     mfa_verified: bool,
 ) -> Result<(Claims, String), AuthError> {
+    issue_sophia_access_claims_with_method(user_id, role, mfa_verified, None)
+}
+
+/// [`issue_sophia_access_claims`] に、ログイン方式（SSO のときだけ Some(AUTH_METHOD_SSO)）を足した版。
+pub fn issue_sophia_access_claims_with_method(
+    user_id: i64,
+    role: &str,
+    mfa_verified: bool,
+    auth_method: Option<&str>,
+) -> Result<(Claims, String), AuthError> {
     let jti = uuid::Uuid::new_v4().to_string();
     let extra = SophiaExtraClaims {
         role: role.to_string(),
         mfa_verified,
         jti: jti.clone(),
         token_type: TOKEN_TYPE_ACCESS.to_string(),
+        auth_method: auth_method.map(str::to_string),
     };
     let policy = TokenPolicy {
         access_ttl: access_ttl(),
@@ -96,12 +124,22 @@ pub fn issue_sophia_access_claims(
 /// リフレッシュトークン（7日）のClaimsを組み立てる。
 /// token_type は TOKEN_TYPE_REFRESH。mfa_verified は常に true（本ログイン後のみ）。
 pub fn issue_sophia_refresh_claims(user_id: i64, role: &str) -> Result<(Claims, String), AuthError> {
+    issue_sophia_refresh_claims_with_method(user_id, role, None)
+}
+
+/// [`issue_sophia_refresh_claims`] に、ログイン方式を足した版。
+pub fn issue_sophia_refresh_claims_with_method(
+    user_id: i64,
+    role: &str,
+    auth_method: Option<&str>,
+) -> Result<(Claims, String), AuthError> {
     let jti = uuid::Uuid::new_v4().to_string();
     let extra = SophiaExtraClaims {
         role: role.to_string(),
         mfa_verified: true,
         jti: jti.clone(),
         token_type: TOKEN_TYPE_REFRESH.to_string(),
+        auth_method: auth_method.map(str::to_string),
     };
     let policy = TokenPolicy {
         access_ttl: refresh_ttl(),
@@ -121,6 +159,7 @@ pub fn issue_mfa_pending_claims(user_id: i64, role: &str) -> Result<Claims, Auth
         mfa_verified: false,
         jti,
         token_type: TOKEN_TYPE_MFA_PENDING.to_string(),
+        auth_method: None,
     };
     let policy = TokenPolicy {
         access_ttl: mfa_pending_ttl(),
@@ -139,10 +178,23 @@ pub fn issue_and_encode_token_pair(
     role: &str,
     secret: &str,
 ) -> Result<StaffTokenPair, AuthError> {
-    let (access_claims, access_jti) = issue_sophia_access_claims(user_id, role, true)?;
+    issue_and_encode_token_pair_with_method(user_id, role, secret, None)
+}
+
+/// [`issue_and_encode_token_pair`] に、ログイン方式を足した版。
+/// access と refresh の**両方**に同じ方式を入れる（片方だけだと、サイレントリフレッシュで方式が消える）。
+pub fn issue_and_encode_token_pair_with_method(
+    user_id: i64,
+    role: &str,
+    secret: &str,
+    auth_method: Option<&str>,
+) -> Result<StaffTokenPair, AuthError> {
+    let (access_claims, access_jti) =
+        issue_sophia_access_claims_with_method(user_id, role, true, auth_method)?;
     let access = encode_sophia_claims(&access_claims, secret)?;
 
-    let (refresh_claims, refresh_jti) = issue_sophia_refresh_claims(user_id, role)?;
+    let (refresh_claims, refresh_jti) =
+        issue_sophia_refresh_claims_with_method(user_id, role, auth_method)?;
     let refresh = encode_sophia_claims(&refresh_claims, secret)?;
 
     Ok(StaffTokenPair {
@@ -161,7 +213,19 @@ pub fn issue_and_encode_access(
     mfa_verified: bool,
     secret: &str,
 ) -> Result<String, AuthError> {
-    let (claims, _) = issue_sophia_access_claims(user_id, role, mfa_verified)?;
+    issue_and_encode_access_with_method(user_id, role, mfa_verified, secret, None)
+}
+
+/// [`issue_and_encode_access`] に、ログイン方式（refresh の extra から引き継ぐ値）を足した版。
+pub fn issue_and_encode_access_with_method(
+    user_id: i64,
+    role: &str,
+    mfa_verified: bool,
+    secret: &str,
+    auth_method: Option<&str>,
+) -> Result<String, AuthError> {
+    let (claims, _) =
+        issue_sophia_access_claims_with_method(user_id, role, mfa_verified, auth_method)?;
     encode_sophia_claims(&claims, secret)
 }
 
@@ -252,6 +316,75 @@ mod tests {
         assert_eq!(decoded_extra.token_type, TOKEN_TYPE_MFA_PENDING);
     }
 
+    // ── ログイン方式（社内 SSO）── DEMO-000233 / 決定 6
+
+    #[test]
+    fn auth_method_は_通常のログインでは付かない() {
+        let pair = issue_and_encode_token_pair(7, "EMPLOYEE", TEST_SECRET).unwrap();
+        for tok in [&pair.access, &pair.refresh] {
+            let (_, extra) = decode_sophia_claims(tok, TEST_SECRET).unwrap();
+            assert_eq!(extra.auth_method, None);
+            assert!(!extra.is_sso());
+        }
+    }
+
+    #[test]
+    fn sso_のログインでは_access_と_refresh_の両方に方式が付く() {
+        let pair =
+            issue_and_encode_token_pair_with_method(7, "EMPLOYEE", TEST_SECRET, Some(AUTH_METHOD_SSO))
+                .unwrap();
+        let (_, a) = decode_sophia_claims(&pair.access, TEST_SECRET).unwrap();
+        let (_, r) = decode_sophia_claims(&pair.refresh, TEST_SECRET).unwrap();
+        assert!(a.is_sso(), "access に方式が付く");
+        assert!(r.is_sso(), "refresh に方式が付く(欠けるとサイレントリフレッシュで消える)");
+        assert_eq!(a.token_type, TOKEN_TYPE_ACCESS);
+        assert_eq!(r.token_type, TOKEN_TYPE_REFRESH);
+        assert!(a.mfa_verified && r.mfa_verified);
+    }
+
+    #[test]
+    fn リフレッシュで_access_を作り直しても_方式が引き継がれる() {
+        let access = issue_and_encode_access_with_method(
+            7,
+            "ADMIN",
+            true,
+            TEST_SECRET,
+            Some(AUTH_METHOD_SSO),
+        )
+        .unwrap();
+        let (_, extra) = decode_sophia_claims(&access, TEST_SECRET).unwrap();
+        assert!(extra.is_sso());
+        // 方式なしで作り直せば付かない(既存の呼び出しの挙動は変わらない)
+        let plain = issue_and_encode_access(7, "ADMIN", true, TEST_SECRET).unwrap();
+        let (_, extra) = decode_sophia_claims(&plain, TEST_SECRET).unwrap();
+        assert!(!extra.is_sso());
+    }
+
+    #[test]
+    fn 方式の項目が無い古いトークンも読める() {
+        // auth_method が導入される前に発行されたトークン(項目なし)。読めないと、リリース直後に全員がログアウトになる。
+        let old = serde_json::json!({
+            "role": "ADMIN", "mfa_verified": true, "jti": "j", "token_type": "access"
+        });
+        let extra: SophiaExtraClaims = serde_json::from_value(old).unwrap();
+        assert_eq!(extra.auth_method, None);
+        // 通常のトークンは、項目そのものを出力しない(古いコードが読んでも壊れない)
+        let v = serde_json::to_value(&extra).unwrap();
+        assert!(v.get("auth_method").is_none());
+    }
+
+    #[test]
+    fn sso_以外の値は_sso_として扱わない() {
+        let extra = SophiaExtraClaims {
+            role: "ADMIN".into(),
+            mfa_verified: true,
+            jti: "j".into(),
+            token_type: TOKEN_TYPE_ACCESS.into(),
+            auth_method: Some("password".into()),
+        };
+        assert!(!extra.is_sso());
+    }
+
     #[test]
     fn test_expired_token_decoding_fails() {
         let now = chrono::Utc::now();
@@ -268,6 +401,7 @@ mod tests {
                 mfa_verified: true,
                 jti: uuid::Uuid::new_v4().to_string(),
                 token_type: TOKEN_TYPE_ACCESS.to_string(),
+                auth_method: None,
             })
             .unwrap(),
         };

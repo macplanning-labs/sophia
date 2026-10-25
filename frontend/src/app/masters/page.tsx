@@ -9,7 +9,17 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { PageHeader } from "@/components/ui/page-header";
 import { DataTableWrapper } from "@/components/ui/data-table-wrapper";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { FormModal, FormField, FormInput, FormSelect, FormTextarea } from "@/components/ui/form-modal";
+import { FormModal } from "@/components/ui/form-modal";
+import { DynamicField } from "@/components/masters/dynamic-field";
+import {
+  MASTERS_EDITED_ON_PARTIES,
+  accountNumberColumnError,
+  optionLabel,
+  toMasterFormData,
+  toMasterPayload,
+  type MasterFormColumnMeta,
+  type MasterTableMeta,
+} from "@/lib/master-form";
 import { toast } from "sonner";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 import { AccessDenied } from "@/components/access-denied";
@@ -18,36 +28,14 @@ import { cn } from "@/lib/utils";
 
 // ── 型定義 ──
 
-interface ColumnMeta {
-  name: string;
-  label: string;
-}
-
-interface FormColumnMeta {
-  name: string;
-  label: string;
-  input_type: string;
-  required: boolean;
-  is_pk: boolean;
-  options?: { value: string; label: string }[];
-  fk_table?: string;
-  fk_value?: string;
-  fk_label?: string;
-}
-
-interface TableMeta {
-  key: string;
-  label: string;
-  category: string;
-  pk_column: string;
-  list_columns: ColumnMeta[];
-  form_columns: FormColumnMeta[];
-}
+type FormColumnMeta = MasterFormColumnMeta;
+type TableMeta = MasterTableMeta;
 
 // バックエンドのMASTER_TABLES一覧には乗せず、フロント側だけで特別扱いするタブ
 // （s_company_infoは単一行+機密情報を含むため、汎用の一覧CRUDエンジンに乗せず専用フォームで表示）
 const COMPANY_INFO_TAB_KEY = "company_info";
 const COMPANY_INFO_TAB = { key: COMPANY_INFO_TAB_KEY, label: "自社情報", category: "システム設定" };
+
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
@@ -65,12 +53,16 @@ export default function MastersPage() {
   const { isAdmin, isLoading: userLoading } = useCurrentUser();
 
   // メタ情報（キャッシュ: 長め）
-  const { data: tables = [] } = useQuery<TableMeta[]>({
+  const { data: allTables = [] } = useQuery<TableMeta[]>({
     queryKey: ["masters-meta"],
     queryFn: fetchMastersMeta,
     staleTime: 5 * 60 * 1000,
     enabled: isAdmin,
   });
+
+  // クライアント・パートナーは、担当(組織・営業担当)の登録・変更や要員追加があるため、
+  // 汎用の一覧CRUDではなく取引先の画面(設定 > 取引先)で編集する。ここのタブには出さない
+  const tables = useMemo(() => allTables.filter((t) => !(t.key in MASTERS_EDITED_ON_PARTIES)), [allTables]);
 
   // activeTabの初期設定
   const effectiveTab = activeTab || (tables.length > 0 ? tables[0].key : "");
@@ -116,12 +108,7 @@ export default function MastersPage() {
     if (!id) return;
     try {
       const detail = await fetchMasterDetail(effectiveTab, id);
-      const fd: Record<string, string> = {};
-      activeMeta.form_columns.forEach((col) => {
-        const val = detail[col.name];
-        fd[col.name] = val === null || val === undefined ? "" : String(val);
-      });
-      setFormData(fd);
+      setFormData(toMasterFormData(activeMeta.form_columns, detail));
       setEditId(id);
       setModalMode("edit");
     } catch (e) {
@@ -132,11 +119,7 @@ export default function MastersPage() {
   // ── 新規作成 ──
   const handleCreate = useCallback(() => {
     if (!activeMeta) return;
-    const fd: Record<string, string> = {};
-    activeMeta.form_columns.forEach((col) => {
-      fd[col.name] = "";
-    });
-    setFormData(fd);
+    setFormData(toMasterFormData(activeMeta.form_columns));
     setEditId("");
     setModalMode("create");
   }, [activeMeta]);
@@ -144,20 +127,15 @@ export default function MastersPage() {
   // ── 保存 ──
   const handleSave = useCallback(async () => {
     if (!activeMeta) return;
+    // 口座番号の誤りは、送る前に理由を出す(サーバも同じ規則で 400 を返す)
+    const accountError = accountNumberColumnError(activeMeta.form_columns, formData);
+    if (accountError) {
+      toast.error(accountError);
+      return;
+    }
     setSaving(true);
     try {
-      // boolean変換
-      const payload: Record<string, unknown> = {};
-      activeMeta.form_columns.forEach((col) => {
-        const v = formData[col.name] ?? "";
-        if (col.input_type === "checkbox") {
-          payload[col.name] = v === "true" || v === "on";
-        } else if (col.input_type === "number" && v !== "") {
-          payload[col.name] = Number(v);
-        } else {
-          payload[col.name] = v;
-        }
-      });
+      const payload = toMasterPayload(activeMeta.form_columns, formData);
 
       if (modalMode === "create") {
         await createMasterRecord(effectiveTab, payload);
@@ -168,7 +146,9 @@ export default function MastersPage() {
       setModalMode("closed");
     } catch (e) {
       console.error("save:", e);
-      toast.error("保存に失敗しました");
+      // サーバが理由(日本語の案内)を返した 400 は、その文言を出す。HTTP だけの失敗は従来の文言
+      const reason = e instanceof Error && !e.message.startsWith("API Error") ? e.message : "";
+      toast.error(reason || "保存に失敗しました");
     } finally {
       setSaving(false);
     }
@@ -202,15 +182,17 @@ export default function MastersPage() {
     <div className="p-6">
       <PageHeader
         actions={
-          activeMeta ? (
-            <Button
-              size="sm"
-              className="bg-primary hover:bg-primary/90 text-primary-foreground gap-1"
-              onClick={handleCreate}
-            >
-              <Plus className="w-4 h-4" /> 新規作成
-            </Button>
-          ) : undefined
+          // 自社情報など「新規作成」の無いタブでも、ボタンの場所は残す(タブを切り替えてもヘッダーの高さが変わらないように)
+          <Button
+            size="sm"
+            className={cn("bg-primary hover:bg-primary/90 text-primary-foreground gap-1", !activeMeta && "invisible")}
+            onClick={handleCreate}
+            disabled={!activeMeta}
+            aria-hidden={!activeMeta}
+            tabIndex={activeMeta ? undefined : -1}
+          >
+            <Plus className="w-4 h-4" /> 新規作成
+          </Button>
         }
       />
 
@@ -274,7 +256,7 @@ export default function MastersPage() {
                   >
                     {listCols.map((col) => (
                       <TableCell key={col.name} className="text-sm">
-                        {formatCellValue(row[col.name])}
+                        {formatCellValue(row[col.name], activeMeta.form_columns.find((c) => c.name === col.name))}
                       </TableCell>
                     ))}
                     <TableCell>
@@ -313,17 +295,17 @@ export default function MastersPage() {
           loading={saving}
           onSubmit={handleSave}
           onClose={() => setModalMode("closed")}
-          footerStart={
-            modalMode === "edit" ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="border-red-900/50 text-red-400 hover:bg-red-950/50 hover:text-red-300"
-                onClick={() => setDeleteTarget(editId)}
-              >
-                <Trash2 className="w-3.5 h-3.5 mr-1" /> 削除
-              </Button>
-            ) : undefined
+          footerEnd={
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-red-900/50 text-red-400 hover:bg-red-950/50 hover:text-red-300"
+              disabled={modalMode !== "edit"}
+              title={modalMode !== "edit" ? "新規作成中は、削除できません" : undefined}
+              onClick={() => setDeleteTarget(editId)}
+            >
+              <Trash2 className="w-3.5 h-3.5 mr-1" /> 削除
+            </Button>
           }
         >
           {activeMeta.form_columns.map((col) => (
@@ -353,70 +335,10 @@ export default function MastersPage() {
 
 // ── セル表示 ──
 
-function formatCellValue(value: unknown): string {
+function formatCellValue(value: unknown, col?: FormColumnMeta): string {
   if (value === null || value === undefined) return "—";
   if (typeof value === "boolean") return value ? "✓" : "—";
+  // 選択肢の項目は、コードではなく表示名を出す(例: 請求単位 PROJECT → 案件ごと)
+  if (col?.input_type === "select") return optionLabel(col, value);
   return String(value);
-}
-
-// ── 動的フォームフィールド ──
-
-function DynamicField({
-  col,
-  value,
-  onChange,
-}: {
-  col: FormColumnMeta;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  if (col.input_type === "select" || col.input_type === "fk_select") {
-    return (
-      <FormField label={col.label} required={col.required}>
-        <FormSelect
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          options={[
-            { value: "", label: "— 選択 —" },
-            ...(col.options ?? []),
-          ]}
-        />
-      </FormField>
-    );
-  }
-
-  if (col.input_type === "checkbox") {
-    return (
-      <FormField label={col.label} required={col.required}>
-        <label className="flex items-center gap-2 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={value === "true" || value === "on"}
-            onChange={(e) => onChange(e.target.checked ? "true" : "false")}
-            className="w-4 h-4 rounded border-border bg-muted text-primary focus:ring-primary/50"
-          />
-          <span className="text-sm text-foreground">有効</span>
-        </label>
-      </FormField>
-    );
-  }
-
-  if (col.input_type === "textarea") {
-    return (
-      <FormField label={col.label} required={col.required}>
-        <FormTextarea value={value} onChange={(e) => onChange(e.target.value)} rows={3} />
-      </FormField>
-    );
-  }
-
-  return (
-    <FormField label={col.label} required={col.required}>
-      <FormInput
-        type={col.input_type === "number" ? "number" : col.input_type === "email" ? "email" : col.input_type === "date" ? "date" : "text"}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        required={col.required}
-      />
-    </FormField>
-  );
 }

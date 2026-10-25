@@ -73,6 +73,18 @@ pub enum ConfirmError {
     BadRequest(String),
     /// 内部エラー(500)。全体を取り消した
     Internal(String),
+    /// 顧客・案件に担当が無く、請求書の担当を決められない(400)。全体を取り消した
+    NoOwner,
+}
+
+impl From<crate::domain::services::issue_error::IssueError> for ConfirmError {
+    fn from(e: crate::domain::services::issue_error::IssueError) -> Self {
+        use crate::domain::services::issue_error::IssueError;
+        match e {
+            IssueError::NoOwner => ConfirmError::NoOwner,
+            IssueError::Message(m) => ConfirmError::Internal(m),
+        }
+    }
 }
 
 /// "YYYY-MM" または "YYYY-MM-DD" を、その月の1日にする
@@ -212,7 +224,7 @@ pub async fn confirm_invoices(
                 .filter(|v| contract_ids.contains(&v.row.client_contract_id))
                 .cloned()
                 .collect();
-            let mut made = issue_invoices_in_tx(pool, &mut tx, &rows_for_key, month).await.map_err(internal)?;
+            let mut made = issue_invoices_in_tx(pool, &mut tx, &rows_for_key, month).await?;
             if made.len() != 1 {
                 return Err(ConfirmError::Internal(format!(
                     "請求書の作成数が想定と異なります: key={key} 作成数={}", made.len()

@@ -1,7 +1,7 @@
 //! domain/password_policy.rs — パスワード強度バリデータ（方針ドキュメント5章）
 //!
 //! バリデータ本体はauth-core、パラメータ（最小長・文字種要件）は各アプリが注入する。
-//! WIP・Sophiaで異なるポリシーを維持したい場合にも対応できる。
+//! 利用側アプリごとに異なるポリシーを維持したい場合にも対応できる。
 
 use serde::{Deserialize, Serialize};
 
@@ -15,8 +15,8 @@ pub struct PasswordPolicy {
 }
 
 impl PasswordPolicy {
-    /// Sophia現行のパスワードポリシー（12文字以上＋英大文字・小文字・数字必須）
-    pub fn sophia_default() -> Self {
+    /// 強めの既定ポリシー（12文字以上＋英大文字・小文字・数字必須）
+    pub fn strict_default() -> Self {
         Self {
             min_length: 12,
             require_upper: true,
@@ -73,21 +73,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sophia_policy_accepts_valid_password() {
-        let policy = PasswordPolicy::sophia_default();
+    fn strict_policy_accepts_valid_password() {
+        let policy = PasswordPolicy::strict_default();
         assert!(policy.validate("CorrectHorse9Battery").is_ok());
     }
 
     #[test]
-    fn sophia_policy_rejects_short_password() {
-        let policy = PasswordPolicy::sophia_default();
+    fn strict_policy_rejects_short_password() {
+        let policy = PasswordPolicy::strict_default();
         let violations = policy.validate("Ab1").unwrap_err();
         assert!(violations.contains(&PasswordPolicyViolation::TooShort { min_length: 12 }));
     }
 
     #[test]
-    fn sophia_policy_reports_all_violations() {
-        let policy = PasswordPolicy::sophia_default();
+    fn strict_policy_reports_all_violations() {
+        let policy = PasswordPolicy::strict_default();
         let violations = policy.validate("alllowercase").unwrap_err();
         assert!(violations.contains(&PasswordPolicyViolation::MissingUpper));
         assert!(violations.contains(&PasswordPolicyViolation::MissingDigit));

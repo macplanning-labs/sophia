@@ -12,6 +12,7 @@ use crate::domain::models::partner_contract::PurchaseOrderStatus;
 use crate::infrastructure::repositories::order_repo::{self, OrderRow};
 use crate::infrastructure::repositories::task_repo;
 use crate::infrastructure::db_tx;
+use crate::domain::authz::stamp::is_no_owner;
 use crate::presentation::api_response::AppError;
 
 use super::{generate_order_id, StatusForm};
@@ -33,12 +34,14 @@ pub struct OrderFilter {
 /// GET /api/orders — 一覧（JSON）
 pub async fn api_index(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Query(filter): Query<OrderFilter>,
 ) -> axum::Json<Vec<OrderRow>> {
     let partner = filter.partner.unwrap_or_default();
     let status = filter.status.unwrap_or_default();
 
-    let orders = order_repo::list_orders_filtered(&pool, &partner, &status).await
+    let orders = order_repo::list_orders_filtered(&pool, &partner, &status, &auth_user.list_filter(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseView)).await
         .unwrap_or_else(|e| { tracing::warn!("orders api: {:?}", e); vec![] });
 
     axum::Json(orders)
@@ -47,8 +50,21 @@ pub async fn api_index(
 /// GET /api/orders/{id} — 詳細（JSON）
 pub async fn api_detail(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(AUTHZ_MODE が shadow でも拒否する。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseView, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     match order {
@@ -87,9 +103,22 @@ pub async fn api_detail(
 /// POST /api/orders/{id}/status — ステータス変更（JSON）
 pub async fn api_update_status(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
     Json(form): Json<StatusForm>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     use crate::infrastructure::repositories::order_repo::update_purchase_order_status;
 
     let valid = ["DRAFT", "SENT", "ACCEPTED", "REPORT_RECEIVED",
@@ -107,8 +136,21 @@ pub async fn api_update_status(
 /// DELETE /api/orders/{id} — 削除（DRAFTのみ, JSON）
 pub async fn api_delete(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     use crate::infrastructure::repositories::order_repo::{find_purchase_order_status, delete_purchase_order};
 
     let status = find_purchase_order_status(&pool, &id).await.log_err().ok().flatten();
@@ -131,9 +173,22 @@ pub async fn api_delete(
 /// PUT /api/orders/{id} — 発注書更新（JSON、DRAFTのみ）
 pub async fn api_update(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     // DRAFTチェック
     let status = order_repo::find_purchase_order_status(&pool, &id).await.log_err().ok().flatten();
 
@@ -193,8 +248,21 @@ pub async fn api_update(
 /// POST /api/orders/{id}/rollforward — ロールフォワード（JSON）
 pub async fn api_rollforward(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseEdit, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
 
     match order {
@@ -250,6 +318,19 @@ pub struct ApiCreateOrderForm {
 /// legacy.rs::create（未ルーティングのSSRフォーム版）と同じロジック。
 /// 選択された発注契約をパートナー単位でグルーピングし、パートナーごとにDRAFT発注書を1件作成する。
 pub async fn api_create(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Json(form): Json<ApiCreateOrderForm>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_create_inner(State(pool), Json(form)).await)
+}
+
+async fn api_create_inner(
     State(pool): State<PgPool>,
     Json(form): Json<ApiCreateOrderForm>,
 ) -> Result<impl IntoResponse, AppError> {
@@ -353,6 +434,10 @@ pub async fn api_create(
         if let Err(e) = order_repo::insert_purchase_order(
             &mut *sp, &order_id, partner_id, &first.project_id, first.id, work_start, work_end,
         ).await {
+            // 担当が決まらない: 全体を400で断る(外側のトランザクションを破棄=1件も作らない。バックフィル後は起きない)
+            if is_no_owner(e.as_ref()) {
+                return Err(AppError::from(e));
+            }
             tracing::error!("[db_error] api_create: ヘッダーINSERT失敗 ({}): {:?}", &first.partner_name, e);
             if let Err(rb_err) = sp.rollback().await {
                 tracing::error!("[db_error] api_create: SAVEPOINT ROLLBACK も失敗 ({}): {:?}", &first.partner_name, rb_err);
@@ -431,7 +516,19 @@ pub async fn api_create(
 }
 
 /// GET /api/orders/form-data — 作成フォーム用データ（JSON）
-pub async fn api_form_data(State(pool): State<PgPool>) -> impl IntoResponse {
+pub async fn api_form_data(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseView) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_form_data_inner(State(pool)).await)
+}
+
+async fn api_form_data_inner(State(pool): State<PgPool>) -> impl IntoResponse {
     let contracts = order_repo::list_active_contracts_for_order_form(&pool).await
         .unwrap_or_else(|e| { tracing::warn!("api_form_data: {:?}", e); vec![] });
 
@@ -449,8 +546,21 @@ pub struct SendMailBody {
 /// GET /api/orders/{id}/email-preview — 送信メール本文プレビュー
 pub async fn api_email_preview(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(詳細と同じ権限・スタンプ。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseView, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     use crate::domain::services::email_service::{EmailService, compose_order_publish_email};
 
     let order = order_repo::find_purchase_order(&pool, &id).await.log_err().ok().flatten();
@@ -476,9 +586,22 @@ pub async fn api_email_preview(
 /// POST /api/orders/{id}/publish — 発注書送付（メール + ステータスSENT更新）JSON版
 pub async fn api_publish(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
     Json(payload): Json<SendMailBody>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseIssue, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     use crate::domain::services::email_service::EmailService;
 
     // 発注書取得
@@ -529,6 +652,9 @@ pub async fn api_publish(
     // ステータスを SENT に更新
     order_repo::mark_purchase_order_sent(&pool, &id).await?;
 
+    // 送った瞬間の PDF を残す(DEMO-000214。失敗しても送信は成功のまま)
+    super::record_purchase_order_sent(&pool, &order, &partner_name).await;
+
     tracing::info!("発注書送付（API）: {} → {}", id, partner_email);
     Ok(Json(serde_json::json!({
         "success": true,
@@ -540,8 +666,21 @@ pub async fn api_publish(
 /// EDI互換: orders/services/order_service.py republish_order
 pub async fn api_republish(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseIssue, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     use crate::domain::services::email_service::EmailService;
 
     // 発注書取得
@@ -588,6 +727,9 @@ pub async fn api_republish(
     // ステータスをSENTに戻す（承諾済みからの訂正対応）。メール送信済みのためここでの失敗も明示的に伝える
     order_repo::mark_purchase_order_sent(&pool, &id).await?;
 
+    // 訂正版の PDF を残す。内容が前回と同じなら版は増えない(DEMO-000214)
+    super::record_purchase_order_sent(&pool, &order, &partner_name).await;
+
     tracing::info!("発注書訂正再送付（API）: {} → {}", id, partner_email);
     Ok(Json(serde_json::json!({
         "success": true,
@@ -598,8 +740,21 @@ pub async fn api_republish(
 /// GET /api/orders/{id}/request-timesheet-preview — 提出依頼メール本文プレビュー
 pub async fn api_request_timesheet_preview(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(詳細と同じ権限・スタンプ。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseView, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     use chrono::Datelike;
     use crate::domain::services::email_service::{EmailService, compose_work_report_request_email};
 
@@ -666,9 +821,22 @@ async fn extract_request_timesheet_fields(
 /// multipart/form-data（subject, body, file（任意・クロス等から受け取った勤務表PDFの添付用））
 pub async fn api_request_timesheet(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
     mut multipart: axum::extract::Multipart,
 ) -> Result<impl IntoResponse, AppError> {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_purchase_order(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return Ok(crate::presentation::http_util::forbidden());
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderPurchaseIssue, &stamp) {
+        return Ok(crate::presentation::http_util::forbidden());
+    }
     use chrono::Datelike;
     use crate::domain::services::email_service::{EmailService, compose_work_report_request_email};
 

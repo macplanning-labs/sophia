@@ -11,7 +11,9 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::domain::services::excel_parser::{auto_detect_and_parse, TimesheetParseResult};
+use crate::domain::services::upload_guard;
 use crate::domain::value_objects::SettlementTerms;
+use crate::domain::authz::stamp::{is_no_owner, StampMode, NO_OWNER_MESSAGE};
 use crate::domain::models::actionable_error::ActionBlocker;
 use crate::infrastructure::repositories::{order_repo, timesheet_repo};
 
@@ -20,6 +22,8 @@ use crate::infrastructure::repositories::{order_repo, timesheet_repo};
 pub enum TimesheetUploadError {
     NoFile,
     ReadFailed,
+    /// 受け入れ検査(種類・大きさ・ZIPの中身)で拒否した。文言は画面にそのまま出せる
+    Rejected(String),
     Parse(String),
     ContractNotFound { worker_name: String },
     ContractAmbiguous {
@@ -37,9 +41,19 @@ pub enum TimesheetUploadError {
     },
     ReceivedOrderCheckFailed,
     SaveFailed(String),
+    /// 担当が決まらない(顧客・案件に担当が無い)ため登録できない。HTTP 400 で返す(DEMO-000173 PR 7a)
+    NoOwner,
 }
 
 impl TimesheetUploadError {
+    /// 返すHTTPステータス。従来の失敗は本文で伝える(200)ままにし、担当が決まらないときだけ 400 にする。
+    pub fn status_code(&self) -> axum::http::StatusCode {
+        match self {
+            Self::NoOwner => axum::http::StatusCode::BAD_REQUEST,
+            _ => axum::http::StatusCode::OK,
+        }
+    }
+
     pub fn to_json(&self) -> Value {
         let (error_msg, blockers) = match self {
             Self::NoFile => (
@@ -50,6 +64,7 @@ impl TimesheetUploadError {
                 "ファイル読取に失敗しました".to_string(),
                 vec![],
             ),
+            Self::Rejected(msg) => (msg.clone(), vec![]),
             Self::Parse(err) => (
                 err.clone(),
                 vec![],
@@ -146,6 +161,7 @@ impl TimesheetUploadError {
                 }],
             ),
             Self::SaveFailed(msg) => (msg.clone(), vec![]),
+            Self::NoOwner => (NO_OWNER_MESSAGE.to_string(), vec![]),
         };
 
         json!({
@@ -164,23 +180,59 @@ pub async fn extract_upload_file(
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut original_filename = String::new();
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            // 本文が上限を超えると、項目の読み出し自体が失敗する。「ファイル未選択」と取り違えない
+            Err(e) => return Err(read_error(e)),
+        };
         if field.name() == Some("file") {
             // 欠落時に .xlsx を仮置きしない（PDFがExcel経路に落ちて EOCD エラーになるため）
             original_filename = field.file_name().unwrap_or("").to_string();
             match field.bytes().await {
                 Ok(b) => file_bytes = Some(b.to_vec()),
                 Err(e) => {
-                    tracing::error!("Multipartバイト読取エラー: {:?}", e);
-                    return Err(TimesheetUploadError::ReadFailed);
+                    return Err(read_error(e));
                 }
             }
         }
     }
 
     match file_bytes {
-        Some(bytes) => Ok((bytes, original_filename)),
+        Some(bytes) => {
+            check_upload_file(&bytes, &original_filename)?;
+            Ok((bytes, original_filename))
+        }
         None => Err(TimesheetUploadError::NoFile),
+    }
+}
+
+/// multipart の読取失敗を、利用者向けのエラーにする。上限超過(413)は「大きすぎます」と伝える。
+fn read_error(e: axum::extract::multipart::MultipartError) -> TimesheetUploadError {
+    if e.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        tracing::warn!("[稼働報告アップロード] 処理=受信 結果=拒否(TooLarge) 影響=解析せず返却 | 本文が上限を超えた");
+        return TimesheetUploadError::Rejected(upload_guard::UploadRejection::TooLarge.message().to_string());
+    }
+    tracing::error!("[稼働報告アップロード] 処理=受信 結果=失敗 影響=ファイルを読めない | {:?}", e);
+    TimesheetUploadError::ReadFailed
+}
+
+/// 解析に渡す前の受け入れ検査（種類・大きさ・ZIPの中身）。拒否した理由はログに残す。
+fn check_upload_file(bytes: &[u8], filename: &str) -> Result<(), TimesheetUploadError> {
+    match upload_guard::check_upload(bytes, filename) {
+        Ok(kind) => {
+            // 実運用の大きさの分布を知るための記録（上限を決める材料）。ファイル名・中身は出さない
+            tracing::info!("[稼働報告アップロード] 処理=受け入れ検査 結果=許可 種類={:?} size_bytes={}", kind, bytes.len());
+            Ok(())
+        }
+        Err(r) => {
+            tracing::warn!(
+                "[稼働報告アップロード] 処理=受け入れ検査 結果=拒否({:?}) 影響=解析せず返却 | size={} name_len={}",
+                r, bytes.len(), filename.len()
+            );
+            Err(TimesheetUploadError::Rejected(r.message().to_string()))
+        }
     }
 }
 
@@ -192,7 +244,13 @@ pub async fn extract_confirm_fields(
     let mut original_filename = String::new();
     let mut contract_id: Option<i64> = None;
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            // 本文が上限を超えると、項目の読み出し自体が失敗する。「ファイル未選択」と取り違えない
+            Err(e) => return Err(read_error(e)),
+        };
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "contract_id" => {
@@ -205,8 +263,7 @@ pub async fn extract_confirm_fields(
                 match field.bytes().await {
                     Ok(b) => file_bytes = Some(b.to_vec()),
                     Err(e) => {
-                        tracing::error!("Multipartバイト読取エラー: {:?}", e);
-                        return Err(TimesheetUploadError::ReadFailed);
+                        return Err(read_error(e));
                     }
                 }
             }
@@ -215,7 +272,10 @@ pub async fn extract_confirm_fields(
     }
 
     match file_bytes {
-        Some(bytes) => Ok((bytes, original_filename, contract_id)),
+        Some(bytes) => {
+            check_upload_file(&bytes, &original_filename)?;
+            Ok((bytes, original_filename, contract_id))
+        }
         None => Err(TimesheetUploadError::NoFile),
     }
 }
@@ -393,6 +453,7 @@ pub async fn upsert_parsed_timesheet(
     result: &TimesheetParseResult,
     original_filename: &str,
     status: &str,
+    mode: StampMode,
 ) -> Result<(), TimesheetUploadError> {
     let mut result = result.clone();
     apply_settlement_hours_for_contract(pool, contract_id, &mut result).await?;
@@ -413,9 +474,16 @@ pub async fn upsert_parsed_timesheet(
         &daily_json,
         &alerts_json,
         status,
+        mode,
     )
     .await
-    .map_err(|e| TimesheetUploadError::SaveFailed(format!("保存エラー: {}", e)))?;
+    .map_err(|e| {
+        if is_no_owner(e.as_ref()) {
+            TimesheetUploadError::NoOwner
+        } else {
+            TimesheetUploadError::SaveFailed(format!("保存エラー: {}", e))
+        }
+    })?;
 
     advance_orders_on_timesheet_receipt(pool, contract_id, target_month).await;
     Ok(())

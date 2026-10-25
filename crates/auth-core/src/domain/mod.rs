@@ -1,4 +1,5 @@
 pub mod attempt_lock;
+pub mod attempt_window;
 pub mod audit;
 pub mod jwt;
 pub mod mfa_policy;

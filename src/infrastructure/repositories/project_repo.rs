@@ -5,6 +5,9 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::{PgPool, Postgres, Transaction};
 
+use super::stamp_repo;
+use crate::domain::authz::stamp::StampMode;
+
 /// 案件の (project_id, name) 一覧（フィルタ用プルダウン等）。有効な案件のみ。
 pub async fn list_id_name_options(pool: &PgPool) -> Result<Vec<(String, String)>> {
     let rows: Vec<(String, String)> = sqlx::query_as(
@@ -16,9 +19,11 @@ pub async fn list_id_name_options(pool: &PgPool) -> Result<Vec<(String, String)>
 }
 
 /// クライアントの (id, name) 一覧（案件作成ウィザードのクライアント選択用）。
-pub async fn list_client_id_name_options(pool: &PgPool) -> Result<Vec<(i64, String)>> {
-    let rows: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT id, name FROM m_client ORDER BY name"
+/// 案件作成ウィザードの顧客の選択肢 (id, 名前, 担当が決まっているか)。
+/// 担当(組織・担当者)の無い顧客の下には案件を作れない(DEMO-000173 7a)ため、選んだ時点で知らせるのに使う。
+pub async fn list_client_id_name_options(pool: &PgPool) -> Result<Vec<(i64, String, bool)>> {
+    let rows: Vec<(i64, String, bool)> = sqlx::query_as(
+        "SELECT id, name, (owner_org_unit_id IS NOT NULL AND owner_employee_id IS NOT NULL) AS has_owner FROM m_client ORDER BY name"
     )
     .fetch_all(pool)
     .await?;
@@ -41,18 +46,18 @@ pub struct ProjectListRow {
     pub is_test: bool,
 }
 
-pub async fn list_projects(pool: &PgPool) -> Result<Vec<ProjectListRow>> {
-    let rows = sqlx::query_as::<_, ProjectListRow>(
+pub async fn list_projects(pool: &PgPool, filter: &crate::domain::authz::list_filter::ListFilter) -> Result<Vec<ProjectListRow>> {
+    let mut qb = sqlx::QueryBuilder::new(
         r#"
         SELECT p.project_id, p.name, p.client_id, c.name AS client_name, p.is_active, p.created_at,
                p.commercial_flow, p.is_test
         FROM m_project p
         JOIN m_client c ON p.client_id = c.id
-        ORDER BY p.created_at DESC
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+        WHERE "#,
+    );
+    crate::infrastructure::authz_sql::push_where(&mut qb, filter, "p.owner_org_unit_id", "p.owner_employee_id");
+    qb.push(" ORDER BY p.created_at DESC");
+    let rows = qb.build_query_as::<ProjectListRow>().fetch_all(pool).await?;
     Ok(rows)
 }
 
@@ -383,6 +388,8 @@ pub(crate) async fn insert_client_contract(
     engineer_id: i64,
     cc: &WizardClientContractInput,
 ) -> std::result::Result<i64, sqlx::Error> {
+    // 担当スタンプ: 案件 → 顧客の順に写す(設計書 §6.6)
+    let stamp = stamp_repo::for_project_child(&mut **tx, project_id, "m_client_contract", StampMode::Manual).await?;
     sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO m_client_contract (
@@ -391,8 +398,9 @@ pub(crate) async fn insert_client_contract(
             lower_limit_hours, upper_limit_hours, fixed_hours,
             deduction_rate, overtime_rate,
             mid_month_rule, billing_timing, payment_terms,
-            report_deadline_days_before, currency, remarks, is_active
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, true)
+            report_deadline_days_before, currency, remarks, is_active,
+            owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, true, $19, $20)
         RETURNING id
         "#
     )
@@ -414,6 +422,8 @@ pub(crate) async fn insert_client_contract(
     .bind(cc.report_deadline_days_before.unwrap_or(5))
     .bind(cc.currency.as_deref().unwrap_or("JPY"))
     .bind(cc.remarks.as_deref().unwrap_or(""))
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(&mut **tx)
     .await
 }
@@ -426,6 +436,8 @@ pub(crate) async fn insert_partner_contract(
     work_location_name: &str,
     pc: &WizardPartnerContractInput,
 ) -> std::result::Result<i64, sqlx::Error> {
+    // 担当スタンプ: 案件 → 顧客の順に写す(設計書 §6.6)
+    let stamp = stamp_repo::for_project_child(&mut **tx, project_id, "m_partner_contract", StampMode::Manual).await?;
     sqlx::query_scalar::<_, i64>(
         r#"
         INSERT INTO m_partner_contract (
@@ -438,10 +450,10 @@ pub(crate) async fn insert_partner_contract(
             order_create_deadline_day, order_approve_deadline_days_before,
             report_upload_deadline_days_before, invoice_create_deadline_day,
             invoice_approve_deadline_day,
-            is_active
+            is_active, owner_org_unit_id, owner_employee_id
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                   $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                  $25, $26, $27, $28, $29, true)
+                  $25, $26, $27, $28, $29, true, $30, $31)
         RETURNING id
         "#
     )
@@ -474,6 +486,8 @@ pub(crate) async fn insert_partner_contract(
     .bind(pc.report_upload_deadline_days_before.unwrap_or(2))
     .bind(pc.invoice_create_deadline_day.unwrap_or(1))
     .bind(pc.invoice_approve_deadline_day.unwrap_or(10))
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(&mut **tx)
     .await
 }
@@ -485,14 +499,18 @@ pub async fn create_project_wizard(pool: &PgPool, input: WizardInput) -> Result<
     let mut tx = pool.begin().await?;
 
     let project_id = generate_next_project_id(&mut tx).await?;
+    // 担当スタンプ: 顧客から写す(設計書 §6.6)
+    let stamp = stamp_repo::for_project(&mut tx, Some(input.project.client_id), StampMode::Manual)
+        .await
+        .context("案件の担当の決定に失敗しました")?;
 
     sqlx::query(
         r#"
         INSERT INTO m_project (
             project_id, client_id, name, description, is_active,
             report_deadline_type, report_deadline_value, report_deadline_holiday_rule, report_request_day,
-            commercial_flow, is_test
-        ) VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, COALESCE($10, false))
+            commercial_flow, is_test, owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, COALESCE($10, false), $11, $12)
         "#
     )
     .bind(&project_id)
@@ -505,6 +523,8 @@ pub async fn create_project_wizard(pool: &PgPool, input: WizardInput) -> Result<
     .bind(input.project.report_request_day)
     .bind(&input.project.commercial_flow)
     .bind(input.project.is_test)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .execute(&mut *tx)
     .await
     .context("案件の作成に失敗しました")?;

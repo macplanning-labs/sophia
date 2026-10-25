@@ -12,6 +12,7 @@ use serde::Deserialize;
 use sqlx::PgPool;
 
 use crate::domain::services::assignment::{evaluate, project_target_status, validate_period, validate_terms, TermsInput};
+use crate::domain::authz::stamp::{is_no_owner, NO_OWNER_MESSAGE};
 use crate::infrastructure::repositories::assignment_repo::{self, AssignmentError};
 use crate::infrastructure::repositories::project_repo::{
     EngineerRef, WizardClientContractInput, WizardPartnerContractInput, WorkLocationRef,
@@ -231,6 +232,11 @@ pub async fn api_create(State(pool): State<PgPool>, Json(req): Json<AssignmentRe
             .into_response(),
         Err(AssignmentError::NotFound(m)) => error_response(StatusCode::NOT_FOUND, m),
         Err(AssignmentError::Duplicate(m)) => error_response(StatusCode::CONFLICT, m),
+        // 担当が決まらない(案件・顧客に担当が無い): 400
+        Err(AssignmentError::Other(e)) if is_no_owner(e.as_ref()) => {
+            tracing::warn!("アサインを拒否しました(担当が決まらない)");
+            error_response(StatusCode::BAD_REQUEST, NO_OWNER_MESSAGE)
+        }
         Err(AssignmentError::Other(e)) => {
             tracing::error!("assignment create failed: {e:?}");
             error_response(StatusCode::INTERNAL_SERVER_ERROR, "アサインを作成できませんでした。入力を確認して、もう一度お試しください")

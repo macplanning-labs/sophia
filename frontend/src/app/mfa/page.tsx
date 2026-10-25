@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
+import { markJustLoggedOut } from "@/lib/sso-login";
 
 export default function MfaPage() {
   const router = useRouter();
@@ -143,6 +144,7 @@ export default function MfaPage() {
             <button
               type="button"
               onClick={() => {
+                markJustLoggedOut(); // ログイン画面で、社内アカウントを自動で試さない
                 fetch("/api/v1/auth/logout", { method: "POST", credentials: "include" });
                 router.push("/login");
               }}

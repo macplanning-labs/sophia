@@ -9,6 +9,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+use crate::domain::value_objects::account_number::AccountNumber;
+
 /// 給与ステータス
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PayrollStatus {
@@ -105,7 +107,10 @@ impl Employee {
 }
 
 /// 社員振込先
-#[derive(Debug, Clone, FromRow, Serialize)]
+///
+/// 口座番号は平文の `AccountNumber`。DB 列は暗号化されるため、`FromRow` を付けない
+/// (DB から直接この型に詰めると暗号文のまま入る。読むときは bank_account_repo の復号を通す。DEMO-000233 S2-G2-2 項目5)。
+#[derive(Debug, Clone, Serialize)]
 pub struct EmployeeBankAccount {
     pub id: i64,
     pub employee_id: i64,
@@ -114,7 +119,7 @@ pub struct EmployeeBankAccount {
     pub branch_name: String,
     pub branch_code: String,
     pub account_type: String,
-    pub account_number: String,
+    pub account_number: AccountNumber,
     pub account_holder_kana: String,
 }
 

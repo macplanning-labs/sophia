@@ -4,6 +4,8 @@
 /// list_invoice_items, list_payments はFK子レコード取得マクロで生成。
 
 use crate::domain::models::billing::*;
+use crate::domain::value_objects::account_number::AccountNumber;
+use crate::infrastructure::repositories::bank_account_repo;
 
 // ── 共通CRUD（マクロ生成）──
 
@@ -74,6 +76,135 @@ pub async fn reject_invoice(pool: &::sqlx::PgPool, id: i64) -> ::anyhow::Result<
     Ok(result.rows_affected() > 0)
 }
 
+// ── 訂正版・取り消し(DEMO-000224) ──
+
+type InvoiceStateRow = (
+    String,
+    i32,
+    Option<::chrono::DateTime<::chrono::Utc>>,
+    Option<::chrono::DateTime<::chrono::Utc>>,
+    Option<::chrono::DateTime<::chrono::Utc>>,
+);
+
+async fn lock_invoice_state(
+    tx: &mut ::sqlx::Transaction<'_, ::sqlx::Postgres>,
+    id: i64,
+) -> ::anyhow::Result<Option<(InvoiceStateRow, bool)>> {
+    let row: Option<InvoiceStateRow> = ::sqlx::query_as(
+        "SELECT invoice_no, revision, sent_at, client_accepted_at, cancelled_at FROM t_billing_invoice WHERE id = $1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let superseded: bool = ::sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM t_billing_invoice WHERE supersedes_invoice_id = $1)")
+        .bind(id)
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok(Some((row, superseded)))
+}
+
+/// 送った請求書の訂正版(新しい版・下書き)を作る。前の版は消さず、差し替え済みとして残る。
+/// 内容と明細は、前の版をそのまま写す。新しい版は、承認待ち・未送信・未承諾で、新しいリンクを持つ。戻り値は、新しい版の id
+pub async fn revise_invoice(
+    pool: &::sqlx::PgPool,
+    id: i64,
+    reason: &str,
+) -> ::anyhow::Result<crate::domain::services::document_revision::RevisionOutcome<i64>> {
+    use crate::domain::services::document_revision::{next_revision_number, RevisionOutcome, RevisionState};
+    let mut tx = pool.begin().await?;
+    let Some(((invoice_no, revision, sent, accepted, cancelled), superseded)) = lock_invoice_state(&mut tx, id).await? else {
+        return Ok(RevisionOutcome::NotFound);
+    };
+    let state = RevisionState::of_invoice(sent, accepted, cancelled, superseded);
+    if !state.locked {
+        return Ok(RevisionOutcome::NotSent);
+    }
+    if state.cancelled {
+        return Ok(RevisionOutcome::Cancelled);
+    }
+    if state.superseded {
+        return Ok(RevisionOutcome::Superseded);
+    }
+    let new_no = next_revision_number(&invoice_no, revision);
+    let new_id: i64 = ::sqlx::query_scalar(
+        r#"INSERT INTO t_billing_invoice
+             (invoice_no, uuid, client_id, received_order_id, target_month, work_start, work_end, issue_date, due_date,
+              subtotal, tax_amount, total, department, subject, registration_no, edi_invoice_no, source, status,
+              project_id, billing_unit, owner_org_unit_id, owner_employee_id, revision, supersedes_invoice_id, revision_reason)
+           SELECT $2, gen_random_uuid(), client_id, received_order_id, target_month, work_start, work_end, CURRENT_DATE, due_date,
+                  subtotal, tax_amount, total, department, subject, registration_no, edi_invoice_no, source, 'PENDING_APPROVAL',
+                  project_id, billing_unit, owner_org_unit_id, owner_employee_id, revision + 1, id, $3
+             FROM t_billing_invoice WHERE id = $1
+           RETURNING id"#,
+    )
+    .bind(id)
+    .bind(&new_no)
+    .bind(reason)
+    .fetch_one(&mut *tx)
+    .await?;
+    ::sqlx::query(
+        r#"INSERT INTO t_billing_invoice_item
+             (invoice_id, engineer_id, description, quantity, unit_price, amount, settlement_type,
+              lower_limit, upper_limit, deduction_rate, overtime_rate, tax_rate)
+           SELECT $2, engineer_id, description, quantity, unit_price, amount, settlement_type,
+                  lower_limit, upper_limit, deduction_rate, overtime_rate, tax_rate
+             FROM t_billing_invoice_item WHERE invoice_id = $1 ORDER BY id"#,
+    )
+    .bind(id)
+    .bind(new_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(RevisionOutcome::Done(new_id))
+}
+
+/// 送った請求書を取り消す。書類は消さず、取り消し済みとして残る。理由を残す
+pub async fn cancel_invoice(
+    pool: &::sqlx::PgPool,
+    id: i64,
+    reason: &str,
+    user_id: i64,
+) -> ::anyhow::Result<crate::domain::services::document_revision::RevisionOutcome<()>> {
+    use crate::domain::services::document_revision::{RevisionOutcome, RevisionState};
+    let mut tx = pool.begin().await?;
+    let Some(((_no, _rev, sent, accepted, cancelled), superseded)) = lock_invoice_state(&mut tx, id).await? else {
+        return Ok(RevisionOutcome::NotFound);
+    };
+    let state = RevisionState::of_invoice(sent, accepted, cancelled, superseded);
+    if !state.locked {
+        return Ok(RevisionOutcome::NotSent);
+    }
+    if state.cancelled {
+        return Ok(RevisionOutcome::Cancelled);
+    }
+    if state.superseded {
+        return Ok(RevisionOutcome::Superseded);
+    }
+    ::sqlx::query("UPDATE t_billing_invoice SET cancelled_at = NOW(), cancelled_by_id = $2, cancel_reason = $3, updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .bind(user_id)
+        .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(RevisionOutcome::Done(()))
+}
+
+/// この請求書を差し替えた新しい版(あれば)。(id, リンク, メールで送ったか, 訂正した理由)
+pub async fn find_superseding_invoice(
+    pool: &::sqlx::PgPool,
+    id: i64,
+) -> ::anyhow::Result<Option<(i64, ::uuid::Uuid, bool, Option<String>)>> {
+    let row: Option<(i64, ::uuid::Uuid, bool, Option<String>)> = ::sqlx::query_as(
+        "SELECT id, uuid, (sent_at IS NOT NULL), revision_reason FROM t_billing_invoice WHERE supersedes_invoice_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 // ── 請求書PDF一括生成（2026-07-13追加。P2-3続き:
 //    presentation/handlers/home.rs 直書きSQLのRepository層移行）──
 
@@ -113,18 +244,29 @@ pub struct CompanyInvoiceInfo {
     pub bank_name: String,
     pub bank_branch: String,
     pub account_type: String,
-    pub account_number: String,
+    /// 振込先の口座番号(復号済み)。`find_company_invoice_info` だけが入れる。`_basic` では空のまま
+    #[sqlx(skip)]
+    pub account_number: AccountNumber,
     pub account_name: String,
 }
 
-/// 自社情報・銀行口座情報を取得する（請求書PDF用）
+/// 自社情報・銀行口座情報を取得する（請求書PDF用。口座番号を復号して入れる）
 pub async fn find_company_invoice_info(pool: &::sqlx::PgPool) -> ::anyhow::Result<Option<CompanyInvoiceInfo>> {
+    let Some(mut info) = find_company_invoice_info_basic(pool).await? else {
+        return Ok(None);
+    };
+    info.account_number = bank_account_repo::read_company_account(pool).await?.unwrap_or_default();
+    Ok(Some(info))
+}
+
+/// 自社の住所・電話などを口座番号を読まずに取得する（住所だけを使う箇所用。account_number は空のまま）
+pub async fn find_company_invoice_info_basic(pool: &::sqlx::PgPool) -> ::anyhow::Result<Option<CompanyInvoiceInfo>> {
     let row = ::sqlx::query_as::<_, CompanyInvoiceInfo>(
         "SELECT name, address, tel, COALESCE(postal_code, '') AS postal_code, COALESCE(fax, '') AS fax, \
          COALESCE(representative_title, '') AS representative_title, COALESCE(representative_name, '') AS representative_name, \
          COALESCE(registration_no, '') AS registration_number, \
          COALESCE(bank_name, '') AS bank_name, COALESCE(bank_branch, '') AS bank_branch, \
-         COALESCE(account_type, '') AS account_type, COALESCE(account_number, '') AS account_number, \
+         COALESCE(account_type, '') AS account_type, \
          COALESCE(account_name, '') AS account_name \
          FROM s_company_info ORDER BY id LIMIT 1"
     )
@@ -302,11 +444,17 @@ pub struct InvoiceRow {
     pub status: String,
     pub received_order_id: Option<i64>,
     pub client_accepted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 版(訂正版を作るたびに増える。DEMO-000224)
+    pub revision: i32,
+    /// 取り消し済み
+    pub cancelled: bool,
+    /// 新しい版に差し替え済み
+    pub superseded: bool,
 }
 
 /// 請求書一覧（顧客名・案件名JOIN済み、最大100件）
-pub async fn list_invoice_rows(pool: &::sqlx::PgPool) -> ::anyhow::Result<Vec<InvoiceRow>> {
-    let rows = ::sqlx::query_as::<_, InvoiceRow>(
+pub async fn list_invoice_rows(pool: &::sqlx::PgPool, filter: &crate::domain::authz::list_filter::ListFilter) -> ::anyhow::Result<Vec<InvoiceRow>> {
+    let mut qb = ::sqlx::QueryBuilder::new(
         r#"
         SELECT bi.id, bi.invoice_no AS invoice_id, c.name AS client_name, bi.subject,
                ro.project_name AS project_name,
@@ -315,15 +463,18 @@ pub async fn list_invoice_rows(pool: &::sqlx::PgPool) -> ::anyhow::Result<Vec<In
                (SELECT COUNT(*) FROM t_billing_invoice_item bii WHERE bii.invoice_id = bi.id)::BIGINT AS item_count,
                bi.status,
                bi.received_order_id,
-               bi.client_accepted_at
+               bi.client_accepted_at,
+               bi.revision,
+               (bi.cancelled_at IS NOT NULL) AS cancelled,
+               EXISTS(SELECT 1 FROM t_billing_invoice nx WHERE nx.supersedes_invoice_id = bi.id) AS superseded
         FROM t_billing_invoice bi
         JOIN m_client c ON c.id = bi.client_id
         LEFT JOIN t_received_order ro ON ro.id = bi.received_order_id
-        ORDER BY bi.issue_date DESC LIMIT 100
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+        WHERE "#,
+    );
+    crate::infrastructure::authz_sql::push_where(&mut qb, filter, "bi.owner_org_unit_id", "bi.owner_employee_id");
+    qb.push(" ORDER BY bi.issue_date DESC LIMIT 100");
+    let rows = qb.build_query_as::<InvoiceRow>().fetch_all(pool).await?;
     Ok(rows)
 }
 

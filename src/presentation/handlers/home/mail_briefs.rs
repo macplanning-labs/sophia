@@ -23,8 +23,13 @@ pub struct MailBriefsResponse {
 /// スタッフ認証必須。Ollama 呼び出しは非同期で（GET はブロックしない）。
 pub async fn get_mail_briefs(
     State(pool): State<PgPool>,
-    Extension(_user): Extension<AuthUser>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<crate::domain::authz::Authz>>,
 ) -> impl IntoResponse {
+    // 受信メールの要約は担当スタンプを持たない。権限を持つ人だけが見られる。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::MailReceivedView) {
+        return crate::presentation::http_util::forbidden();
+    }
     match mail_brief_repo::fetch_all_mail_thread_briefs(&pool).await {
         Ok(briefs) => (StatusCode::OK, Json(MailBriefsResponse { briefs })).into_response(),
         Err(e) => {

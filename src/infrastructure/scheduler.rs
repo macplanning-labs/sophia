@@ -63,6 +63,44 @@ pub async fn start_scheduler(pool: PgPool) {
         }
     }
 
+    // ── 発行した書類の PDF を Drive へ保存する（保存待ちのやり直し。15分ごと。メール取込と時刻をずらす） ──
+    // DEMO-000214。送った瞬間に1回試し、失敗した分をここでやり直す。3回続けて失敗したら異常の通知。
+    let pool_issued = pool.clone();
+    match Job::new_async("0 7,22,37,52 * * * *", move |_uuid, _lock| {
+        let pool = pool_issued.clone();
+        Box::pin(async move {
+            crate::domain::services::issued_document::archive_pending(&pool).await;
+        })
+    }) {
+        Ok(job) => {
+            if let Err(e) = scheduler.add(job).await {
+                tracing::error!("[スケジューラ] 発行した書類の保存ジョブ登録エラー: {e}");
+            } else {
+                tracing::info!("[スケジューラ] 発行した書類の保存ジョブ登録完了（15分ごと）");
+            }
+        }
+        Err(e) => tracing::error!("[スケジューラ] 発行した書類の保存ジョブ作成エラー: {e}"),
+    }
+
+    // ── 外部連携の毎朝の点検（毎日 23:45 UTC = JST 8:45） ──
+    // DEMO-000216。全部の連携を点検し、直近の実際の送信の失敗も見る。前回から変わったときだけ、Chat とメールで知らせる。
+    let pool_daily = pool.clone();
+    match Job::new_async("0 45 23 * * *", move |_uuid, _lock| {
+        let pool = pool_daily.clone();
+        Box::pin(async move {
+            crate::infrastructure::integrations::check::run_daily(pool).await;
+        })
+    }) {
+        Ok(job) => {
+            if let Err(e) = scheduler.add(job).await {
+                tracing::error!("[スケジューラ] 外部連携の毎朝の点検ジョブ登録エラー: {e}");
+            } else {
+                tracing::info!("[スケジューラ] 外部連携の毎朝の点検ジョブ登録完了（毎日JST 8:45）");
+            }
+        }
+        Err(e) => tracing::error!("[スケジューラ] 外部連携の毎朝の点検ジョブ作成エラー: {e}"),
+    }
+
     // ── ジョブ2: リマインド一括送信（毎日 0:00 UTC = JST 9:00） ──
     // EDI互換: _approval_reminder_job, _report_reminder_job, _deadline_reminder_job, _overdue_check_job
     let pool_clone3 = pool.clone();

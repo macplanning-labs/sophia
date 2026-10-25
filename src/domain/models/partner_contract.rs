@@ -212,7 +212,7 @@ impl SettlementFields for PurchaseOrderItem {
 
 /// 上司承認ステータス（支払通知書）
 ///
-/// 遷移ルール1箇所定義（開発標準§2.2 #6）
+/// 遷移ルール1箇所定義（本リポ・社内標準リポ共通の開発標準書 §2.2 #6）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ApprovalStatus {
     /// 承認不要（基準金額未満）
@@ -305,6 +305,19 @@ pub struct PaymentNotice {
     pub drive_file_id: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    // 訂正版・取り消し(マイグレーション 081。DEMO-000224)
+    #[sqlx(default)]
+    pub revision: i32,
+    #[sqlx(default)]
+    pub supersedes_notice_id: Option<String>,
+    #[sqlx(default)]
+    pub revision_reason: Option<String>,
+    #[sqlx(default)]
+    pub cancelled_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub cancelled_by_id: Option<i64>,
+    #[sqlx(default)]
+    pub cancel_reason: Option<String>,
 }
 
 /// 支払通知書明細

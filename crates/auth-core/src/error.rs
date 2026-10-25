@@ -1,8 +1,8 @@
 //! error.rs — auth-core 共通エラー型
 //!
-//! 利用側アプリ（WIP/Sophia）はこの型を自アプリのエラー型に変換して
-//! HTTPレスポンスにマッピングする想定（例: WIPは `{"detail": ...}"`、
-//! Sophiaは独自のエラーJSON、のようにアプリ側で表現を統一する）。
+//! 利用側アプリはこの型を自アプリのエラー型に変換して
+//! HTTPレスポンスにマッピングする想定（例: `{"detail": ...}` のような形に
+//! アプリ側で表現を統一する）。
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect } from "react";
 import { fetchUserDetail, apiPut, apiPost, apiDelete, fetchEmployeeOptions } from "@/lib/api";
+import { HandOverDialog } from "@/components/org-admin/hand-over-dialog";
+import { toggleUserWithTransfer, type OwnedCount, type TransferTo } from "@/lib/owner-transfer";
 import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,7 +29,9 @@ export default function UserDetailPage({ id: idProp, embedded = false, onDeleted
   const id = idProp || dynamicId;
   const router = useRouter();
   const qc = useQueryClient();
-  const { isAdmin, isLoading: userLoading } = useCurrentUser();
+  const { user: me, isAdmin, isLoading: userLoading } = useCurrentUser();
+  // 自分自身は無効にできない(ログアウトして操作できなくなるため。DEMO-000186)
+  const isSelf = me?.user_id === Number(id);
 
   const { data, isLoading } = useQuery({
     queryKey: ["users", id],
@@ -85,9 +89,16 @@ export default function UserDetailPage({ id: idProp, embedded = false, onDeleted
   });
 
   // ── 有効/無効トグル ──
+  // 担当データのある社員に結びつくユーザーを無効にすると 409。引き継ぎ先を選ぶ画面を開く。
+  const [handOver, setHandOver] = useState<OwnedCount[] | null>(null);
   const toggleMutation = useMutation({
-    mutationFn: () => apiPost(`/api/v1/users/${id}/toggle`, {}),
-    onSuccess: () => {
+    mutationFn: (transferTo?: TransferTo) => toggleUserWithTransfer(Number(id), transferTo),
+    onSuccess: (res) => {
+      if (res.conflict) {
+        setHandOver(res.owned);
+        return;
+      }
+      setHandOver(null);
       qc.invalidateQueries({ queryKey: ["users", id] });
       qc.invalidateQueries({ queryKey: ["users"] });
       toast.success("ステータスを変更しました");
@@ -123,7 +134,8 @@ export default function UserDetailPage({ id: idProp, embedded = false, onDeleted
       isLoading={isLoading}
       embedded={embedded}
       actions={
-        <div className="flex items-center gap-2">
+        // 左 = 編集・PW変更・有効/無効の切り替え、右端 = 例外(削除)。ボタンは消さず、使えないときは非活性にする
+        <div className="flex flex-1 items-center gap-2">
           <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
             <Pencil className="w-3.5 h-3.5 mr-1" /> 編集
           </Button>
@@ -133,7 +145,9 @@ export default function UserDetailPage({ id: idProp, embedded = false, onDeleted
           <Button
             size="sm"
             variant="outline"
-            onClick={() => toggleMutation.mutate()}
+            disabled={isSelf}
+            title={isSelf ? "自分自身は無効にできません(ログアウトして操作できなくなるため)" : undefined}
+            onClick={() => toggleMutation.mutate(undefined)}
             className={data?.is_active ? "text-amber-400 border-amber-500/30 hover:bg-amber-500/10" : "text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10"}
           >
             {data?.is_active ? <><ToggleLeft className="w-3.5 h-3.5 mr-1" /> 無効化</> : <><ToggleRight className="w-3.5 h-3.5 mr-1" /> 有効化</>}
@@ -275,6 +289,19 @@ export default function UserDetailPage({ id: idProp, embedded = false, onDeleted
         onConfirm={() => deleteMutation.mutate()}
         onCancel={() => setDeleteOpen(false)}
       />
+
+      {/* 担当データの引き継ぎ（無効化で 409 のとき） */}
+      {handOver && (
+        <HandOverDialog
+          subjectLabel={`ユーザー ${data?.username ?? ""}`}
+          owned={handOver}
+          employeeId={data?.employee_id ?? null}
+          submitLabel="引き継いで無効にする"
+          loading={toggleMutation.isPending}
+          onSubmit={(to) => toggleMutation.mutate(to)}
+          onClose={() => setHandOver(null)}
+        />
+      )}
     </DetailLayout>
   );
 }

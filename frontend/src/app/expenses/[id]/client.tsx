@@ -94,53 +94,70 @@ export default function ExpenseDetailPage({ id: idProp, embedded = false, onOpen
       isLoading={isLoading}
       embedded={embedded}
       actions={
-        <div className="flex items-center gap-2">
-          {canEditContent && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="text-muted-foreground border-border hover:bg-accent"
-              onClick={() => {
-                if (embedded && onOpenFormEdit) {
-                  onOpenFormEdit(id);
-                } else {
-                  router.push(`/expenses?form=${id}`);
-                }
-              }}
-            >
-              <Pencil className="w-3.5 h-3.5 mr-1" /> 編集
-            </Button>
-          )}
-          {exp?.status === "PENDING" && canManage && (
+        // 左 = 本線(編集 → 再申請 → 承認)、右端 = 例外(差し戻し・承認を取り消す)。
+        // ボタンは、状態で消さず、使えないときは非活性にする(位置が変わらない)。承認の権限が無い人には、承認の系統を出さない
+        <div className="flex flex-1 items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-muted-foreground border-border hover:bg-accent"
+            disabled={!canEditContent}
+            title={!canEditContent ? "承認済・精算済の申請は編集できません" : undefined}
+            onClick={() => {
+              if (embedded && onOpenFormEdit) {
+                onOpenFormEdit(id);
+              } else {
+                router.push(`/expenses?form=${id}`);
+              }
+            }}
+          >
+            <Pencil className="w-3.5 h-3.5 mr-1" /> 編集
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="text-sky-400 border-sky-500/30 hover:bg-sky-500/10"
+            onClick={() => resubmitMutation.mutate()}
+            disabled={exp?.status !== "REJECTED" || resubmitMutation.isPending}
+            title={exp?.status !== "REJECTED" ? "差し戻された申請だけ、再申請できます" : undefined}
+          >
+            <RotateCcw className="w-3.5 h-3.5 mr-1" /> 再申請
+          </Button>
+          {canManage && (
             <>
-              <Button size="sm" variant="outline" className="text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10" onClick={() => approveMutation.mutate()}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/10"
+                onClick={() => approveMutation.mutate()}
+                disabled={exp?.status !== "PENDING" || approveMutation.isPending}
+                title={exp?.status === "APPROVED" ? "承認済みです" : exp?.status !== "PENDING" ? "申請中の経費だけ、承認できます" : undefined}
+              >
                 <Check className="w-3.5 h-3.5 mr-1" /> 承認
               </Button>
-              <Button size="sm" variant="outline" className="text-red-400 border-red-500/30 hover:bg-red-500/10" onClick={() => rejectMutation.mutate()}>
-                <X className="w-3.5 h-3.5 mr-1" /> 差し戻し
-              </Button>
+              <div className="flex items-center gap-2 ml-auto">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-red-400 border-red-500/30 hover:bg-red-500/10"
+                  onClick={() => rejectMutation.mutate()}
+                  disabled={exp?.status !== "PENDING" || rejectMutation.isPending}
+                  title={exp?.status !== "PENDING" ? "申請中の経費だけ、差し戻せます" : undefined}
+                >
+                  <X className="w-3.5 h-3.5 mr-1" /> 差し戻し
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
+                  onClick={() => setConfirmUnapprove(true)}
+                  disabled={exp?.status !== "APPROVED" || unapproveMutation.isPending}
+                  title={exp?.status !== "APPROVED" ? "承認済みの経費だけ、承認を取り消せます" : undefined}
+                >
+                  <Undo2 className="w-3.5 h-3.5 mr-1" /> 承認を取り消す
+                </Button>
+              </div>
             </>
-          )}
-          {exp?.status === "APPROVED" && canManage && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
-              onClick={() => setConfirmUnapprove(true)}
-            >
-              <Undo2 className="w-3.5 h-3.5 mr-1" /> 承認を取り消す
-            </Button>
-          )}
-          {exp?.status === "REJECTED" && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="text-sky-400 border-sky-500/30 hover:bg-sky-500/10"
-              onClick={() => resubmitMutation.mutate()}
-              disabled={resubmitMutation.isPending}
-            >
-              <RotateCcw className="w-3.5 h-3.5 mr-1" /> 再申請
-            </Button>
           )}
         </div>
       }

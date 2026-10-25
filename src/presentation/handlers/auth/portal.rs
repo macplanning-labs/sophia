@@ -1,10 +1,12 @@
 use crate::infrastructure::db_tx::LogErr;
 use crate::presentation::cookie_util;
-use crate::presentation::auth_messages::{client_ip, LOCKED_MSG};
+use crate::presentation::middleware::probe_log::InvalidTokenAttempt;
+use crate::presentation::auth_messages::{client_ip, ClientPeer, LOCKED_MSG};
 use crate::config::AppState;
 use crate::infrastructure::repositories::auth_repo;
 use crate::infrastructure::repositories::invite_repo;
-use auth_core::domain::attempt_lock::{build_lock_key, AttemptLockConfig};
+use crate::infrastructure::repositories::login_attempt_repo;
+use auth_core::domain::attempt_lock::build_lock_key;
 use axum::{
     extract::State,
     response::IntoResponse,
@@ -20,6 +22,7 @@ use sqlx::PgPool;
 pub async fn api_portal_login(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    peer: ClientPeer,
     axum::Json(payload): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let pool = &state.pool;
@@ -30,40 +33,20 @@ pub async fn api_portal_login(
         })).into_response();
     }
 
-    let ip = client_ip(&headers);
-    let guard_key = build_lock_key(&ip, &email.trim().to_lowercase());
-    let cfg = AttemptLockConfig::default();
+    let ip = client_ip(peer.0, &headers);
+    let guard_key = build_lock_key(&login_attempt_repo::ip_group_text(&ip), &email.trim().to_lowercase());
 
-    match state.portal_attempt_store.locked_retry_after_seconds(&guard_key).await {
-        Ok(Some(retry_after_secs)) => {
-            return (
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                [(axum::http::header::RETRY_AFTER, retry_after_secs.to_string())],
-                axum::Json(serde_json::json!({
-                    "success": false,
-                    "error": LOCKED_MSG,
-                    "retry_after_secs": retry_after_secs
-                })),
-            ).into_response();
-        }
+    // 試行の予約(記録してから数える)。ロック中は、メールを調べずに断る。
+    // 各試行を数える(メールの連続送信・存在確認の探索の抑止)。数えられないときは通さない。
+    match state.portal_attempt_store.reserve(&guard_key).await {
         Ok(None) => {}
-        Err(e) => tracing::error!("試行回数ロックの確認に失敗: {:?}", e),
-    }
-
-    // Count each portal-login attempt (anti email-bomb / enumeration probe)
-    if let Err(e) = state.portal_attempt_store.record_failure(&guard_key, &cfg).await {
-        tracing::error!("試行回数の記録に失敗: {:?}", e);
-    }
-    if let Ok(Some(retry_after_secs)) = state.portal_attempt_store.locked_retry_after_seconds(&guard_key).await {
-        return (
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            [(axum::http::header::RETRY_AFTER, retry_after_secs.to_string())],
-            axum::Json(serde_json::json!({
-                "success": false,
-                "error": LOCKED_MSG,
-                "retry_after_secs": retry_after_secs
-            })),
-        ).into_response();
+        Ok(Some(retry_after_secs)) => return portal_locked_response(retry_after_secs),
+        Err(e) => {
+            tracing::error!("試行回数の予約に失敗: {:?}", e);
+            return axum::Json(serde_json::json!({
+                "success": false, "error": "システムエラーが発生しました"
+            })).into_response();
+        }
     }
 
     // m_engineer からメールアドレスで検索
@@ -112,6 +95,20 @@ pub async fn api_portal_login(
     })).into_response()
 }
 
+/// ロック中の応答(429 + Retry-After)。形は従来の応答と同じ
+fn portal_locked_response(retry_after_secs: u64) -> axum::response::Response {
+    (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, retry_after_secs.to_string())],
+        axum::Json(serde_json::json!({
+            "success": false,
+            "error": LOCKED_MSG,
+            "retry_after_secs": retry_after_secs
+        })),
+    )
+        .into_response()
+}
+
 /// GET /api/v1/auth/portal-link/{token} — マジックリンク有効性（トークン非消費）
 pub async fn api_portal_link_status(
     State(pool): State<PgPool>,
@@ -129,11 +126,14 @@ pub async fn api_portal_link_status(
     };
     let exists = auth_repo::engineer_login_token_valid(&pool, token).await.log_err().unwrap_or(false);
     if !exists {
-        return axum::Json(serde_json::json!({
+        // 応答は変えず、無効なトークンの試行として数えてもらう目印だけ付ける(DEMO-000181 項目7)
+        let mut res = axum::Json(serde_json::json!({
             "valid": false,
             "error": "リンクの有効期限が切れています"
         }))
         .into_response();
+        res.extensions_mut().insert(InvalidTokenAttempt);
+        return res;
     }
     axum::Json(serde_json::json!({ "valid": true })).into_response()
 }
@@ -156,7 +156,9 @@ pub async fn api_portal_link_confirm(
 
     let login_token = auth_repo::find_valid_engineer_login_token(&pool, token).await.log_err().ok().flatten();
     let Some((token_id, engineer_id)) = login_token else {
-        return (
+        // 応答は変えず、無効なトークンの試行として数えてもらう目印だけ付ける。
+        // 期限切れと存在しないトークンは区別できないが、通知は同じIPの連続(閾値以上)でのみ出るので許容する(DEMO-000181 項目7)
+        let mut res = (
             axum::http::StatusCode::GONE,
             axum::Json(serde_json::json!({
                 "success": false,
@@ -164,6 +166,8 @@ pub async fn api_portal_link_confirm(
             })),
         )
             .into_response();
+        res.extensions_mut().insert(InvalidTokenAttempt);
+        return res;
     };
 
     if let Err(e) = auth_repo::mark_engineer_login_token_used(&pool, token_id).await {

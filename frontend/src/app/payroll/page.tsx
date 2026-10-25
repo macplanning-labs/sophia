@@ -10,6 +10,7 @@ import { useCurrentUser } from "@/lib/useCurrentUser";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { PageHeader } from "@/components/ui/page-header";
 import { DetailModal } from "@/components/ui/detail-modal";
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
 import { ConfirmSheet } from "@/components/ui/confirm-sheet";
@@ -136,23 +137,27 @@ function PayrollPageContent() {
 
   return (
     <div className="p-6 space-y-6">
-      {canViewAllPayroll && (
-        <div className="flex items-center justify-end gap-2">
-          <input
-            type="month"
-            value={calcMonth}
-            onChange={(e) => setCalcMonth(e.target.value)}
-            className="bg-muted border border-border text-sm text-foreground rounded-md px-2 py-1.5"
-          />
-          <button
-            onClick={() => setConfirmCalculate(true)}
-            disabled={calculateMut.isPending}
-            className="px-3 py-1.5 text-xs font-medium rounded-md bg-teal-500/10 text-teal-400 border border-teal-500/30 hover:bg-teal-500/20 transition-colors disabled:opacity-50"
-          >
-            {calculateMut.isPending ? "計算中…" : "💰 給与計算を実行"}
-          </button>
-        </div>
-      )}
+      <PageHeader
+        actions={
+          canViewAllPayroll && (
+            <>
+              <input
+                type="month"
+                value={calcMonth}
+                onChange={(e) => setCalcMonth(e.target.value)}
+                className="bg-muted border border-border text-sm text-foreground rounded-md px-2 py-1.5"
+              />
+              <button
+                onClick={() => setConfirmCalculate(true)}
+                disabled={calculateMut.isPending}
+                className="px-3 py-1.5 text-xs font-medium rounded-md bg-teal-500/10 text-teal-400 border border-teal-500/30 hover:bg-teal-500/20 transition-colors disabled:opacity-50"
+              >
+                {calculateMut.isPending ? "計算中…" : "💰 給与計算を実行"}
+              </button>
+            </>
+          )
+        }
+      />
 
       {/* サマリー（表示中フィルタ結果に連動） */}
       <div className="grid grid-cols-4 gap-3">

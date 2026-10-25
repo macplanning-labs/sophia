@@ -21,7 +21,8 @@ use sqlx::PgPool;
 use super::ops_message;
 use crate::domain::models::mail_pipeline::{PhaseError, MAX_RETRY};
 use crate::infrastructure::attachment_parsers::{self, DocumentKind, ParsedDocument};
-use crate::infrastructure::repositories::order_repo;
+use crate::infrastructure::repositories::{order_repo, stamp_repo};
+use crate::domain::authz::stamp::StampMode;
 
 /// Phase3実行結果
 #[derive(Debug, Default)]
@@ -347,12 +348,24 @@ async fn insert_received_order(
         None => None,
     };
 
+    // 担当スタンプ(自動取込): 顧客 → 受け皿(設計書 §6.6・D16)
+    let stamp = {
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|e| PhaseError::Transient(format!("担当の決定エラー: {e}")))?;
+        stamp_repo::for_received_order(&mut conn, Some(o.client_id), None, StampMode::AutoImport)
+            .await
+            .map_err(|e| PhaseError::Transient(format!("担当の決定エラー: {e}")))?
+    };
+
     let order_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO t_received_order (
             client_id, engineer_id, target_month, work_start, work_end,
-            project_name, status, order_date, client_order_number, remarks
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'REGISTERED', $7, $8, $9)
+            project_name, status, order_date, client_order_number, remarks,
+            owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'REGISTERED', $7, $8, $9, $10, $11)
         RETURNING id
         "#,
     )
@@ -365,6 +378,8 @@ async fn insert_received_order(
     .bind(o.order_date)
     .bind(&o.client_order_number)
     .bind(&o.remarks)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(pool)
     .await
     .map_err(|e| PhaseError::Transient(format!("受注INSERTエラー: {e}")))?;

@@ -70,35 +70,6 @@ pub async fn set_mail_reflected(pool: &PgPool, id: i64, reflected: bool) -> Resu
     Ok(result.rows_affected())
 }
 
-/// GASからのWebhookで受信したメールを記録する（重複はgmail_message_idで無視）
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_webhook_mail(
-    pool: &PgPool,
-    gmail_message_id: &str,
-    sender_email: &str,
-    sender_name: &str,
-    subject: &str,
-    received_at: chrono::DateTime<chrono::Utc>,
-    classification: &str,
-    matched_entity_name: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"INSERT INTO t_mail_scan_log (gmail_message_id, sender_email, sender_name, subject, received_at, classification, matched_entity_name)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (gmail_message_id) DO NOTHING"#
-    )
-    .bind(gmail_message_id)
-    .bind(sender_email)
-    .bind(sender_name)
-    .bind(subject)
-    .bind(received_at)
-    .bind(classification)
-    .bind(matched_entity_name)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 /// メール本文を取得する（EDI取込のURL抽出用）
 pub async fn find_mail_body(pool: &PgPool, mail_id: i64) -> Result<Option<String>> {
     let body: Option<String> = sqlx::query_scalar(
@@ -143,11 +114,21 @@ mod tests {
 
             // B: attachments が NULL の行（COALESCE で '[]' に正規化されること）
             // ステージング/本番は NULL 許容だが、ローカルDBは NOT NULL でスキーマがずれているため、
-            // このトランザクション内だけ制約を外す（DDL もロールバックされ、実DBには残らない）
-            sqlx::query("ALTER TABLE t_mail_scan_log ALTER COLUMN attachments DROP NOT NULL")
-                .execute(&pool)
-                .await
-                .expect("Failed to relax NOT NULL for test");
+            // NOT NULL のときだけ、このトランザクション内で制約を外す（DDL もロールバックされ、実DBには残らない）。
+            // NULL 許容なら ALTER しない: ALTER は表全体のロックを取り、並行するテストとデッドロックするため（DEMO-000155）
+            let nullable: bool = sqlx::query_scalar(
+                "SELECT (is_nullable = 'YES') FROM information_schema.columns \
+                 WHERE table_schema = current_schema() AND table_name = 't_mail_scan_log' AND column_name = 'attachments'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("Failed to read attachments nullability");
+            if !nullable {
+                sqlx::query("ALTER TABLE t_mail_scan_log ALTER COLUMN attachments DROP NOT NULL")
+                    .execute(&pool)
+                    .await
+                    .expect("Failed to relax NOT NULL for test");
+            }
             sqlx::query(
                 r#"INSERT INTO t_mail_scan_log
                    (gmail_message_id, sender_email, sender_name, subject, received_at,

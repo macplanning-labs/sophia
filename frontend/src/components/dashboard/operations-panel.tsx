@@ -9,6 +9,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { useCurrentUser } from "@/lib/useCurrentUser";
+import { isApiOk } from "@/lib/api-result";
 
 // ── メール操作パネル ──
 
@@ -18,7 +19,12 @@ export function MailPanel({ mailLogs }: { mailLogs: MailLog[] }) {
 
   const fetchMutation = useMutation({
     mutationFn: triggerMailFetch,
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["dashboard"] }); toast.success("メールチェック完了"); },
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      // 取り込みは途中で一部失敗しても 200 で返り、ok=false と結果の要約(error)が入る
+      if (isApiOk(res)) toast.success("メールチェック完了");
+      else toast.error(`メールチェック: 一部失敗しました（${res.error || "不明なエラー"}）`);
+    },
     onError: (e: Error) => toast.error(`メールチェックエラー: ${e.message}`),
   });
 
@@ -39,7 +45,7 @@ export function MailPanel({ mailLogs }: { mailLogs: MailLog[] }) {
   const imapTestMutation = useMutation({
     mutationFn: testImapConnection,
     onSuccess: (res) => {
-      if (res.success) toast.success("IMAP接続確認: 成功しました");
+      if (isApiOk(res)) toast.success("IMAP接続確認: 成功しました");
       else toast.error(`IMAP接続確認: 失敗（${res.error || "不明なエラー"}）`);
     },
     onError: (e: Error) => toast.error(`IMAP接続確認エラー: ${e.message}`),
