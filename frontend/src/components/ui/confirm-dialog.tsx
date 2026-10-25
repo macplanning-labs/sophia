@@ -3,6 +3,7 @@
 import { useCallback, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
+import { useEscapeKey } from "@/lib/useEscapeKey";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -33,6 +34,7 @@ export function ConfirmDialog({
     },
     [loading, onCancel]
   );
+  useEscapeKey(open && !loading, onCancel);
 
   if (!open) return null;
 

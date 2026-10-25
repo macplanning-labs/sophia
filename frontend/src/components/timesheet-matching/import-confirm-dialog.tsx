@@ -5,6 +5,8 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import { toast } from "sonner";
 import { TimesheetPreview, type TimesheetPreviewData } from "@/components/TimesheetPreview";
+import { BillingStep } from "@/components/timesheet-matching/billing-step";
+import type { BillingHint } from "@/lib/types";
 
 interface AlertRow {
   date: string;
@@ -62,6 +64,8 @@ export function ImportConfirmDialog({
   onRejected: () => void;
 }) {
   const [rejecting, setRejecting] = useState(false);
+  /** 承認のあと、請求書の確認ステップを出すためのヒント(無ければ従来どおり閉じる) */
+  const [billingHint, setBillingHint] = useState<BillingHint | null>(null);
   const [reason, setReason] = useState("");
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [excelBuffer, setExcelBuffer] = useState<ArrayBuffer | null>(null);
@@ -109,10 +113,12 @@ export function ImportConfirmDialog({
       });
       const b = await r.json().catch(() => ({}));
       if (!r.ok || !b.success) throw new Error(b.error || "取り込みに失敗しました");
+      return (b.billing_hint ?? null) as BillingHint | null;
     },
-    onSuccess: () => {
+    onSuccess: (hint) => {
       toast.success("稼働報告に取り込み、承認しました");
-      onDone();
+      if (hint) setBillingHint(hint);
+      else onDone();
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -186,27 +192,31 @@ export function ImportConfirmDialog({
     </div>
   ) : null;
 
+  // 承認のあとに閉じるときは、一覧を更新するため onDone を呼ぶ
+  const closeDialog = billingHint ? onDone : onClose;
+
   return (
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onClick={(e) => { if (e.target === e.currentTarget) closeDialog(); }}
     >
       {/* 画面の高さに収める（スクロールなしで、1枚のスクリーンショットに収まるように） */}
       <div className="bg-background border border-border rounded-xl shadow-2xl w-full max-w-[1600px] mx-3 h-[calc(100vh-1.5rem)] flex flex-col">
         <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0">
           <h3 className="text-sm font-semibold text-foreground">稼働報告取り込み</h3>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground transition-colors" aria-label="閉じる">
+          <button onClick={closeDialog} className="text-muted-foreground hover:text-foreground transition-colors" aria-label="閉じる">
             <X className="w-5 h-5" />
           </button>
         </div>
         <div className="px-4 py-2 flex-1 min-h-0 flex flex-col gap-2">
-          {isLoading && <p className="text-sm text-muted-foreground">勤務表を読み取っています...</p>}
-          {error && (
+          {billingHint && <BillingStep hint={billingHint} onClose={onDone} />}
+          {!billingHint && isLoading && <p className="text-sm text-muted-foreground">勤務表を読み取っています...</p>}
+          {!billingHint && error && (
             <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/30 rounded-md p-3 whitespace-pre-wrap">
               {(error as Error).message}
             </p>
           )}
-          {previewData && (
+          {!billingHint && previewData && (
             <div className={rejecting ? "hidden" : "flex-1 min-h-0"}>
             <TimesheetPreview
               fit
@@ -231,7 +241,7 @@ export function ImportConfirmDialog({
             />
             </div>
           )}
-          {rejecting && data && (
+          {!billingHint && rejecting && data && (
             <div className="flex-1 min-h-0 overflow-auto">
           <div className="w-full max-w-2xl mx-auto mt-6 p-4 space-y-3 border border-border rounded-xl bg-card">
             <h4 className="text-sm font-semibold text-foreground">勤務表を差し戻す</h4>

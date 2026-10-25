@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect } from "react";
+import { useCallback } from "react";
+import { useEscapeKey } from "@/lib/useEscapeKey";
 import { X, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -42,14 +43,7 @@ export function DetailModal({
     [onClose]
   );
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useEscapeKey(open, onClose);
 
   if (!open) return null;
 

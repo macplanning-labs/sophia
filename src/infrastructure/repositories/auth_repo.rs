@@ -47,6 +47,17 @@ pub async fn find_active_totp_secret(
     Ok(row)
 }
 
+/// 有効な TOTP デバイス(id, 暗号化された秘密鍵, nonce)。id は、使った区間の記録(使い回しの防止)に使う
+pub async fn find_active_totp_device(pool: &PgPool, user_id: i64) -> Result<Option<(i32, String, String)>> {
+    let row = sqlx::query_as(
+        "SELECT id, secret_encrypted, nonce FROM s_totp_device WHERE user_id = $1 AND is_active = true ORDER BY id DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// 全ユーザーのパスキー（user_id, passkey_json）一覧を取得する（パスキーログイン用）
 /// user_id は s_webauthn_credential.user_id (INTEGER) と型を合わせて i32 で受ける
 pub async fn list_all_passkeys_with_user(pool: &PgPool) -> Result<Vec<(i32, serde_json::Value)>> {
@@ -165,6 +176,25 @@ pub async fn find_user_for_login(
     Ok(row)
 }
 
+/// 社内 SSO 用: メールアドレスが一致する**有効な**利用者を、すべて返す(小文字にそろえて比べる)。
+///
+/// `s_user.email` の UNIQUE は大文字小文字を区別するため、`Taro@x` と `taro@x` が別の行として
+/// 共存しうる。小文字で比べると 2 件ヒットしうるので、`fetch_optional` ではなく**全件**を返し、
+/// 呼び出し側が 0 件・1 件・2 件以上を分ける(2 件以上はログインさせない。DEMO-000228)。
+/// 返す項目: (id, email, is_staff, mfa_enabled)。`email_lower` は呼び出し側で小文字にしておく。
+pub async fn find_active_users_by_email_lower(
+    pool: &PgPool,
+    email_lower: &str,
+) -> Result<Vec<(i64, String, bool, bool)>> {
+    let rows = sqlx::query_as(
+        "SELECT id, email, is_staff, mfa_enabled FROM s_user WHERE LOWER(email) = $1 AND is_active = true ORDER BY id",
+    )
+    .bind(email_lower)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// ユーザープロフィールのロール判定フィールド（partner_id, employee_id）を取得する
 pub async fn find_user_profile_role_fields(
     pool: &PgPool,
@@ -217,6 +247,15 @@ pub async fn engineer_login_token_valid(pool: &PgPool, token: uuid::Uuid) -> Res
     Ok(exists)
 }
 
+/// エンジニア用ログイントークンが存在するか(使用済み・期限切れも含む)。トークンURLの試行制限で「存在するか」を見るために使う
+pub async fn engineer_login_token_exists(pool: &PgPool, token: uuid::Uuid) -> Result<bool> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM s_engineer_login_token WHERE token = $1)")
+        .bind(token)
+        .fetch_one(pool)
+        .await?;
+    Ok(exists)
+}
+
 /// エンジニア用ログイントークンを取得する（有効なもののみ）
 pub async fn find_valid_engineer_login_token(
     pool: &PgPool,
@@ -262,6 +301,44 @@ pub async fn insert_auth_event(
     {
         tracing::warn!("auth audit insert failed: {:?}", e);
     }
+}
+
+/// トークンURLの有効な利用を 1 件記録する(DEMO-000233 S2-E)。
+/// 同じ IP・同じ内容(種類・操作・結果・指紋 = detail の完全一致)が直近 5 分にあれば書かない(連打で行が増えないように)。
+/// 1 つの文で「無ければ挿入」する。失敗しても呼び出し側は続行(警告ログのみ)。
+pub async fn record_token_access(pool: &PgPool, event_type: &str, ip: &str, detail: &str) {
+    if let Err(e) = sqlx::query(
+        "INSERT INTO h_auth_event (event_type, user_id, email, ip, detail) \
+         SELECT $1::varchar, NULL, NULL, $2::varchar, $3::text \
+         WHERE NOT EXISTS ( \
+           SELECT 1 FROM h_auth_event \
+           WHERE event_type = $1::varchar AND ip = $2::varchar AND detail = $3::text \
+             AND created_at > NOW() - INTERVAL '5 minutes')",
+    )
+    .bind(event_type)
+    .bind(ip)
+    .bind(detail)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!("token access audit insert failed: {:?}", e);
+    }
+}
+
+/// トークンURLの利用の監査(種別 `event_type`)のうち、保存期間(90 日)を過ぎた行を古い順に `limit` 件まで消す。
+/// ほかの種別の認証イベントは消さない。消した件数を返す
+pub async fn purge_expired_token_access(pool: &PgPool, event_type: &str, limit: i64) -> sqlx::Result<u64> {
+    let r = sqlx::query(
+        "DELETE FROM h_auth_event WHERE id IN ( \
+           SELECT id FROM h_auth_event \
+           WHERE event_type = $1 AND created_at < NOW() - INTERVAL '90 days' \
+           ORDER BY created_at LIMIT $2)",
+    )
+    .bind(event_type)
+    .bind(limit)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
 }
 
 /// ユーザーの全セッションを削除する（パスワードリセット後など）

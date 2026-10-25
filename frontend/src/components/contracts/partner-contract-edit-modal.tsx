@@ -215,25 +215,18 @@ export function PartnerContractEditModal({ contractId, open, onClose }: Props) {
         updateMutation.mutate(form);
       }}
       onClose={onClose}
-      footerStart={
-        <div className="flex items-center gap-2 flex-wrap">
-          {canDelete ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
-              disabled={deleteMutation.isPending || updateMutation.isPending}
-              onClick={() => setConfirmAction("delete")}
-            >
-              {deleteMutation.isPending ? "削除中…" : "削除"}
-            </Button>
-          ) : (
-            <p className="text-[11px] text-muted-foreground self-center max-w-[14rem]">
-              承諾済みの発注書があるため削除できません
-            </p>
-          )}
-        </div>
+      footerEnd={
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
+          disabled={!canDelete || deleteMutation.isPending || updateMutation.isPending}
+          title={!canDelete ? "承諾済みの発注書があるため削除できません" : undefined}
+          onClick={() => setConfirmAction("delete")}
+        >
+          {deleteMutation.isPending ? "削除中…" : "削除"}
+        </Button>
       }
     >
       {locked && (

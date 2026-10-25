@@ -102,6 +102,33 @@ enum Commands {
 
     /// スキーマ適用済みの既存環境に対して _sqlx_migrations をベースライン（追跡開始）
     BaselineMigrations,
+
+    /// 外部連携の秘密の設定を、今の鍵で暗号化し直す（鍵の入れ替え。INTEGRATION_KEYS_FILE の current の鍵を使う）
+    /// 手順: 鍵ファイルに新しい鍵を足して current を変える → このコマンド → 古い鍵を消す
+    RekeyIntegrations,
+
+    /// 外部連携を点検する（integrations.toml と実際の設定を照らし合わせる。DB にも相手にも書き込まない）
+    /// 必須の連携が使えなければ終了コード 1。最後に `PROBLEM_USES=<用途,…>` の行を出す（デプロイ前の点検が読む）
+    CheckIntegrations,
+
+    /// 毎朝 8:45 の外部連携の点検を、いま1回実行する（結果を記録し、前回から変わっていれば Chat とメールで知らせる）
+    /// 通常はスケジューラが実行する。ステージングでの確認や、点検のやり直しに使う
+    DailyCheckIntegrations,
+
+    /// 口座番号（自社・パートナー・社員の 3 列）の平文を、暗号化して書き戻す（DEMO-000233 S2-G1）
+    /// 既定は確認だけ（件数のみ・書き込みなし）。実行は `--execute --i-have-a-backup`（本番のバックアップを取ってから）
+    /// 鍵は DATA_KEYS_FILE から読む。1 件でも検証に合わなければ、全体を取り消す。値は出さない。
+    EncryptBankAccounts {
+        /// 実行する（書き込む）。付けなければ確認だけ
+        #[arg(long, conflicts_with = "dry_run")]
+        execute: bool,
+        /// 確認だけ（既定。明示用）
+        #[arg(long)]
+        dry_run: bool,
+        /// バックアップを取って戻せることを確認した（--execute のときに必須）
+        #[arg(long)]
+        i_have_a_backup: bool,
+    },
 }
 
 #[tokio::main]
@@ -278,6 +305,100 @@ async fn main() -> anyhow::Result<()> {
         Commands::BaselineMigrations => {
             baseline_migrations().await?;
         }
+
+        Commands::RekeyIntegrations => {
+            let pool = infrastructure::db::create_pool().await?;
+            let cipher = infrastructure::integrations::secret::SecretCipher::from_env().map_err(|e| anyhow::anyhow!(e))?;
+            let rows = infrastructure::repositories::integration_repo::list_all_rows(&pool).await?;
+            let (mut done, mut skipped) = (0usize, 0usize);
+            for r in rows {
+                let (Some(enc), Some(nonce), Some(kid)) = (&r.secret_enc, &r.secret_nonce, &r.secret_key_id) else { continue };
+                if kid == cipher.current_key_id() {
+                    skipped += 1;
+                    continue;
+                }
+                let plain = cipher.open(kid, nonce, enc).map_err(|e| anyhow::anyhow!("「{}」(id {}): {e}", r.label, r.id))?;
+                let sealed = cipher.seal(&plain).map_err(|e| anyhow::anyhow!(e))?;
+                infrastructure::repositories::integration_repo::replace_secret(
+                    &pool,
+                    r.id,
+                    infrastructure::repositories::integration_repo::SealedSecret { key_id: &sealed.key_id, nonce: &sealed.nonce, ciphertext: &sealed.ciphertext },
+                )
+                .await?;
+                done += 1;
+            }
+            println!("暗号化し直した: {done} 件 / すでに今の鍵: {skipped} 件(今の鍵: {})", cipher.current_key_id());
+        }
+
+        Commands::EncryptBankAccounts { execute, dry_run: _, i_have_a_backup } => {
+            use infrastructure::bank_account_encryption as enc;
+            use infrastructure::data_crypto::DataCrypto;
+
+            if execute {
+                // 実行は、バックアップの確認と、実行のゲート(環境 + アプリが暗号文を読めるか)が済んでからだけ。DB に触る前に止める
+                if !i_have_a_backup {
+                    anyhow::bail!(
+                        "実行には、バックアップを取って戻せることを確認してから --i-have-a-backup を付けてください。\
+                         （確認だけなら --dry-run。何も書き込まれていません）"
+                    );
+                }
+                let dc = DataCrypto::from_env().map_err(|e| anyhow::anyhow!(e))?;
+                enc::execute_gate(&dc).map_err(|e| anyhow::anyhow!(e))?;
+
+                let pool = infrastructure::db::create_pool().await?;
+                // 口座番号の列を TEXT に広げてから変換する（暗号化した値は 20 文字を超える）。実行時だけマイグレーションを流す
+                run_migrations(&pool).await?;
+                tracing::warn!("口座番号の変換を開始します。変換の間、この表への書き込みは止まります。");
+                let converted = enc::convert(&pool, &dc).await?;
+                for (t, n) in &converted {
+                    println!("{}: 暗号化して書き戻した {} 件", t.label(), n);
+                }
+                println!("完了しました（検証済み）。もう一度確認すると、平文は 0 件になります。");
+            } else {
+                // 確認はマイグレーションを流さない(読み取りだけ)。083 が未適用なら、件数は出さずに終わる
+                let dc = DataCrypto::from_env().map_err(|e| anyhow::anyhow!(e))?;
+                let pool = infrastructure::db::create_pool().await?;
+                let mut conn = pool.acquire().await?;
+                let text_ok = infrastructure::repositories::bank_account_repo::all_text(&mut conn).await?;
+                drop(conn);
+                if !text_ok {
+                    println!("083 未適用（口座番号の列が TEXT に広がっていません）。確認は行いませんでした。");
+                    println!("アプリを起動してマイグレーション 083 を適用してから、もう一度確認してください。");
+                } else {
+                    let counts = enc::scan(&pool, &dc).await?;
+                    println!("【確認のみ（書き込みなし。値は表示しない）】");
+                    for c in &counts {
+                        println!(
+                            "{}: 全 {} 件 / 暗号化済み {} 件（うち今の鍵以外 {} 件、復号できない {} 件） / 平文 {} 件（うち空欄 {} 件）",
+                            c.target.label(), c.total, c.encrypted, c.other_key, c.undecryptable, c.plaintext, c.plaintext_empty
+                        );
+                    }
+                    let undecryptable: usize = counts.iter().map(|c| c.undecryptable).sum();
+                    if undecryptable > 0 {
+                        println!("復号できない行が {undecryptable} 件あります。この件数が 0 になるまで、実行できません（鍵・鍵IDを確認してください）。");
+                    }
+                    match enc::execute_gate(&dc) {
+                        Ok(()) => println!("実行するには、本番のバックアップを取ってから: --execute --i-have-a-backup"),
+                        Err(e) => println!("現在の設定では実行できません: {e}"),
+                    }
+                }
+            }
+        }
+
+        Commands::CheckIntegrations => {
+            // 点検は読み取りだけ（マイグレーションも流さない）
+            let pool = infrastructure::db::create_pool().await?;
+            infrastructure::integrations::reload(&pool).await;
+            let reports = infrastructure::integrations::check::run(&pool, false).await;
+            if infrastructure::integrations::check::print_report(&reports) {
+                std::process::exit(1);
+            }
+        }
+
+        Commands::DailyCheckIntegrations => {
+            let pool = infrastructure::db::create_pool().await?;
+            infrastructure::integrations::check::run_daily(pool).await;
+        }
     }
 
     Ok(())
@@ -287,9 +408,40 @@ async fn serve() -> anyhow::Result<()> {
     // 設定読み込み
     let config = config::AppConfig::from_env()?;
 
+    let env_name = std::env::var("ENV_NAME").unwrap_or_else(|_| "local".to_string());
+
+    // 信用する中継(TRUSTED_PROXY_CIDRS)を整える（DEMO-000233 S2-C）。
+    // 未設定・空のとき、本番系(production/dr/staging)は起動を止め、それ以外は none にそろえる。
+    // 送り元を決める2つの読み手(Sophia と auth-core の試行ロック)が、同じ値を読むようにするため。
+    // set_var は HTTP サーバーの起動より前、送り元の判定(OnceLock で初めて読む)より前に呼ぶ。読む側はまだ動いていない。
+    let trusted_cidrs = std::env::var(auth_core::infrastructure::client_ip::TRUSTED_PROXY_CIDRS_ENV).ok();
+    match presentation::auth_messages::trusted_proxy_fallback(&env_name, trusted_cidrs.as_deref()) {
+        Ok(Some(value)) => {
+            tracing::warn!(
+                "⚠️ TRUSTED_PROXY_CIDRS が未設定です（ENV_NAME={}）。none（何も信用しない）として起動します。nginx の範囲を設定してください",
+                env_name
+            );
+            std::env::set_var(auth_core::infrastructure::client_ip::TRUSTED_PROXY_CIDRS_ENV, value);
+        }
+        Ok(None) => {}
+        Err(message) => anyhow::bail!(message),
+    }
+    // 権限判定(AUTHZ_MODE)が強制(enforce)でなければ、本番系は起動を止める(DEMO-000254)。
+    // 未設定の影モードでは、権限の無い社員が他人の請求書などを読めてしまう。local など他の環境は何もしない。
+    presentation::auth_messages::authz_enforce_startup_check(
+        &env_name,
+        std::env::var("AUTHZ_MODE").ok().as_deref(),
+        std::env::var("AUTHZ_ENFORCE_DOMAINS").ok().as_deref(),
+    )
+    .map_err(|message| anyhow::anyhow!(message))?;
+    // 口座番号などの列の暗号化の設定(DEMO-000233 S2-G1)。本番・DR・ステージングで、有効なのに鍵が読めなければ起動を止める
+    let data_crypto = infrastructure::data_crypto::DataCrypto::from_env().map_err(|e| anyhow::anyhow!(e))?;
+    tracing::info!("データ暗号化: 書き込みの暗号化 {} / 平文の読み取り {}", if data_crypto.enabled() { "有効" } else { "無効(移行前)" }, if data_crypto.required() { "拒否" } else { "許可" });
+    // リポジトリ層が使うプロセス共有の設定(S2-G2-1)。二度目の初期化は起こらない
+    infrastructure::data_crypto::install(data_crypto).map_err(|e| anyhow::anyhow!(e))?;
+
     // WebAuthn allowlist の設定漏れを早期検知する（本番/DRで未設定だとWebAuthnが
     // 常にlocalhostのみ許可され、実ドメインからのパスキー登録/認証が必ず失敗するため）
-    let env_name = std::env::var("ENV_NAME").unwrap_or_else(|_| "local".to_string());
     if matches!(env_name.as_str(), "production" | "dr" | "staging")
         && std::env::var("WEBAUTHN_ALLOWED_HOSTS")
             .map(|v| v.trim().is_empty())
@@ -308,22 +460,113 @@ async fn serve() -> anyhow::Result<()> {
     // マイグレーション実行（SQLファイルを順序付きで実行）
     run_migrations(&pool).await?;
 
+    // 口座番号の暗号化の自己点検(DEMO-000233 S2-G2-5)。暗号化が有効なときだけ。件数だけをログに出す。
+    // 復号できない行は開発以外で起動を止める。平文の行は REQUIRED なら止め、それ以外は警告する
+    let crypto_now = infrastructure::data_crypto::global().map_err(|e| anyhow::anyhow!(e))?;
+    if crypto_now.enabled() {
+        let strict = !infrastructure::data_crypto::is_dev_env(&env_name);
+        infrastructure::bank_account_encryption::startup_check(&pool, crypto_now, strict).await?;
+    }
+
     // 初期管理者を作成（環境変数で指定されていれば）
     infrastructure::bootstrap_admin::run_from_env(&pool).await;
+
+    // 外部連携の点検（integrations.toml）。止めずに、結果をログに残し、欠けがあれば知らせる（DEMO-000213）。
+    // Drive などへの問い合わせで起動を待たせないよう、裏で実行する。
+    // 画面の設定(DB)を読み込んでから点検する(DEMO-000215)
+    infrastructure::integrations::reload(&pool).await;
+    tokio::spawn(infrastructure::integrations::check::run_at_startup(pool.clone()));
 
     // AppState 構築
     // WebAuthn の RP ID/Origin は固定値を持たず、リクエストごとに Host ヘッダーから
     // 解決する（webauthn_service::create_webauthn_from_headers）
+    // 試行の数えは DB(s_login_attempt)に保存する(DEMO-000233 S2-D)。再起動・複数台をまたいでも残る
+    let portal_attempt_store = std::sync::Arc::new(
+        infrastructure::repositories::attempt_lock_store::PgAttemptStore::new(
+            pool.clone(),
+            infrastructure::repositories::login_attempt_repo::KIND_PORTAL,
+            auth_core::domain::attempt_lock::AttemptLockConfig::default(),
+        ),
+    );
+    let mfa_attempt_store = std::sync::Arc::new(
+        infrastructure::repositories::attempt_lock_store::PgAttemptStore::new(
+            pool.clone(),
+            infrastructure::repositories::login_attempt_repo::KIND_MFA,
+            auth_core::domain::attempt_lock::AttemptLockConfig::default(),
+        ),
+    );
+    let passkey_attempt_store = std::sync::Arc::new(
+        infrastructure::repositories::attempt_lock_store::PgAttemptStore::new(
+            pool.clone(),
+            infrastructure::repositories::login_attempt_repo::KIND_PASSKEY,
+            auth_core::domain::attempt_lock::AttemptLockConfig::default(),
+        ),
+    );
+    let passkey_begin_attempt_store = std::sync::Arc::new(
+        infrastructure::repositories::attempt_lock_store::PgAttemptStore::new(
+            pool.clone(),
+            infrastructure::repositories::login_attempt_repo::KIND_PASSKEY_BEGIN,
+            auth_core::domain::attempt_lock::AttemptLockConfig {
+                max_attempts: infrastructure::repositories::login_attempt_repo::PASSKEY_BEGIN_MAX,
+                ..auth_core::domain::attempt_lock::AttemptLockConfig::default()
+            },
+        ),
+    );
     let state = config::AppState {
         pool,
         secret_key: config.secret_key.clone(),
-        portal_attempt_store: std::sync::Arc::new(
-            infrastructure::repositories::attempt_lock_store::InMemoryAttemptStore::new(),
-        ),
-        mfa_attempt_store: std::sync::Arc::new(
-            infrastructure::repositories::attempt_lock_store::InMemoryAttemptStore::new(),
-        ),
+        portal_attempt_store,
+        mfa_attempt_store,
+        passkey_attempt_store,
+        passkey_begin_attempt_store,
+        // 社内 SSO(SSO_ENABLED=true のときだけ)。設定が足りなければ、AppConfig::from_env で起動が止まっている
+        sso: match &config.sso {
+            Some(s) => {
+                tracing::info!("社内 SSO を有効にしました({})", s.cf.team_domain);
+                Some(std::sync::Arc::new(config::SsoRuntime::new(s)?))
+            }
+            None => None,
+        },
     };
+
+    // 二要素認証の試行の記録のうち、期限切れの行を消す(DEMO-000153 S-1)。5 分ごとに、古い順に 1000 件ずつ(最大 10 回まで続けて)。
+    // 最初の実行は 5 分後(起動の直後は、マイグレーションの適用が終わる前で、テーブルがまだ無いことがある)
+    let purge_pool = state.pool.clone();
+    tokio::spawn(async move {
+        let period = std::time::Duration::from_secs(300);
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        let window = chrono::Duration::minutes(
+            infrastructure::repositories::mfa_attempt_repo::MFA_LOCK_WINDOW_MINUTES,
+        );
+        loop {
+            interval.tick().await;
+            for _ in 0..10 {
+                match infrastructure::repositories::mfa_attempt_repo::purge_expired(&purge_pool, window, 1000).await {
+                    Ok(n) if n >= 1000 => continue,
+                    Ok(_) => break,
+                    Err(e) => {
+                        tracing::error!("二要素認証の試行記録の掃除に失敗: {:?}", e);
+                        break;
+                    }
+                }
+            }
+            // ログインの試行の記録(7日を過ぎた行)も、同じ周期で消す(DEMO-000233 S2-D)
+            if let Err(e) = infrastructure::repositories::login_attempt_repo::purge_expired(&purge_pool, 5000).await {
+                tracing::error!("ログイン試行の記録の掃除に失敗: {:?}", e);
+            }
+            // トークンURLの利用の監査(token_access)のうち 90 日を過ぎた行も、古い順に 5000 件まで消す(DEMO-000233 S2-E)。
+            // 失敗しても本体は止めない(他の種別の行は消さない)
+            if let Err(e) = infrastructure::repositories::auth_repo::purge_expired_token_access(
+                &purge_pool,
+                presentation::middleware::token_guard::EVENT_TOKEN_ACCESS,
+                5000,
+            )
+            .await
+            {
+                tracing::error!("トークンの利用の監査の掃除に失敗: {:?}", e);
+            }
+        }
+    });
 
     // メール取得スケジューラをバックグラウンドで起動（毎時実行）
     let scheduler_pool = state.pool.clone();

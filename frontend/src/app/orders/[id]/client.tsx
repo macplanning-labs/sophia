@@ -84,6 +84,8 @@ export default function OrderDetailPage({
   const order = data?.order;
   const items: OrderItem[] = data?.items ?? [];
   const isDraft = order?.status === "DRAFT";
+  // 送付後(送付済み・承諾済み)の操作
+  const canRequestTimesheet = order?.status === "SENT" || order?.status === "ACCEPTED";
 
   // ── ステータス変更 ──
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
@@ -341,52 +343,50 @@ export default function OrderDetailPage({
               </div>
             ) : null;
           })()}
-          {/* アクションバー — SSR版と同じ順序: 送付, PDF, 注文請書PDF, ステータス変更, 翌月コピー, 編集, 削除 */}
+          {/* アクションバー: 左 = 本線(PDF → 編集 → 送付 → 提出依頼メール)と補助(ステータス変更・翌月コピー)、右 = 例外(訂正再送付・削除)。
+              ボタンは消さず、使えないときは非活性にする(状態でボタンの位置が変わらない) */}
           <div className="flex flex-wrap items-center gap-2 mb-4 p-3 bg-card border border-border rounded-lg">
-            {/* 送付ボタン（DRAFT時のみ） */}
-            {isDraft && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="border-emerald-700/50 text-emerald-400 hover:text-emerald-300 hover:border-emerald-600 gap-1"
-                onClick={openPublishModal}
-              >
-                <Send className="w-3.5 h-3.5" /> 送付
-              </Button>
-            )}
-
-            {/* 訂正再送付ボタン（SENT/ACCEPTED時のみ） */}
-            {(order.status === "SENT" || order.status === "ACCEPTED") && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="border-amber-700/50 text-amber-400 hover:text-amber-300 hover:border-amber-600 gap-1"
-                onClick={() => setConfirmRepublishOpen(true)}
-                disabled={republishMutation.isPending}
-              >
-                <Send className="w-3.5 h-3.5" /> 訂正再送付
-              </Button>
-            )}
-
-            {/* 稼働報告提出依頼（SENT/ACCEPTED時） */}
-            {(order.status === "SENT" || order.status === "ACCEPTED") && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="border-sky-700/50 text-sky-400 hover:text-sky-300 hover:border-sky-600 gap-1"
-                onClick={openRequestTimesheetModal}
-                disabled={requestTimesheetMutation.isPending}
-              >
-                <Mail className="w-3.5 h-3.5" /> 提出依頼メール
-              </Button>
-            )}
-
             <Button variant="outline" size="sm" className="border-border text-foreground gap-1" onClick={handlePdfPreview}>
               <FileDown className="w-3.5 h-3.5" /> 注文書PDF
             </Button>
 
             <Button variant="outline" size="sm" className="border-border text-foreground gap-1" onClick={handleAcceptancePdfPreview}>
               <FileDown className="w-3.5 h-3.5" /> 注文請書PDF
+            </Button>
+
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-border text-foreground gap-1"
+              onClick={() => setEditOpen(true)}
+              disabled={!isDraft}
+              title={!isDraft ? "送付済みの注文書は編集できません。直すときは「訂正再送付」を使います" : undefined}
+            >
+              <Pencil className="w-3.5 h-3.5" /> 編集
+            </Button>
+
+            {/* 送付は一度きり: 送ったあとは、消さずに非活性にする(押した印) */}
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-emerald-700/50 text-emerald-400 hover:text-emerald-300 hover:border-emerald-600 gap-1"
+              onClick={openPublishModal}
+              disabled={!isDraft}
+              title={!isDraft ? "送付済みです" : undefined}
+            >
+              <Send className="w-3.5 h-3.5" /> 送付
+            </Button>
+
+            {/* 稼働報告提出依頼(送付後。何度でも送れるので、送付後は非活性にしない) */}
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-sky-700/50 text-sky-400 hover:text-sky-300 hover:border-sky-600 gap-1"
+              onClick={openRequestTimesheetModal}
+              disabled={!canRequestTimesheet || requestTimesheetMutation.isPending}
+              title={!canRequestTimesheet ? "送付後(承諾前後)に使えます" : undefined}
+            >
+              <Mail className="w-3.5 h-3.5" /> 提出依頼メール
             </Button>
 
             {/* ステータス変更 */}
@@ -424,27 +424,30 @@ export default function OrderDetailPage({
               <Copy className="w-3.5 h-3.5" /> 翌月コピー
             </Button>
 
-            {isDraft && (
+            {/* 例外の操作は、本線から離して右端に置く */}
+            <div className="flex items-center gap-2 ml-auto">
               <Button
                 variant="outline"
                 size="sm"
-                className="border-border text-foreground gap-1"
-                onClick={() => setEditOpen(true)}
+                className="border-amber-700/50 text-amber-400 hover:text-amber-300 hover:border-amber-600 gap-1"
+                onClick={() => setConfirmRepublishOpen(true)}
+                disabled={!canRequestTimesheet || republishMutation.isPending}
+                title={!canRequestTimesheet ? "送付後(承諾前後)に使えます" : "内容を直して、もう一度送ります"}
               >
-                <Pencil className="w-3.5 h-3.5" /> 編集
+                <Send className="w-3.5 h-3.5" /> 訂正再送付
               </Button>
-            )}
 
-            {isDraft && (
               <Button
                 variant="outline"
                 size="sm"
-                className="border-red-700/50 text-red-400 hover:text-red-300 gap-1 ml-auto"
+                className="border-red-700/50 text-red-400 hover:text-red-300 gap-1"
                 onClick={() => setDeleteOpen(true)}
+                disabled={!isDraft}
+                title={!isDraft ? "送付済みの注文書は削除できません" : undefined}
               >
                 <Trash2 className="w-3.5 h-3.5" /> 削除
               </Button>
-            )}
+            </div>
           </div>
 
           {/* 注文書情報 + 金額サマリ — SSR版の2カラムレイアウト */}

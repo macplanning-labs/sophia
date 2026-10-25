@@ -13,6 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ProjectEditModal } from "@/components/projects/ProjectEditModal";
 import { ClientContractEditModal } from "@/components/contracts/client-contract-edit-modal";
 import { PartnerContractEditModal } from "@/components/contracts/partner-contract-edit-modal";
+import { OwnerPanel } from "@/components/org-admin/owner-panel";
 
 type TabKey = "info" | "client" | "partner" | "received" | "orders";
 const TABS: { key: TabKey; label: string }[] = [
@@ -109,6 +110,8 @@ export default function ProjectDetailPage() {
         </div>
         <p className="text-xs text-muted-foreground mt-0.5">{project.project_id} ／ {project.client_name}</p>
       </div>
+
+      {project && <OwnerPanel target={{ project_id: projectId }} subject="案件" />}
 
       <div className="flex gap-1 border-b border-border overflow-x-auto">
         {TABS.map((t) => (

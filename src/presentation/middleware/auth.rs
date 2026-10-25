@@ -83,6 +83,9 @@ pub async fn auth_middleware(
         || path == "/api/v1/mfa/passkey/begin" // パスキーMFA（TOTP版と同じ理由でCookieゲート対象外）
         || path == "/api/v1/mfa/passkey/complete"
         || path == "/api/v1/auth/login"
+        || path == "/api/v1/auth/sso/login" // 社内 SSO ログイン(認証前。ハンドラ自身が Cloudflare Access の JWT を署名検証する)
+        || path == "/api/v1/auth/sso/status" // 社内 SSO が有効か(認証前。真偽だけを返す)
+        || path == "/api/v1/auth/sso/start" // 社内 SSO の入口(認証前。Cloudflare Access の JWT をハンドラ自身が署名検証する)
         || path == "/api/auth/login" // デュアルマウント（廃止予定）
         || path == "/api/v1/auth/logout"
         || path == "/api/auth/logout"
@@ -100,13 +103,6 @@ pub async fn auth_middleware(
         || path.starts_with("/upload/mobile/")
         || path == "/api/v1/peppol/inbound" // 外部Peppolプロバイダーからのwebhook（共有シークレット認証はハンドラ内で実施）
         || path == "/api/peppol/inbound"
-        || path == "/api/v1/webhook/timesheet" // GAS連携webhook（HMAC-SHA256署名検証はハンドラ内で実施）。
-                                                 // Phase7-1調査で判明: このバイパスが元々漏れており、
-                                                 // 外部（GAS）からの直接呼び出しが常に401になっていた既存バグを合わせて修正
-        || path == "/api/webhook/timesheet"
-        || path == "/api/v1/mail/webhook" // GAS連携webhook（HMAC-SHA256署名検証はハンドラ内で実施、品質改善P1-3）。
-                                            // webhook/timesheetと同種の既存バグ（バイパス漏れで常に401）だった
-        || path == "/api/mail/webhook"
         || is_static_asset(&path)
     {
         return next.run(request).await;
@@ -236,6 +232,7 @@ mod tests {
         use crate::infrastructure::repositories::test_support;
 
         test_support::with_rollback(|pool| async move {
+            test_support::ensure_staff_user(&pool, 1).await;
             let (claims, _jti) = auth_jwt::issue_sophia_access_claims(1, "ADMIN", true).unwrap();
             let token = auth_jwt::encode_sophia_claims(&claims, "test-secret-key").unwrap();
 
@@ -312,6 +309,7 @@ mod tests {
                     mfa_verified: true,
                     jti: uuid::Uuid::new_v4().to_string(),
                     token_type: auth_jwt::TOKEN_TYPE_ACCESS.to_string(),
+                    auth_method: None,
                 })
                 .unwrap(),
             };
@@ -333,6 +331,7 @@ mod tests {
         use crate::infrastructure::repositories::test_support;
 
         test_support::with_rollback(|pool| async move {
+            test_support::ensure_staff_user(&pool, 5).await;
             // Set user 5 to inactive
             sqlx::query("UPDATE s_user SET is_active = false WHERE id = 5")
                 .execute(&pool)
@@ -355,6 +354,7 @@ mod tests {
         use crate::infrastructure::repositories::test_support;
 
         test_support::with_rollback(|pool| async move {
+            test_support::ensure_staff_user(&pool, 1).await;
             let pair = auth_jwt::issue_and_encode_token_pair(1, "ADMIN", "test-secret-key").unwrap();
             let jar = CookieJar::new().add(
                 crate::presentation::cookie_util::build_auth_cookie(
@@ -384,6 +384,7 @@ mod tests {
         use chrono::Duration;
 
         test_support::with_rollback(|pool| async move {
+            test_support::ensure_staff_user(&pool, 1).await;
             // Create expired access token
             let now = chrono::Utc::now();
             let past_time = (now - Duration::minutes(5)).timestamp();
@@ -398,6 +399,7 @@ mod tests {
                     mfa_verified: true,
                     jti: uuid::Uuid::new_v4().to_string(),
                     token_type: auth_jwt::TOKEN_TYPE_ACCESS.to_string(),
+                    auth_method: None,
                 })
                 .unwrap(),
             };
@@ -573,11 +575,13 @@ pub async fn resolve_staff_auth(
         match verify_staff_refresh(pool, secret, &refresh_token).await {
             Ok((user, extra)) => {
                 // 3. access のみ再発行
-                match crate::domain::services::auth_jwt::issue_and_encode_access(
+                match crate::domain::services::auth_jwt::issue_and_encode_access_with_method(
                     user.user.id,
                     &extra.role,
                     extra.mfa_verified,
                     secret,
+                    // ログイン方式(SSO)を引き継ぐ。欠けると 30 分後に MFA の登録を求められてしまう
+                    extra.auth_method.as_deref(),
                 ) {
                     Ok(new_access) => {
                         let cookie = crate::presentation::cookie_util::staff_access_cookie(new_access);
@@ -650,7 +654,8 @@ async fn verify_staff_refresh(
 
     // 5. profile + AuthUser
     let profile = fetch_profile(pool, user.id).await;
-    Ok((super::role::AuthUser::from_user(user, profile), extra))
+    let auth_user = super::role::AuthUser::from_user(user, profile).with_sso_login(extra.is_sso());
+    Ok((auth_user, extra))
 }
 
 /// staff/admin用JWTを検証し、AuthUser を構築する。
@@ -707,7 +712,8 @@ pub async fn verify_staff_jwt(
 
     // 5. profile + AuthUser
     let profile = fetch_profile(pool, user.id).await;
-    Ok((super::role::AuthUser::from_user(user, profile), extra))
+    let auth_user = super::role::AuthUser::from_user(user, profile).with_sso_login(extra.is_sso());
+    Ok((auth_user, extra))
 }
 
 /// s_user から is_active=true のユーザーをIDで再取得する（JWT検証用。verify_sessionと同条件）

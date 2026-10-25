@@ -28,7 +28,6 @@ pub struct Partner {
     pub bank_name: String,
     pub bank_branch: String,
     pub account_type: String,
-    pub account_number: String,
     pub account_name: String,
     pub peppol_participant_id: String,
 }

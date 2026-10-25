@@ -318,40 +318,14 @@ fn ro_step_deadline(
     roll_to_business_day(deadline)
 }
 
-/// 支払い/入金期限: payment_condition テキストから算出
+/// 支払い/入金期限: payment_condition テキストから算出(読み方は payment_terms に1本化。DEMO-000200)
 /// 「翌々月15日払い」→ work_end + 2ヶ月の15日
 /// 「翌月末日払い」→ work_end + 1ヶ月の末日
-/// デフォルト: 翌々月15日
+/// 空・読めないもの: 翌月末日(請求書・支払通知の期日、DB の列の既定値と同じ。以前はここだけ翌々月15日だった)
 fn payment_deadline_from_condition(work_end: Option<NaiveDate>, payment_condition: &str, today: NaiveDate) -> NaiveDate {
     let end = work_end.unwrap_or(today);
-
-    // 「X日払い」のパターンを判定（「15日」を先にチェック、「末日」は後で）
-    let pay_day = |cond: &str| -> u32 {
-        // 「15日払い」「１５日払い」→ 15
-        if cond.contains("15日") || cond.contains("１５日") {
-            15
-        } else if cond.contains("末日払") || cond.contains("末払") {
-            0  // 0 = 末日を意味する
-        } else {
-            15  // デフォルト15日
-        }
-    };
-
-    if payment_condition.contains("翌々月") {
-        let (y, m) = add_months(end.year(), end.month(), 2);
-        let day = pay_day(payment_condition);
-        let day = if day == 0 { last_day_of_month(y, m) } else { day };
-        NaiveDate::from_ymd_opt(y, m, day).unwrap_or(today)
-    } else if payment_condition.contains("翌月") {
-        let (y, m) = add_months(end.year(), end.month(), 1);
-        let day = pay_day(payment_condition);
-        let day = if day == 0 { last_day_of_month(y, m) } else { day };
-        NaiveDate::from_ymd_opt(y, m, day).unwrap_or(today)
-    } else {
-        // デフォルト: 翌々月15日
-        let (y, m) = add_months(end.year(), end.month(), 2);
-        NaiveDate::from_ymd_opt(y, m, 15).unwrap_or(today)
-    }
+    let terms = crate::domain::services::payment_terms::parse_or_default(payment_condition);
+    crate::domain::services::payment_terms::due_date(end, &terms)
 }
 
 fn add_months(year: i32, month: u32, add: u32) -> (i32, u32) {
@@ -448,10 +422,22 @@ pub async fn update_purchase_order_status(
 /// 受注ステータス変更 POST /received-orders/{id}/status
 pub async fn update_received_order_status(
     State(pool): State<PgPool>,
-    Extension(_auth_user): Extension<AuthUser>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<crate::domain::authz::Authz>>,
     Path(id): Path<String>,
     Json(body): Json<StatusUpdate>,
 ) -> impl IntoResponse {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order_by_id_or_no(&pool, &id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return (StatusCode::FORBIDDEN, Json(StatusResponse { ok: false, error: Some("この操作の権限がありません".into()) }));
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit, &stamp) {
+        return (StatusCode::FORBIDDEN, Json(StatusResponse { ok: false, error: Some("この操作の権限がありません".into()) }));
+    }
     let valid = RO_STEPS.iter().any(|(s, _)| *s == body.status);
     if !valid {
         return (StatusCode::BAD_REQUEST, Json(StatusResponse {
@@ -601,11 +587,40 @@ pub struct ProjectDashboardQuery {
     pub month: Option<String>,
 }
 
+/// 単価・売上・仕入・利益の金額(`contract.price:view`)を見てよいか(D2)。
+/// 管理者は常に可。それ以外は、ロールでこの権限を持つ人だけ。技術者の直接認証は不可。
+/// 権限の読み込みに失敗したら、見せない側に倒す(ログは残す)。
+pub async fn may_see_contract_prices(pool: &PgPool, auth_user: &AuthUser) -> bool {
+    if auth_user.engineer_id().is_some() {
+        return false;
+    }
+    if auth_user.user.is_staff {
+        return true;
+    }
+    match crate::infrastructure::repositories::authz_repo::load_authz(
+        pool,
+        auth_user.user.id,
+        auth_user.employee_id(),
+        auth_user.user.is_staff,
+    )
+    .await
+    {
+        Ok(a) => a.has_any(crate::domain::authz::Permission::ContractPriceView),
+        Err(e) => {
+            tracing::error!(user_id = auth_user.user.id, "権限情報の読み込みに失敗しました(金額を伏せます): {e:#}");
+            false
+        }
+    }
+}
+
 /// GET /api/dashboard/projects?month=2026-07-01 — プロジェクト別ダッシュボードデータ（JSON）
+///
+/// `contract.price:view` の無い人には、単価・売上・仕入・利益の金額を `null` にして返す(形は変えない。PR 8 の T8-1b)。
 pub async fn api_project_dashboard(
     State(pool): State<PgPool>,
+    Extension(auth_user): Extension<AuthUser>,
     axum::extract::Query(q): axum::extract::Query<ProjectDashboardQuery>,
-) -> Result<Json<Vec<crate::domain::services::project_dashboard::ProjectSummary>>, crate::presentation::api_response::AppError> {
+) -> Result<Json<serde_json::Value>, crate::presentation::api_response::AppError> {
     let today = chrono::Utc::now().date_naive();
     let month_str = q.month.unwrap_or_else(|| format!("{}-{:02}-01", today.year(), today.month()));
     let target_month = NaiveDate::parse_from_str(&month_str, "%Y-%m-%d")
@@ -613,7 +628,11 @@ pub async fn api_project_dashboard(
         .unwrap_or_else(|_| today.with_day(1).unwrap_or(today));
 
     let summaries = crate::domain::services::project_dashboard::list_project_summaries(&pool, target_month).await?;
-    Ok(Json(summaries))
+    let mut value = serde_json::to_value(&summaries)?;
+    if !may_see_contract_prices(&pool, &auth_user).await {
+        crate::domain::authz::redact::redact_contract_prices(&mut value);
+    }
+    Ok(Json(value))
 }
 
 #[cfg(test)]
@@ -785,10 +804,18 @@ mod tests {
     }
 
     #[test]
-    fn payment_deadline_defaults_to_next_next_month_15th_when_unrecognized() {
+    fn payment_deadline_defaults_to_next_month_end_when_empty() {
+        // 請求書・支払通知の期日と同じ既定(翌月末日)にそろえた(DEMO-000200)
         let end = ymd(2026, 5, 20);
         let deadline = payment_deadline_from_condition(Some(end), "", end);
-        assert_eq!(deadline, ymd(2026, 7, 15));
+        assert_eq!(deadline, ymd(2026, 6, 30));
+    }
+
+    #[test]
+    fn payment_deadline_reads_pay_days_other_than_15th() {
+        let end = ymd(2026, 5, 31);
+        assert_eq!(payment_deadline_from_condition(Some(end), "毎月末日締め翌月25日払い", end), ymd(2026, 6, 25));
+        assert_eq!(payment_deadline_from_condition(Some(end), "毎月15日締め翌月末日払い", end), ymd(2026, 6, 30));
     }
 
     // ── po_step_deadline / ro_step_deadline（支払フェーズはbusiness_day未適用のため決定的）──

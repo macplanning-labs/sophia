@@ -1,37 +1,93 @@
 /**
  * sidebar.test.ts
  *
- * サイドバーのナビ構成（請求書への常設導線）の検証。
+ * サイドバーの構成(DEMO-000188: 9項目に整理し、似た画面は上部のタブでまとめる)の検証。
  */
 
 import { describe, it, expect } from "vitest";
 import { buildNavGroups, roleLabel } from "@/components/layout/sidebar";
 
-const flatItems = (isAdmin: boolean) =>
-  buildNavGroups(isAdmin).flatMap((group) => group.items);
+const visibleItems = (isAdmin: boolean) =>
+  buildNavGroups(isAdmin).flatMap((group) => group.items.filter((i) => !i.adminOnly || isAdmin));
+const byLabel = (isAdmin: boolean, label: string) => visibleItems(isAdmin).find((i) => i.label === label);
 
-describe("buildNavGroups", () => {
-  it.each([true, false])("請求書（/invoices）が含まれる（isAdmin=%s）", (isAdmin) => {
-    const item = flatItems(isAdmin).find((i) => i.href === "/invoices");
-    expect(item?.label).toBe("請求書");
+describe("buildNavGroups(管理者)", () => {
+  it("9項目で、グループと並びは合意した案のとおり", () => {
+    const groups = buildNavGroups(true);
+    expect(groups.map((g) => [g.title, g.items.map((i) => i.label)])).toEqual([
+      ["", ["ホーム", "メール"]],
+      ["契約", ["案件", "契約", "要員"]],
+      ["月次", ["勤務表", "月の締め"]],
+      ["社員", ["社員・給与"]],
+      ["", ["設定"]],
+    ]);
+    expect(visibleItems(true)).toHaveLength(9);
   });
 
-  it("請求書は管理者限定ではない（月次確定と同じ一般スタッフ向け）", () => {
-    const item = flatItems(false).find((i) => i.href === "/invoices");
-    expect(item?.adminOnly).toBeUndefined();
+  it("ボタンの行き先は、セクションの最初のタブ", () => {
+    expect(Object.fromEntries(visibleItems(true).map((i) => [i.label, i.href]))).toEqual({
+      "ホーム": "/home",
+      "メール": "/received-emails",
+      "案件": "/projects",
+      "契約": "/assignments",
+      "要員": "/members",
+      "勤務表": "/timesheet-matching",
+      "月の締め": "/status",
+      "社員・給与": "/payroll",
+      "設定": "/users",
+    });
   });
 
-  it("先頭グループで月次確定の直後に請求書が並ぶ", () => {
-    const first = buildNavGroups(true)[0];
-    const settlement = first.items.findIndex((i) => i.href === "/settlement");
-    const invoices = first.items.findIndex((i) => i.href === "/invoices");
-    expect(settlement).toBeGreaterThanOrEqual(0);
-    expect(invoices).toBe(settlement + 1);
+  it("重なっていた項目(勤務表4つ、請求書2つ、月別状況と月次確定)は、サイドバーから消えている", () => {
+    const labels = visibleItems(true).map((i) => i.label);
+    for (const gone of [
+      "ダッシュボード", "月次確定", "請求書", "請求書・支払通知", "月別状況",
+      "稼働報告", "勤務表の取り込み", "稼働報告（自己申告）", "発注契約", "受注契約", "アサイン",
+      "取引先", "Peppolログ", "給与", "社員", "経費", "ユーザー管理", "マスタメンテ",
+    ]) {
+      expect(labels, gone).not.toContain(gone);
+    }
   });
 
   it("href が重複していない", () => {
-    const hrefs = flatItems(true).map((i) => i.href);
+    const hrefs = visibleItems(true).map((i) => i.href);
     expect(new Set(hrefs).size).toBe(hrefs.length);
+  });
+
+  it("セクションのボタンは、そのセクションのどのタブの画面でも選択中になる", () => {
+    const closing = byLabel(true, "月の締め")?.activeWhen;
+    for (const p of ["/status", "/settlement", "/billing", "/invoices/3", "/peppol"]) {
+      expect(closing?.(p), p).toBe(true);
+    }
+    for (const p of ["/", "/timesheets", "/projects"]) {
+      expect(closing?.(p), p).toBe(false);
+    }
+    const home = byLabel(true, "ホーム")?.activeWhen;
+    expect(home?.("/")).toBe(true);
+    expect(home?.("/home")).toBe(true);
+    expect(home?.("/projects")).toBe(false);
+  });
+});
+
+describe("buildNavGroups(一般社員)", () => {
+  it("見えるタブが無い項目(要員)と、管理者専用の項目(メール)は出ない", () => {
+    expect(visibleItems(false).map((i) => i.label)).toEqual([
+      "ホーム", "案件", "契約", "勤務表", "月の締め", "社員・給与", "設定",
+    ]);
+  });
+
+  it("ボタンの行き先は、その人に見える最初のタブ", () => {
+    expect(byLabel(false, "ホーム")?.href).toBe("/");
+    expect(byLabel(false, "契約")?.href).toBe("/client-contracts");
+    expect(byLabel(false, "勤務表")?.href).toBe("/timesheets");
+    expect(byLabel(false, "月の締め")?.href).toBe("/settlement");
+    expect(byLabel(false, "設定")?.href).toBe("/settings/security");
+  });
+
+  it("見える項目が無いグループは出さない", () => {
+    for (const g of buildNavGroups(false)) {
+      expect(g.items.some((i) => !i.adminOnly), g.title).toBe(true);
+    }
   });
 });
 
@@ -48,41 +104,5 @@ describe("roleLabel", () => {
 
   it("取得前は確認中", () => {
     expect(roleLabel(undefined).label).toBe("確認中");
-  });
-});
-
-describe("buildNavGroups（新UI無効時）", () => {
-  it("新UI が無効な場合、buildNavGroups の結果は従来と完全一致する", () => {
-    const groups = buildNavGroups(true);
-
-    // グループ数が5（従来のまま）
-    expect(groups).toHaveLength(5);
-
-    // 第1グループ（タイトルなし）
-    expect(groups[0].title).toBe("");
-    expect(groups[0].items.map((i) => i.label)).toEqual([
-      "ダッシュボード",
-      "案件",
-      "月次確定",
-      "請求書",
-    ]);
-
-    // 第2グループ「契約管理」
-    expect(groups[1].title).toBe("契約管理");
-    expect(groups[1].items.map((i) => i.label)).toEqual([
-      "発注契約",
-      "受注契約",
-    ]);
-
-    // 第3グループ「稼働・タスク」
-    expect(groups[2].title).toBe("稼働・タスク");
-    expect(groups[2].items.map((i) => i.href)).toContain("/timesheet-matching");
-
-    // 第4グループ「給与」
-    expect(groups[3].title).toBe("給与");
-    expect(groups[3].items.map((i) => i.label)).toEqual(["給与", "社員", "経費"]);
-
-    // 第5グループ「設定」
-    expect(groups[4].title).toBe("設定");
   });
 });

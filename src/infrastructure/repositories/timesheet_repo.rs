@@ -6,6 +6,9 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
+use super::stamp_repo;
+use crate::domain::authz::stamp::{OwnerStamp, StampMode};
+
 use crate::domain::models::timesheet::*;
 
 // ── 共通CRUD（マクロ生成）──
@@ -137,13 +140,19 @@ pub async fn upsert_monthly_timesheet_upload(
     daily_data: &serde_json::Value,
     alerts_json: &serde_json::Value,
     status: &str,
+    mode: StampMode,
 ) -> Result<()> {
+    // 担当スタンプ: 契約の案件 → 顧客の順に写す(設計書 §6.6。新規作成のときだけ押す。既存行は変えない)。
+    // 外部(パートナー・トークン)からの提出は AutoImport: 送り手は社内の担当設定を直せないので拒否しない
+    let mut conn = pool.acquire().await?;
+    let stamp = stamp_repo::for_timesheet(&mut conn, Some(client_contract_id), mode).await?;
     sqlx::query(
         r#"INSERT INTO t_monthly_timesheet (
             client_contract_id, target_month, status,
             total_hours, work_days, overtime_hours, night_hours, holiday_hours,
-            original_filename, daily_data, alerts_json, uploaded_at
-        ) VALUES ($1, $2, $11, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+            original_filename, daily_data, alerts_json, uploaded_at,
+            owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $11, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $12, $13)
         ON CONFLICT (client_contract_id, target_month)
         DO UPDATE SET
             total_hours = EXCLUDED.total_hours,
@@ -168,7 +177,9 @@ pub async fn upsert_monthly_timesheet_upload(
     .bind(daily_data)
     .bind(alerts_json)
     .bind(status)
-    .execute(pool)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
@@ -245,7 +256,18 @@ pub async fn find_report_info_for_notification(pool: &PgPool, id: i64) -> Result
            FROM t_monthly_timesheet mt
            LEFT JOIN m_client_contract cc ON cc.id = mt.client_contract_id
            LEFT JOIN m_engineer e ON e.id = cc.engineer_id
-           LEFT JOIN m_partner p ON p.partner_id = e.partner_id
+           -- 取引先(パートナー): 技術者の所属 → 無ければ、その月にかかる発注契約の相手(DEMO-000203)。
+           -- 所属を技術者に登録せず、発注契約だけで結んでいる要員では、以前は名前が取れず「不明」になっていた
+           LEFT JOIN LATERAL (
+               SELECT pc.partner_id
+                 FROM m_partner_contract pc
+                WHERE pc.engineer_id = cc.engineer_id
+                  AND pc.start_date <= (date_trunc('month', mt.target_month) + INTERVAL '1 month - 1 day')::date
+                  AND pc.end_date >= date_trunc('month', mt.target_month)::date
+                ORDER BY pc.start_date DESC
+                LIMIT 1
+           ) pc ON TRUE
+           LEFT JOIN m_partner p ON p.partner_id = COALESCE(NULLIF(e.partner_id, ''), pc.partner_id)
            WHERE mt.id = $1"#
     )
     .bind(id)
@@ -448,8 +470,8 @@ pub struct TimesheetRow {
 }
 
 /// 稼働報告一覧（契約・エンジニア名JOIN済み、最大100件）
-pub async fn list_timesheet_rows(pool: &PgPool) -> Result<Vec<TimesheetRow>> {
-    let rows = sqlx::query_as::<_, TimesheetRow>(
+pub async fn list_timesheet_rows(pool: &PgPool, filter: &crate::domain::authz::list_filter::ListFilter) -> Result<Vec<TimesheetRow>> {
+    let mut qb = sqlx::QueryBuilder::new(
         r#"
         SELECT ts.id, ts.target_month, ts.status, ts.total_hours, ts.work_days,
                CASE WHEN ts.employee_id IS NOT NULL THEN '自己申告' ELSE COALESCE(cc.settlement_type, '—') END AS contract_info,
@@ -459,11 +481,11 @@ pub async fn list_timesheet_rows(pool: &PgPool) -> Result<Vec<TimesheetRow>> {
         LEFT JOIN m_client_contract cc ON cc.id = ts.client_contract_id
         LEFT JOIN m_engineer e ON e.id = cc.engineer_id
         LEFT JOIN m_employee emp ON emp.id = ts.employee_id
-        ORDER BY ts.target_month DESC, ts.id DESC LIMIT 100
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+        WHERE "#,
+    );
+    crate::infrastructure::authz_sql::push_where(&mut qb, filter, "ts.owner_org_unit_id", "ts.owner_employee_id");
+    qb.push(" ORDER BY ts.target_month DESC, ts.id DESC LIMIT 100");
+    let rows = qb.build_query_as::<TimesheetRow>().fetch_all(pool).await?;
     Ok(rows)
 }
 
@@ -668,9 +690,12 @@ pub async fn upsert_self_report_sheet_link(
     target_month: chrono::NaiveDate,
     sheet_file_id: &str,
 ) -> Result<i64> {
+    // 社員自己申告は案件に属さないので、親から写す担当が無い。担当なしで作る
+    // (個人のデータは「本人」の規則で守る。設計書 §6.5・§7.6)
+    let stamp = OwnerStamp::default();
     let id: i64 = sqlx::query_scalar(
-        r#"INSERT INTO t_monthly_timesheet (employee_id, target_month, status, sheet_file_id)
-           VALUES ($1, $2, 'PENDING', $3)
+        r#"INSERT INTO t_monthly_timesheet (employee_id, target_month, status, sheet_file_id, owner_org_unit_id, owner_employee_id)
+           VALUES ($1, $2, 'PENDING', $3, $4, $5)
            ON CONFLICT (employee_id, target_month) WHERE employee_id IS NOT NULL
            DO UPDATE SET sheet_file_id = EXCLUDED.sheet_file_id, updated_at = NOW()
            RETURNING id"#
@@ -678,6 +703,8 @@ pub async fn upsert_self_report_sheet_link(
     .bind(employee_id)
     .bind(target_month)
     .bind(sheet_file_id)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(pool)
     .await?;
     Ok(id)
@@ -697,13 +724,15 @@ pub async fn upsert_self_report(
     holiday_hours: rust_decimal::Decimal,
     uploaded_by_id: i64,
 ) -> Result<i64> {
+    // 社員自己申告は案件に属さないので、担当なしで作る(設計書 §6.5・§7.6)
+    let stamp = OwnerStamp::default();
     let id: i64 = sqlx::query_scalar(
         r#"INSERT INTO t_monthly_timesheet (
                employee_id, target_month, status, daily_data,
                total_hours, work_days, overtime_hours, night_hours, holiday_hours,
-               uploaded_by_id, uploaded_at
+               uploaded_by_id, uploaded_at, owner_org_unit_id, owner_employee_id
            )
-           VALUES ($1, $2, 'UPLOADED', $3, $4, $5, $6, $7, $8, $9, NOW())
+           VALUES ($1, $2, 'UPLOADED', $3, $4, $5, $6, $7, $8, $9, NOW(), $10, $11)
            ON CONFLICT (employee_id, target_month) WHERE employee_id IS NOT NULL
            DO UPDATE SET
                status = 'UPLOADED',
@@ -727,6 +756,8 @@ pub async fn upsert_self_report(
     .bind(night_hours)
     .bind(holiday_hours)
     .bind(uploaded_by_id)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(pool)
     .await?;
     Ok(id)

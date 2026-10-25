@@ -1,8 +1,15 @@
 /// infrastructure/repositories/order_repo.rs — 注文書・受注・支払通知CRUD
 
+use crate::domain::authz::list_filter::ListFilter;
+use crate::infrastructure::authz_sql::push_where;
 use anyhow::Result;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
+
+use super::stamp_repo;
+use super::bank_account_repo;
+use crate::domain::value_objects::account_number::AccountNumber;
+use crate::domain::authz::stamp::StampMode;
 
 use crate::domain::models::partner_contract::*;
 use crate::domain::models::client_contract::*;
@@ -666,24 +673,24 @@ pub async fn received_order_exists_for_contract_month(
 }
 
 /// 発注書ヘッダーを新規作成する（簡易版: create()用）
-pub async fn insert_purchase_order<'e, E>(
-    exec: E,
+pub async fn insert_purchase_order(
+    exec: &mut sqlx::PgConnection,
     order_id: &str,
     partner_id: &str,
     project_id: &str,
     contract_id: i64,
     work_start: chrono::NaiveDate,
     work_end: chrono::NaiveDate,
-) -> Result<()>
-where
-    E: sqlx::PgExecutor<'e>,
-{
+) -> Result<()> {
+    // 担当スタンプ: 案件 → 顧客の順に写す(設計書 §6.6)
+    let stamp = stamp_repo::for_project_child(&mut *exec, project_id, "t_purchase_order", StampMode::Manual).await?;
     sqlx::query(
         r#"
         INSERT INTO t_purchase_order (
             order_id, uuid, status, partner_id, project_id,
-            partner_contract_id, order_date, work_start, work_end
-        ) VALUES ($1, gen_random_uuid(), 'DRAFT', $2, $3, $4, CURRENT_DATE, $5, $6)
+            partner_contract_id, order_date, work_start, work_end,
+            owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, gen_random_uuid(), 'DRAFT', $2, $3, $4, CURRENT_DATE, $5, $6, $7, $8)
         "#
     )
     .bind(order_id)
@@ -692,15 +699,17 @@ where
     .bind(contract_id)
     .bind(work_start)
     .bind(work_end)
-    .execute(exec)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
+    .execute(&mut *exec)
     .await?;
     Ok(())
 }
 
 /// 発注書ヘッダーを新規作成する（ロールフォワード用: 追加項目込み）
 #[allow(clippy::too_many_arguments)]
-pub async fn insert_purchase_order_full<'e, E>(
-    exec: E,
+pub async fn insert_purchase_order_full(
+    exec: &mut sqlx::PgConnection,
     order_id: &str,
     partner_id: &str,
     project_id: &str,
@@ -712,19 +721,18 @@ pub async fn insert_purchase_order_full<'e, E>(
     payment_condition: &str,
     contract_items: &str,
     remarks: &str,
-) -> Result<()>
-where
-    E: sqlx::PgExecutor<'e>,
-{
+) -> Result<()> {
+    // 担当スタンプ: 案件 → 顧客の順に写す(設計書 §6.6)
+    let stamp = stamp_repo::for_project_child(&mut *exec, project_id, "t_purchase_order", StampMode::Manual).await?;
     sqlx::query(
         r#"
         INSERT INTO t_purchase_order (
             order_id, uuid, status, partner_id, project_id,
             partner_contract_id, order_date, work_start, work_end,
             workplace_id, deliverable_text, payment_condition,
-            contract_items, remarks
+            contract_items, remarks, owner_org_unit_id, owner_employee_id
         ) VALUES ($1, gen_random_uuid(), 'DRAFT', $2, $3, $4, CURRENT_DATE, $5, $6,
-                  $7, $8, $9, $10, $11)
+                  $7, $8, $9, $10, $11, $12, $13)
         "#
     )
     .bind(order_id)
@@ -738,7 +746,9 @@ where
     .bind(payment_condition)
     .bind(contract_items)
     .bind(remarks)
-    .execute(exec)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
+    .execute(&mut *exec)
     .await?;
     Ok(())
 }
@@ -864,12 +874,22 @@ pub struct PartnerInvoiceIssuerRow {
     pub bank_name: String,
     pub bank_branch: String,
     pub account_type: String,
-    pub account_number: String,
+    /// 口座番号(復号済み)。`find_partner_invoice_issuer` だけが入れる
+    #[sqlx(skip)]
+    pub account_number: AccountNumber,
     pub account_name: String,
 }
 
-/// パートナー代理請求書の発行者情報を取得する
+/// パートナー代理請求書の発行者情報を取得する（口座番号を復号して入れる）
 pub async fn find_partner_invoice_issuer(pool: &PgPool, partner_id: &str) -> Result<Option<PartnerInvoiceIssuerRow>> {
+    let Some(mut row) = find_partner_invoice_issuer_basic(pool, partner_id).await? else {
+        return Ok(None);
+    };
+    row.account_number = bank_account_repo::read_partner_account(pool, partner_id).await?.unwrap_or_default();
+    Ok(Some(row))
+}
+
+async fn find_partner_invoice_issuer_basic(pool: &PgPool, partner_id: &str) -> Result<Option<PartnerInvoiceIssuerRow>> {
     let row = sqlx::query_as::<_, PartnerInvoiceIssuerRow>(
         r#"SELECT name,
                   COALESCE(postal_code, '') AS postal_code,
@@ -880,7 +900,6 @@ pub async fn find_partner_invoice_issuer(pool: &PgPool, partner_id: &str) -> Res
                   COALESCE(bank_name, '') AS bank_name,
                   COALESCE(bank_branch, '') AS bank_branch,
                   COALESCE(account_type, '普通') AS account_type,
-                  COALESCE(account_number, '') AS account_number,
                   COALESCE(account_name, '') AS account_name
            FROM m_partner WHERE partner_id = $1"#
     )
@@ -1075,8 +1094,8 @@ pub async fn mark_purchase_order_sent(pool: &PgPool, order_id: &str) -> Result<(
 }
 
 /// 発注書一覧（パートナー/ステータスで絞り込み、JSON API用）
-pub async fn list_orders_filtered(pool: &PgPool, partner: &str, status: &str) -> Result<Vec<OrderRow>> {
-    let mut sql = String::from(
+pub async fn list_orders_filtered(pool: &PgPool, partner: &str, status: &str, filter: &ListFilter) -> Result<Vec<OrderRow>> {
+    let mut qb = sqlx::QueryBuilder::new(
         r#"
         SELECT po.order_id, p.name AS partner_name, pr.name AS project_name,
                COALESCE(e.name, e2.name, '') AS engineer_name,
@@ -1090,27 +1109,18 @@ pub async fn list_orders_filtered(pool: &PgPool, partner: &str, status: &str) ->
         LEFT JOIN m_partner_contract pc ON pc.id = po.partner_contract_id
         LEFT JOIN m_engineer e2 ON e2.id = pc.engineer_id
         LEFT JOIN t_purchase_order_item poi ON poi.purchase_order_pk = po.id
-        WHERE 1=1
-        "#
+        WHERE "#,
     );
-
-    let mut params: Vec<String> = Vec::new();
+    push_where(&mut qb, filter, "po.owner_org_unit_id", "po.owner_employee_id");
     if !partner.is_empty() {
-        params.push(partner.to_string());
-        sql.push_str(&format!(" AND po.partner_id = ${}", params.len()));
+        qb.push(" AND po.partner_id = ").push_bind(partner.to_string());
     }
     if !status.is_empty() {
-        params.push(status.to_string());
-        sql.push_str(&format!(" AND po.status = ${}", params.len()));
+        qb.push(" AND po.status = ").push_bind(status.to_string());
     }
-    sql.push_str(" GROUP BY po.order_id, p.name, pr.name, e.name, e2.name ORDER BY po.order_date DESC LIMIT 100");
+    qb.push(" GROUP BY po.order_id, p.name, pr.name, e.name, e2.name ORDER BY po.order_date DESC LIMIT 100");
 
-    let mut q = sqlx::query_as::<_, OrderRow>(&sql);
-    for p in &params {
-        q = q.bind(p);
-    }
-
-    Ok(q.fetch_all(pool).await?)
+    Ok(qb.build_query_as::<OrderRow>().fetch_all(pool).await?)
 }
 
 /// 発注契約フォーム用の有効契約一覧（発注書新規作成画面）
@@ -1243,6 +1253,9 @@ pub async fn list_active_engineers(pool: &PgPool) -> Result<Vec<Engineer>> {
 
 /// 顧客契約登録。作成された契約のidを返す
 pub async fn insert_client_contract(pool: &PgPool, form: &ClientContractForm, is_active: bool) -> Result<i64> {
+    // 担当スタンプ: 案件 → 顧客の順に写す(設計書 §6.6)
+    let mut conn = pool.acquire().await?;
+    let stamp = stamp_repo::for_project_child(&mut conn, &form.project_id, "m_client_contract", StampMode::Manual).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO m_client_contract (
@@ -1251,8 +1264,9 @@ pub async fn insert_client_contract(pool: &PgPool, form: &ClientContractForm, is
             lower_limit_hours, upper_limit_hours, fixed_hours,
             deduction_rate, overtime_rate,
             mid_month_rule, billing_timing, payment_terms,
-            report_deadline_days_before, currency, remarks, is_active
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+            report_deadline_days_before, currency, remarks, is_active,
+            owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
         RETURNING id
         "#
     )
@@ -1275,7 +1289,9 @@ pub async fn insert_client_contract(pool: &PgPool, form: &ClientContractForm, is
     .bind(form.currency.as_deref().unwrap_or("JPY"))
     .bind(form.remarks.as_deref().unwrap_or(""))
     .bind(is_active)
-    .fetch_one(pool)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(id)
 }
@@ -1332,19 +1348,19 @@ pub async fn update_client_contract(pool: &PgPool, id: i64, form: &ClientContrac
 }
 
 /// 顧客契約一覧（案件名・クライアント名・エンジニア名JOIN済み、最大100件）
-pub async fn list_client_contracts_with_names(pool: &PgPool) -> Result<Vec<ClientContractWithNames>> {
-    let rows = sqlx::query_as::<_, ClientContractWithNames>(
+pub async fn list_client_contracts_with_names(pool: &PgPool, filter: &ListFilter) -> Result<Vec<ClientContractWithNames>> {
+    let mut qb = sqlx::QueryBuilder::new(
         r#"
         SELECT cc.*, p.name AS project_name, c.name AS client_name, e.name AS engineer_name
         FROM m_client_contract cc
         JOIN m_project p ON cc.project_id = p.project_id
         JOIN m_client c ON p.client_id = c.id
         JOIN m_engineer e ON cc.engineer_id = e.id
-        ORDER BY cc.id DESC LIMIT 100
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+        WHERE "#,
+    );
+    push_where(&mut qb, filter, "cc.owner_org_unit_id", "cc.owner_employee_id");
+    qb.push(" ORDER BY cc.id DESC LIMIT 100");
+    let rows = qb.build_query_as::<ClientContractWithNames>().fetch_all(pool).await?;
     Ok(rows)
 }
 
@@ -1523,6 +1539,9 @@ pub struct PartnerContractFormInput<'a> {
 
 /// パートナー契約登録。作成された契約のidを返す
 pub async fn insert_partner_contract(pool: &PgPool, f: &PartnerContractFormInput<'_>) -> Result<i64> {
+    // 担当スタンプ: 案件 → 顧客の順に写す(設計書 §6.6)
+    let mut conn = pool.acquire().await?;
+    let stamp = stamp_repo::for_project_child(&mut conn, f.project_id, "m_partner_contract", StampMode::Manual).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO m_partner_contract (
@@ -1535,10 +1554,10 @@ pub async fn insert_partner_contract(pool: &PgPool, f: &PartnerContractFormInput
             order_create_deadline_day, order_approve_deadline_days_before,
             report_upload_deadline_days_before, invoice_create_deadline_day,
             invoice_approve_deadline_day,
-            is_active
+            is_active, owner_org_unit_id, owner_employee_id
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                   $15, $16, $17, $18, $19, $20, $21, $22, $23, $24,
-                  $25, $26, $27, $28, $29, true)
+                  $25, $26, $27, $28, $29, true, $30, $31)
         RETURNING id
         "#
     )
@@ -1554,7 +1573,9 @@ pub async fn insert_partner_contract(pool: &PgPool, f: &PartnerContractFormInput
     .bind(f.order_create_deadline_day).bind(f.order_approve_deadline_days_before)
     .bind(f.report_upload_deadline_days_before).bind(f.invoice_create_deadline_day)
     .bind(f.invoice_approve_deadline_day)
-    .fetch_one(pool)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(id)
 }
@@ -1626,8 +1647,8 @@ pub struct PartnerContractRow {
 }
 
 /// パートナー契約一覧（パートナー名・案件名・エンジニア名JOIN済み、最大100件）
-pub async fn list_partner_contract_rows(pool: &PgPool) -> Result<Vec<PartnerContractRow>> {
-    let rows = sqlx::query_as::<_, PartnerContractRow>(
+pub async fn list_partner_contract_rows(pool: &PgPool, filter: &ListFilter) -> Result<Vec<PartnerContractRow>> {
+    let mut qb = sqlx::QueryBuilder::new(
         r#"
         SELECT pc.id, p.name AS partner_name, pr.name AS project_name,
                e.name AS engineer_name, pc.settlement_type, pc.base_rate,
@@ -1636,11 +1657,11 @@ pub async fn list_partner_contract_rows(pool: &PgPool) -> Result<Vec<PartnerCont
         JOIN m_partner p ON pc.partner_id = p.partner_id
         JOIN m_project pr ON pc.project_id = pr.project_id
         JOIN m_engineer e ON pc.engineer_id = e.id
-        ORDER BY pc.id DESC LIMIT 100
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+        WHERE "#,
+    );
+    push_where(&mut qb, filter, "pc.owner_org_unit_id", "pc.owner_employee_id");
+    qb.push(" ORDER BY pc.id DESC LIMIT 100");
+    let rows = qb.build_query_as::<PartnerContractRow>().fetch_all(pool).await?;
     Ok(rows)
 }
 
@@ -2186,13 +2207,16 @@ pub async fn insert_received_order_basic(
     work_start: chrono::NaiveDate,
     work_end: chrono::NaiveDate,
     project_name: &str,
+    mode: StampMode,
 ) -> Result<i64> {
+    // 担当スタンプ: 顧客から写す(契約がまだ無い。設計書 §6.6)。自動取込(Peppol)は受け皿が最後
+    let stamp = stamp_repo::for_received_order(&mut *tx, Some(client_id), None, mode).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO t_received_order (
             received_order_no, client_id, target_month, work_start, work_end,
-            project_name, status, order_date
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'REGISTERED', CURRENT_DATE)
+            project_name, status, order_date, owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, 'REGISTERED', CURRENT_DATE, $7, $8)
         RETURNING id
         "#
     )
@@ -2202,6 +2226,8 @@ pub async fn insert_received_order_basic(
     .bind(work_start)
     .bind(work_end)
     .bind(project_name)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(&mut *tx)
     .await?;
     Ok(id)
@@ -2220,13 +2246,15 @@ pub async fn insert_received_order_with_contract(
     work_end: chrono::NaiveDate,
     project_name: &str,
 ) -> Result<i64> {
+    // 担当スタンプ: 契約の案件 → 顧客の順に写す(設計書 §6.6)
+    let stamp = stamp_repo::for_received_order(&mut *tx, Some(client_id), Some(client_contract_id), StampMode::Manual).await?;
     let id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO t_received_order (
             received_order_no, client_id, engineer_id, client_contract_id,
             target_month, work_start, work_end,
-            project_name, status, order_date
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'REGISTERED', CURRENT_DATE)
+            project_name, status, order_date, owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'REGISTERED', CURRENT_DATE, $9, $10)
         RETURNING id
         "#
     )
@@ -2238,6 +2266,8 @@ pub async fn insert_received_order_with_contract(
     .bind(work_start)
     .bind(work_end)
     .bind(project_name)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(&mut *tx)
     .await?;
     Ok(id)
@@ -2544,13 +2574,16 @@ pub async fn create_contract_from_received_order(
     let Some(engineer_id) = engineer_id else { return Ok(None) };
 
     let mut tx = pool.begin().await?;
+    // 担当スタンプ: 案件 → 顧客の順に写し、決められなければ自動取込の受け皿(設計書 §6.6・D16)
+    let stamp = stamp_repo::for_project_child(&mut tx, &project_id, "m_client_contract", StampMode::AutoImport).await?;
     // 期間は、注文書の作業期間（対象月を含むように広げる）。条件は、注文書の最初の明細からコピーする
     let contract_id: Option<i64> = sqlx::query_scalar(
         r#"
         INSERT INTO m_client_contract (
             project_id, engineer_id, start_date, end_date,
             settlement_type, lower_limit_hours, upper_limit_hours, fixed_hours,
-            base_rate, deduction_rate, overtime_rate, effort, mid_month_rule, remarks
+            base_rate, deduction_rate, overtime_rate, effort, mid_month_rule, remarks,
+            owner_org_unit_id, owner_employee_id
         )
         SELECT $2, $3,
                LEAST(ro.work_start, ro.target_month),
@@ -2559,7 +2592,8 @@ pub async fn create_contract_from_received_order(
                COALESCE(roi.lower_limit_hours, 140.0), COALESCE(roi.upper_limit_hours, 180.0), roi.fixed_hours,
                COALESCE(roi.unit_price, 0), COALESCE(roi.deduction_rate, 0), COALESCE(roi.overtime_rate, 0),
                COALESCE(roi.man_month, 1.00), COALESCE(NULLIF(roi.mid_month_rule, ''), 'FULL'),
-               '注文書 ' || ro.received_order_no || ' から自動作成'
+               '注文書 ' || ro.received_order_no || ' から自動作成',
+               $4::bigint, $5::bigint
           FROM t_received_order ro
           LEFT JOIN LATERAL (
                SELECT * FROM t_received_order_item WHERE order_id = ro.id ORDER BY id LIMIT 1
@@ -2572,6 +2606,8 @@ pub async fn create_contract_from_received_order(
     .bind(received_order_id)
     .bind(&project_id)
     .bind(engineer_id)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_optional(&mut *tx)
     .await?;
     crate::infrastructure::db_tx::commit_checked(tx).await?;
@@ -2712,8 +2748,8 @@ pub struct ReceivedOrderRow {
 }
 
 /// 受注書一覧（顧客名JOIN済み、最大100件）
-pub async fn list_received_order_rows(pool: &PgPool) -> Result<Vec<ReceivedOrderRow>> {
-    let rows = sqlx::query_as::<_, ReceivedOrderRow>(
+pub async fn list_received_order_rows(pool: &PgPool, filter: &ListFilter) -> Result<Vec<ReceivedOrderRow>> {
+    let mut qb = sqlx::QueryBuilder::new(
         r#"
         SELECT ro.id, COALESCE(ro.received_order_no, '') AS received_order_no,
                ro.target_month, COALESCE(ro.project_name, '') AS project_name,
@@ -2728,13 +2764,17 @@ pub async fn list_received_order_rows(pool: &PgPool) -> Result<Vec<ReceivedOrder
         FROM t_received_order ro
         JOIN m_client c ON c.id = ro.client_id
         LEFT JOIN t_received_order_item roi ON roi.order_id = ro.id
+        WHERE "#,
+    );
+    push_where(&mut qb, filter, "ro.owner_org_unit_id", "ro.owner_employee_id");
+    qb.push(
+        r#"
         GROUP BY ro.id, c.name
         ORDER BY ro.target_month DESC, ro.id DESC
         LIMIT 100
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
+        "#,
+    );
+    let rows = qb.build_query_as::<ReceivedOrderRow>().fetch_all(pool).await?;
     Ok(rows)
 }
 
@@ -2989,14 +3029,17 @@ pub async fn insert_payment_notice(
     tax_amount: i32,
     total: i32,
 ) -> Result<()> {
+    // 担当スタンプ: 発注 → 案件 → 顧客の順に写す(設計書 §6.6)
+    let mut conn = pool.acquire().await?;
+    let stamp = stamp_repo::for_payment_notice(&mut conn, purchase_order_id, StampMode::Manual).await?;
     sqlx::query(
         r#"
         INSERT INTO t_payment_notice (
             notice_id, uuid, purchase_order_id, partner_id, target_month,
             notice_date, payment_due_date, subtotal, tax_amount, total,
-            purchase_order_pk
+            purchase_order_pk, owner_org_unit_id, owner_employee_id
         ) VALUES ($1, gen_random_uuid(), $2, $3, $4, CURRENT_DATE, $5, $6, $7, $8,
-                  (SELECT id FROM t_purchase_order WHERE order_id = $2))
+                  (SELECT id FROM t_purchase_order WHERE order_id = $2), $9, $10)
         "#
     )
     .bind(notice_id)
@@ -3007,7 +3050,9 @@ pub async fn insert_payment_notice(
     .bind(subtotal)
     .bind(tax_amount)
     .bind(total)
-    .execute(pool)
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
+    .execute(&mut *conn)
     .await?;
     Ok(())
 }
@@ -3094,12 +3139,135 @@ pub async fn approve_payment_notice(pool: &PgPool, notice_id: &str, approved_by_
 pub async fn reject_payment_notice(pool: &PgPool, notice_id: &str) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE t_payment_notice SET approval_status = 'REJECTED', approved_by_id = NULL, approved_at = NULL \
-         WHERE notice_id = $1 AND approval_status IN ('PENDING_APPROVAL', 'APPROVED') AND partner_accepted_at IS NULL"
+         WHERE notice_id = $1 AND approval_status IN ('PENDING_APPROVAL', 'APPROVED') AND partner_accepted_at IS NULL \
+         AND mail_sent_at IS NULL"
     )
     .bind(notice_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() > 0)
+}
+
+/// 送った支払通知書の訂正版(新しい版・下書き)を作る(DEMO-000224)。前の版は消さず、差し替え済みとして残る。
+/// 内容と明細は、前の版をそのまま写す。新しい版は、承認待ち・未送信で、新しいリンクを持つ。
+pub async fn revise_payment_notice(
+    pool: &PgPool,
+    notice_id: &str,
+    reason: &str,
+    user_id: i64,
+) -> Result<crate::domain::services::document_revision::RevisionOutcome<String>> {
+    use crate::domain::services::document_revision::{next_revision_number, RevisionOutcome, RevisionState};
+    let mut tx = pool.begin().await?;
+    let row: Option<(i32, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as(
+            "SELECT revision, mail_sent_at, partner_accepted_at, cancelled_at FROM t_payment_notice WHERE notice_id = $1 FOR UPDATE",
+        )
+        .bind(notice_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((revision, sent, accepted, cancelled)) = row else {
+        return Ok(RevisionOutcome::NotFound);
+    };
+    let superseded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM t_payment_notice WHERE supersedes_notice_id = $1)")
+        .bind(notice_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let state = RevisionState::of_notice(sent, accepted, cancelled, superseded);
+    if !state.locked {
+        return Ok(RevisionOutcome::NotSent);
+    }
+    if state.cancelled {
+        return Ok(RevisionOutcome::Cancelled);
+    }
+    if state.superseded {
+        return Ok(RevisionOutcome::Superseded);
+    }
+    let new_id = next_revision_number(notice_id, revision);
+    sqlx::query(
+        r#"INSERT INTO t_payment_notice
+             (notice_id, uuid, purchase_order_id, purchase_order_pk, partner_id, target_month, notice_date, payment_due_date,
+              subtotal, tax_amount, total, remarks, approval_status, approval_requested_at, approval_requested_by_id,
+              owner_org_unit_id, owner_employee_id, revision, supersedes_notice_id, revision_reason)
+           SELECT $2, gen_random_uuid(), purchase_order_id, purchase_order_pk, partner_id, target_month, CURRENT_DATE, payment_due_date,
+                  subtotal, tax_amount, total, remarks, 'PENDING_APPROVAL', NOW(), $4,
+                  owner_org_unit_id, owner_employee_id, revision + 1, notice_id, $3
+             FROM t_payment_notice WHERE notice_id = $1"#,
+    )
+    .bind(notice_id)
+    .bind(&new_id)
+    .bind(reason)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"INSERT INTO t_payment_notice_item
+             (notice_id, partner_contract_id, actual_hours, base_fee, effort, lower_limit_hours, upper_limit_hours,
+              fixed_hours, deduction_rate, overtime_rate, adjustment, amount, tax_rate)
+           SELECT $2, partner_contract_id, actual_hours, base_fee, effort, lower_limit_hours, upper_limit_hours,
+                  fixed_hours, deduction_rate, overtime_rate, adjustment, amount, tax_rate
+             FROM t_payment_notice_item WHERE notice_id = $1 ORDER BY id"#,
+    )
+    .bind(notice_id)
+    .bind(&new_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(RevisionOutcome::Done(new_id))
+}
+
+/// 送った支払通知書を取り消す(DEMO-000224)。書類は消さず、取り消し済みとして残る。理由を残す
+pub async fn cancel_payment_notice(
+    pool: &PgPool,
+    notice_id: &str,
+    reason: &str,
+    user_id: i64,
+) -> Result<crate::domain::services::document_revision::RevisionOutcome<()>> {
+    use crate::domain::services::document_revision::{RevisionOutcome, RevisionState};
+    let mut tx = pool.begin().await?;
+    let row: Option<(Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as("SELECT mail_sent_at, partner_accepted_at, cancelled_at FROM t_payment_notice WHERE notice_id = $1 FOR UPDATE")
+            .bind(notice_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((sent, accepted, cancelled)) = row else {
+        return Ok(RevisionOutcome::NotFound);
+    };
+    let superseded: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM t_payment_notice WHERE supersedes_notice_id = $1)")
+        .bind(notice_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let state = RevisionState::of_notice(sent, accepted, cancelled, superseded);
+    if !state.locked {
+        return Ok(RevisionOutcome::NotSent);
+    }
+    if state.cancelled {
+        return Ok(RevisionOutcome::Cancelled);
+    }
+    if state.superseded {
+        return Ok(RevisionOutcome::Superseded);
+    }
+    sqlx::query("UPDATE t_payment_notice SET cancelled_at = NOW(), cancelled_by_id = $2, cancel_reason = $3, updated_at = NOW() WHERE notice_id = $1")
+        .bind(notice_id)
+        .bind(user_id)
+        .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(RevisionOutcome::Done(()))
+}
+
+/// この支払通知書を差し替えた新しい版(あれば)。(番号, リンク, メールで送ったか, 訂正した理由)
+pub async fn find_superseding_notice(
+    pool: &PgPool,
+    notice_id: &str,
+) -> Result<Option<(String, uuid::Uuid, bool, Option<String>)>> {
+    let row: Option<(String, uuid::Uuid, bool, Option<String>)> = sqlx::query_as(
+        "SELECT notice_id, uuid, (mail_sent_at IS NOT NULL), revision_reason FROM t_payment_notice WHERE supersedes_notice_id = $1",
+    )
+    .bind(notice_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 /// パートナー名を取得する
@@ -3123,9 +3291,10 @@ pub async fn list_payment_notice_items(pool: &PgPool, notice_id: &str) -> Result
 }
 
 /// 自社情報（振込先銀行口座情報含む）を取得する
-pub async fn find_company_bank_info(pool: &PgPool) -> Result<Option<(String, String, String, String, String, String)>> {
+pub async fn find_company_bank_info(pool: &PgPool) -> Result<Option<(String, String, String, String, String)>> {
+    // 口座番号は読まない(支払通知書の PDF は口座番号を使わない)
     let row = sqlx::query_as(
-        "SELECT name, bank_name, bank_branch, account_type, account_number, account_name FROM s_company_info ORDER BY id LIMIT 1"
+        "SELECT name, bank_name, bank_branch, account_type, account_name FROM s_company_info ORDER BY id LIMIT 1"
     )
     .fetch_optional(pool)
     .await?;
@@ -3151,32 +3320,38 @@ pub struct NoticeRow {
     pub target_month: chrono::NaiveDate,
     pub total: i32,
     pub confirmed: bool,
+    /// 相手にメールで送ったか(送ったあとは、削除・書き換えをしない。DEMO-000223)
+    pub sent: bool,
     pub notice_date: chrono::NaiveDate,
     pub purchase_order_id: String,
+    /// 版(訂正版を作るたびに増える。DEMO-000224)
+    pub revision: i32,
+    /// 取り消し済み
+    pub cancelled: bool,
+    /// 新しい版に差し替え済み
+    pub superseded: bool,
 }
 
 /// 支払通知書一覧（パートナー名JOIN済み、任意でpartner_idフィルタ、最大100件）
-pub async fn list_notice_rows(pool: &PgPool, partner: Option<&str>) -> Result<Vec<NoticeRow>> {
-    let mut sql = String::from(
+pub async fn list_notice_rows(pool: &PgPool, partner: Option<&str>, filter: &ListFilter) -> Result<Vec<NoticeRow>> {
+    let mut qb = sqlx::QueryBuilder::new(
         r#"
         SELECT pn.notice_id, p.name AS partner_name, pn.target_month,
-               pn.total, (pn.partner_accepted_at IS NOT NULL) AS confirmed, pn.notice_date,
-               pn.purchase_order_id
+               pn.total, (pn.partner_accepted_at IS NOT NULL) AS confirmed,
+               (pn.mail_sent_at IS NOT NULL) AS sent, pn.notice_date,
+               pn.purchase_order_id, pn.revision,
+               (pn.cancelled_at IS NOT NULL) AS cancelled,
+               EXISTS(SELECT 1 FROM t_payment_notice nx WHERE nx.supersedes_notice_id = pn.notice_id) AS superseded
         FROM t_payment_notice pn
         JOIN m_partner p ON pn.partner_id = p.partner_id
-        WHERE 1=1
-        "#
+        WHERE "#,
     );
-    if partner.is_some() {
-        sql.push_str(" AND pn.partner_id = $1");
-    }
-    sql.push_str(" ORDER BY pn.created_at DESC LIMIT 100");
-
-    let mut query = sqlx::query_as::<_, NoticeRow>(&sql);
+    push_where(&mut qb, filter, "pn.owner_org_unit_id", "pn.owner_employee_id");
     if let Some(p) = partner {
-        query = query.bind(p);
+        qb.push(" AND pn.partner_id = ").push_bind(p.to_string());
     }
-    Ok(query.fetch_all(pool).await?)
+    qb.push(" ORDER BY pn.created_at DESC LIMIT 100");
+    Ok(qb.build_query_as::<NoticeRow>().fetch_all(pool).await?)
 }
 
 /// 受注書ヘッダー部分更新（JSON API用）の対象フィールド。全てOptionで、Someのものだけ更新する
@@ -3333,6 +3508,8 @@ pub async fn insert_rollforward_received_order(
     invoice_to_email: Option<&str>,
     invoice_cc_emails: Option<&str>,
 ) -> Result<i64> {
+    // 担当スタンプ: 契約の案件 → 顧客の順に写す(設計書 §6.6)
+    let stamp = stamp_repo::for_received_order(&mut *tx, Some(client_id), client_contract_id, StampMode::Manual).await?;
     let new_id: i64 = sqlx::query_scalar(
         r#"
         INSERT INTO t_received_order (
@@ -3340,8 +3517,9 @@ pub async fn insert_rollforward_received_order(
             client_order_number, target_month,
             work_start, work_end, project_name, status,
             is_recurring, parent_order_id, order_date, remarks,
-            report_to_email, report_cc_emails, invoice_to_email, invoice_cc_emails
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'REGISTERED', $10, $11, CURRENT_DATE, $12, $13, $14, $15, $16)
+            report_to_email, report_cc_emails, invoice_to_email, invoice_cc_emails,
+            owner_org_unit_id, owner_employee_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'REGISTERED', $10, $11, CURRENT_DATE, $12, $13, $14, $15, $16, $17, $18)
         RETURNING id
         "#
     )
@@ -3349,7 +3527,7 @@ pub async fn insert_rollforward_received_order(
     .bind(client_id)
     .bind(engineer_id)
     .bind(client_contract_id)
-    .bind(client_order_number)
+    .bind(client_order_number.unwrap_or(""))
     .bind(target_month)
     .bind(target_month)
     .bind(work_end)
@@ -3357,10 +3535,12 @@ pub async fn insert_rollforward_received_order(
     .bind(is_recurring)
     .bind(parent_order_id)
     .bind(remarks)
-    .bind(report_to_email)
-    .bind(report_cc_emails)
-    .bind(invoice_to_email)
-    .bind(invoice_cc_emails)
+    .bind(report_to_email.unwrap_or(""))
+    .bind(report_cc_emails.unwrap_or(""))
+    .bind(invoice_to_email.unwrap_or(""))
+    .bind(invoice_cc_emails.unwrap_or(""))
+    .bind(stamp.org_unit_id)
+    .bind(stamp.employee_id)
     .fetch_one(&mut *tx)
     .await?;
     Ok(new_id)

@@ -28,11 +28,11 @@ pub use mail::*;
 pub use pdf::*;
 pub use api::*;
 
-use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 use crate::infrastructure::repositories::billing_repo;
 
-/// s_company_info テーブルからPDF用データを取得する
-async fn get_company_info(pool: &PgPool) -> billing_repo::CompanyInvoiceInfo {
-    billing_repo::find_company_invoice_info(pool).await.log_err().ok().flatten().unwrap_or_default()
+/// s_company_info テーブルからPDF用データを取得する(口座番号を復号して入れる)。
+/// 読めないとき(復号の失敗を含む)は空で代用せず Err を返す。空の振込先の請求書を出さないため
+async fn get_company_info(pool: &PgPool) -> anyhow::Result<billing_repo::CompanyInvoiceInfo> {
+    Ok(billing_repo::find_company_invoice_info(pool).await?.unwrap_or_default())
 }

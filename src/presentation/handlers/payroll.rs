@@ -18,8 +18,10 @@ use crate::infrastructure::db_tx::LogErr;
 use chrono::Datelike;
 use sqlx::PgPool;
 
+use crate::domain::authz::Authz;
 use crate::domain::models::payroll::{PayrollCalcForm, PayrollWithEmployee};
 use crate::domain::services::payroll_calculator::PayrollCalculator;
+use crate::domain::services::payroll_scope::{payroll_scope, PayrollScope};
 use crate::infrastructure::repositories::{paid_leave_repo, payroll_repo};
 use crate::presentation::middleware::role::AuthUser;
 
@@ -165,16 +167,27 @@ pub struct PayrollApiResponse {
 pub async fn api_index(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Query(filter): Query<PayrollFilter>,
 ) -> axum::Json<PayrollApiResponse> {
     let month = filter.month.unwrap_or_default();
 
-    // 一般社員は自分自身の給与データのみ閲覧可能（can_view_all_payroll権限者は全件）
-    let own_employee_id: Option<i64> = if auth_user.can_view_all_payroll() { None } else { auth_user.employee_id() };
-
-    let payrolls = payroll_repo::list_payrolls_filtered(&pool, &month, own_employee_id)
-        .await
-        .unwrap_or_else(|e| { tracing::warn!("payroll api: {:?}", e); vec![] });
+    // 閲覧範囲: 全件権限者は全件、それ以外は本人分のみ、社員紐付けも無ければ対象なし（0件）
+    let payrolls = match payroll_scope(auth_user.can_see_all_payroll(authz.as_ref().map(|e| &e.0)), auth_user.employee_id()) {
+        PayrollScope::All => payroll_repo::list_payrolls_filtered(&pool, &month, None)
+            .await
+            .unwrap_or_else(|e| { tracing::warn!("payroll api: {:?}", e); vec![] }),
+        PayrollScope::Own(e) => payroll_repo::list_payrolls_filtered(&pool, &month, Some(e))
+            .await
+            .unwrap_or_else(|e| { tracing::warn!("payroll api: {:?}", e); vec![] }),
+        PayrollScope::Nothing => {
+            tracing::warn!("[給与一覧] 処理=閲覧範囲の判定 結果=対象なし 影響=0件で返却 | user_id={}", auth_user.user.id);
+            return axum::Json(PayrollApiResponse {
+                payrolls: vec![],
+                summary: PayrollSummary { total_count: 0, total_gross: 0, total_deduction: 0, total_net: 0 },
+            });
+        }
+    };
 
     let summary = PayrollSummary {
         total_count: payrolls.len() as i64,
@@ -190,14 +203,15 @@ pub async fn api_index(
 pub async fn api_detail(
     State(pool): State<PgPool>,
     Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     let pay = payroll_repo::find_payroll(&pool, id).await.log_err().ok().flatten();
 
     match pay {
         Some(pay) => {
-            // 一般社員は自分自身の給与明細のみ閲覧可能（can_view_all_payroll権限者は全件）
-            if !auth_user.can_view_all_payroll() && auth_user.employee_id() != Some(pay.employee_id) {
+            // 一般社員は自分自身の給与明細のみ閲覧可能（管理者・給与の全件閲覧スイッチ・ロールの payroll.slip:view 保持者は全件）
+            if !auth_user.can_see_all_payroll(authz.as_ref().map(|e| &e.0)) && auth_user.employee_id() != Some(pay.employee_id) {
                 return (axum::http::StatusCode::FORBIDDEN,
                     axum::Json(serde_json::json!({"error": "他の社員の給与明細は閲覧できません"}))).into_response();
             }
@@ -205,7 +219,7 @@ pub async fn api_detail(
             let employee_name = payroll_repo::find_employee_full_name(&pool, pay.employee_id).await.log_err().unwrap_or_default();
             let employee_code = payroll_repo::find_employee(&pool, pay.employee_id).await.log_err().ok().flatten()
                 .map(|e| e.employee_id).unwrap_or_default();
-            let company_name = crate::infrastructure::repositories::company_info_repo::get_company_info(&pool).await.log_err().ok().flatten()
+            let company_name = crate::infrastructure::repositories::company_info_repo::get_company_info_basic(&pool).await.log_err().ok().flatten()
                 .map(|c| c.name).unwrap_or_default();
             let nearest_expiring = paid_leave_repo::nearest_expiring_grant(&pool, pay.employee_id).await.log_err().ok().flatten();
 

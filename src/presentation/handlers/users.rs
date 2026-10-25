@@ -10,14 +10,16 @@
 /// - POST /users/{id}/toggle-active — アクティブ切替
 
 use axum::{
+    body::Bytes,
     extract::{Path, State},
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse, Redirect, Response},
     Extension, Form,
 };
 use crate::infrastructure::db_tx::LogErr;
 use sqlx::PgPool;
 
 use crate::infrastructure::repositories::user_repo::{self, UserRow};
+use crate::presentation::handlers::org_admin;
 use crate::presentation::middleware::role::AuthUser;
 use crate::domain::services::password_policy;
 use crate::infrastructure::repositories::auth_repo;
@@ -120,9 +122,10 @@ pub async fn update(
 /// POST /users/{id}/toggle-active — アクティブ切替
 pub async fn toggle_active(
     State(pool): State<PgPool>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    if let Err(e) = user_repo::toggle_active(&pool, id).await {
+    if let Err(e) = user_repo::toggle_active_with_cleanup(&pool, id, auth_user.user.id).await {
         tracing::error!("DB error: {:?}", e);
     }
 
@@ -272,16 +275,44 @@ pub async fn api_update(
 }
 
 /// POST /api/users/{id}/toggle — 有効/無効切替（JSON）
+///
+/// 無効にしたときは、そのユーザーの組織・ロールの割り当てもすべて外す(同じトランザクション)。
+/// 外した割り当ては `removed_assignments` で返す。
+///
+/// 無効にするユーザーに結びついた社員が担当のデータを持つときは、本文 `{"transfer_to": {"org_unit_id", "employee_id"}}`
+/// で引き継ぎ先を指定する必要がある(無ければ409で件数を返し、何も変えない。D15)。本文は任意で、担当データが無ければ従来どおり本文なしでよい。
 pub async fn api_toggle_active(
     State(pool): State<PgPool>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<i64>,
-) -> impl IntoResponse {
-    let result = user_repo::toggle_active_returning(&pool, id).await;
-
-    match result {
-        Ok(is_active) => axum::Json(serde_json::json!({"success": true, "is_active": is_active})).into_response(),
-        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({"error": format!("{e}")}))).into_response(),
+    body: Bytes,
+) -> Response {
+    let transfer_to = match org_admin::transfer::parse_deactivate_body(&body) {
+        Ok(t) => t,
+        Err(e) => return e.into_response(),
+    };
+    match org_admin::transfer::toggle_user(&pool, auth_user.user.id, id, transfer_to.as_ref()).await {
+        Ok(Some((is_active, removed, moved))) => {
+            if !removed.is_empty() {
+                tracing::info!("ユーザー無効化に伴い割り当てを削除: user_id={} 件数={}", id, removed.len());
+            }
+            let mut body = serde_json::json!({
+                "success": true,
+                "is_active": is_active,
+                "removed_assignments": removed,
+            });
+            if let Some(updated) = moved {
+                body["transferred"] = serde_json::json!({ "updated": updated, "total": updated.iter().map(|c| c.count).sum::<i64>() });
+            }
+            if is_active {
+                // 再有効化では、無効化のときに外した割り当ては戻らないことを知らせる。
+                body["note"] = serde_json::json!("無効にしたときに外した組織・ロールの割り当ては、自動では戻りません。必要なら「組織・ロール」画面で割り当て直してください。");
+            }
+            axum::Json(body).into_response()
+        }
+        Ok(None) => (axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"error": "ユーザーが見つかりません"}))).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -340,10 +371,10 @@ pub async fn api_delete(
             axum::Json(serde_json::json!({"error": "自分自身のアカウントは削除できません"}))).into_response();
     }
 
-    match user_repo::delete_user(&pool, id).await {
-        Ok(n) if n > 0 => {
-            tracing::info!("ユーザー削除: id={}", id);
-            axum::Json(serde_json::json!({"success": true})).into_response()
+    match user_repo::delete_user_with_cleanup(&pool, id, auth_user.user.id).await {
+        Ok((n, removed)) if n > 0 => {
+            tracing::info!("ユーザー削除: id={} 外した割り当て={}", id, removed.len());
+            axum::Json(serde_json::json!({"success": true, "removed_assignments": removed})).into_response()
         }
         Ok(_) => (axum::http::StatusCode::NOT_FOUND,
             axum::Json(serde_json::json!({"error": "ユーザーが見つかりません"}))).into_response(),

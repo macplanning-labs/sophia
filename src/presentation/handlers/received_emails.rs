@@ -43,6 +43,19 @@ pub async fn import(
 /// GET /api/received-emails
 pub async fn api_index(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Query(params): Query<FilterParams>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::MailReceivedView) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_index_inner(State(pool), Query(params)).await)
+}
+
+async fn api_index_inner(
+    State(pool): State<PgPool>,
     Query(params): Query<FilterParams>,
 ) -> impl IntoResponse {
     let filter_status = params.status.unwrap_or_default();
@@ -55,6 +68,19 @@ pub async fn api_index(
 /// POST /api/received-emails/{id}/import
 pub async fn api_import(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+) -> axum::response::Response {
+    // 担当スタンプを持たないデータ。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::MailReceivedEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    api_import_inner(State(pool), Path(id)).await.into_response()
+}
+
+async fn api_import_inner(
+    State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
     let rows = received_email_repo::mark_imported(&pool, id).await?;
@@ -63,6 +89,19 @@ pub async fn api_import(
 
 /// POST /api/received-emails/{id}/resolve — 「要確認」フラグを手動で解除する
 pub async fn api_resolve(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+) -> axum::response::Response {
+    // 担当スタンプを持たないデータ。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::MailReceivedEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    api_resolve_inner(State(pool), Path(id)).await.into_response()
+}
+
+async fn api_resolve_inner(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
@@ -82,6 +121,19 @@ pub async fn api_resolve(
 
 /// DELETE /api/received-emails/{id} — 不要なメールをDBから削除する
 pub async fn api_delete(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+) -> axum::response::Response {
+    // 担当スタンプを持たないデータ。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::MailReceivedEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    api_delete_inner(State(pool), Path(id)).await.into_response()
+}
+
+async fn api_delete_inner(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {

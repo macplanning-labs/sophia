@@ -4,18 +4,28 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import {
-  Gauge, CalendarCheck, FileText, FileCheck,
-  Clock, CalendarClock,
-  Calculator, UserCircle, ReceiptText, Users, ShieldCheck, KeyRound,
-  Database, Moon, Sun, LogOut, Mail, Menu, X, Briefcase, Globe, Receipt, FileInput,
+  Home, Mail, Briefcase, FileText, Building2, Clock, CalendarCheck, Calculator, Settings,
+  Moon, Sun, LogOut, Menu, X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 import type { CurrentUser } from "@/lib/api";
 import { isChromeHidden } from "@/lib/layout-paths";
-import { useUiV2 } from "@/lib/useUiV2";
-import { visibleNavV2 } from "@/lib/nav-v2";
 import { handleLogout } from "@/lib/auth-actions";
+import {
+  CLOSING_SECTION,
+  CONTRACTS_SECTION,
+  HOME_SECTION,
+  MAIL_SECTION,
+  PARTIES_SECTION,
+  SETTINGS_SECTION,
+  STAFF_SECTION,
+  TIMESHEETS_SECTION,
+  isInSection,
+  landingHref,
+  visibleTabs,
+  type Section,
+} from "@/lib/section-tabs";
 
 interface NavItem {
   label: string;
@@ -23,6 +33,10 @@ interface NavItem {
   icon: React.ElementType;
   /** true の場合、Admin ロールのユーザーにのみ表示する */
   adminOnly?: boolean;
+  /** 選択中の判定を、href の前方一致ではなく、この関数で行う(セクション: タブ配下のすべての画面で選択中にする) */
+  activeWhen?: (pathname: string) => boolean;
+  /** セクション(上部のタブで画面を切り替える)のボタンのとき、そのセクション(⌘K の検索で各タブの画面を出すのに使う) */
+  section?: Section;
 }
 
 interface NavGroup {
@@ -30,57 +44,62 @@ interface NavGroup {
   items: NavItem[];
 }
 
+/**
+ * セクション(上部のタブで画面を切り替える)のボタン。行き先は、そのユーザーに見える最初のタブ。
+ * 見えるタブが1つも無ければ、ボタンを出さない(null)。
+ */
+function sectionItem(section: Section, icon: React.ElementType, isAdmin: boolean): NavItem | null {
+  if (visibleTabs(section, isAdmin).length === 0) return null;
+  return {
+    label: section.label,
+    href: landingHref(section, isAdmin),
+    icon,
+    activeWhen: (pathname) => isInSection(section, pathname),
+    section,
+  };
+}
+
+/**
+ * サイドバーの構成(DEMO-000188、2026-10-09 佐藤さん了承)。
+ * 似た画面は1つのボタンにまとめ、押すと上部のタブ(SectionTabs)で切り替える。URLは従来のまま。
+ * 新UIと旧メニューを並べていたのをやめ、1つのメニューにした(新UIの切り替えは廃止)。
+ */
 export function buildNavGroups(isAdmin: boolean): NavGroup[] {
-  return [
+  const groups: NavGroup[] = [
     {
       title: "",
       items: [
-        { label: "ダッシュボード", href: "/", icon: Gauge },
+        sectionItem(HOME_SECTION, Home, isAdmin),
+        sectionItem(MAIL_SECTION, Mail, isAdmin),
+      ].filter((i): i is NavItem => i !== null),
+    },
+    {
+      title: "契約",
+      items: [
         { label: "案件", href: "/projects", icon: Briefcase },
-        { label: "月次確定", href: "/settlement", icon: CalendarCheck },
-        { label: "請求書", href: "/invoices", icon: Receipt },
-      ],
+        sectionItem(CONTRACTS_SECTION, FileText, isAdmin),
+        sectionItem(PARTIES_SECTION, Building2, isAdmin),
+      ].filter((i): i is NavItem => i !== null),
     },
     {
-      title: "契約管理",
+      title: "月次",
       items: [
-        { label: "発注契約", href: "/partner-contracts", icon: FileText },
-        { label: "受注契約", href: "/client-contracts", icon: FileCheck },
-      ],
+        sectionItem(TIMESHEETS_SECTION, Clock, isAdmin),
+        sectionItem(CLOSING_SECTION, CalendarCheck, isAdmin),
+      ].filter((i): i is NavItem => i !== null),
     },
     {
-      title: "稼働・タスク",
-      items: [
-        { label: "稼働報告", href: "/timesheets", icon: Clock },
-        { label: "勤務表の取り込み", href: "/timesheet-matching", icon: FileInput, adminOnly: true },
-        { label: "稼働報告（自己申告）", href: "/my-timesheet", icon: CalendarClock },
-        // { label: "タスク", href: "/tasks", icon: CheckSquare }, // レビュー#6: 月次確定と重複のため非表示
-        { label: "受信メール", href: "/received-emails", icon: Mail, adminOnly: true },
-        { label: "Peppolログ", href: "/peppol", icon: Globe, adminOnly: true },
-      ],
+      // 給与・経費は、一般社員が開いてもサーバ側で本人の分だけが返る
+      title: "社員",
+      items: [sectionItem(STAFF_SECTION, Calculator, isAdmin)].filter((i): i is NavItem => i !== null),
     },
     {
-      title: "給与",
-      items: [
-        // メニュー文言はロールに関わらず「給与」で統一。
-        // 表示先の /payroll は同じだが、バックエンド側(api_index)で
-        // Employeeロールの場合は自分自身のemployee_idの行のみが返るようフィルタ済みなので、
-        // 一般社員が開いても実際に見えるのは自分の給与データのみ。
-        { label: "給与", href: "/payroll", icon: Calculator },
-        { label: "社員", href: "/employees", icon: UserCircle },
-        { label: "経費", href: "/expenses", icon: ReceiptText },
-      ],
-    },
-    {
-      title: "設定",
-      items: [
-        { label: "ユーザー管理", href: "/users", icon: Users, adminOnly: true },
-        { label: "APIキー", href: "/settings/api-keys", icon: KeyRound, adminOnly: true },
-        { label: "セキュリティ", href: "/settings/security", icon: ShieldCheck },
-        { label: "マスタメンテ", href: "/masters", icon: Database, adminOnly: true },
-      ],
+      // ボタンと同じ名前の見出しは付けない(DEMO-000184)
+      title: "",
+      items: [sectionItem(SETTINGS_SECTION, Settings, isAdmin)].filter((i): i is NavItem => i !== null),
     },
   ];
+  return groups.filter((g) => g.items.some((i) => !i.adminOnly || isAdmin));
 }
 
 /** ログイン中アカウントの権限表示（サイドバー下部）。管理者専用ボタンが出ない理由を本人が確認できるようにする */
@@ -103,11 +122,7 @@ export function Sidebar() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [desktopCollapsed, setDesktopCollapsed] = useState(false);
   const { isAdmin, user, isLoading: userLoading, isError: userError } = useCurrentUser();
-  const { enabled: uiV2Enabled, setEnabled: setUiV2Enabled } = useUiV2();
   const navGroups = buildNavGroups(isAdmin);
-
-  // 【決定】§1-6: 新UI で見える項目（ready: true かつ adminOnly に従う）
-  const visibleV2Items = visibleNavV2(isAdmin);
 
   useEffect(() => {
     const saved = localStorage.getItem("sophia-theme") as "dark" | "light" | null;
@@ -136,6 +151,7 @@ export function Sidebar() {
 
   const isActive = (href: string) =>
     href === "/" ? pathname === "/" : pathname.startsWith(href);
+  const isItemActive = (item: NavItem) => (item.activeWhen ? item.activeWhen(pathname) : isActive(item.href));
 
   return (
     <>
@@ -196,33 +212,6 @@ export function Sidebar() {
 
       {/* ナビゲーション */}
       <nav className="flex-1 py-2 px-2 space-y-1">
-        {/* 【決定】§1-6: 新UI が有効かつ表示対象がある場合、先頭に「新UI」グループを追加 */}
-        {uiV2Enabled && visibleV2Items.length > 0 && (
-          <div>
-            <p className="text-[11px] text-muted-foreground uppercase tracking-wider px-3 pt-4 pb-1 font-medium">
-              新UI
-            </p>
-            {visibleV2Items.map((item) => {
-              const Icon = typeof item.icon === "string" ? undefined : item.icon;
-              const active = isActive(item.href);
-              return (
-                <Link
-                  key={item.key}
-                  href={item.href}
-                  className={cn(
-                    "flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-all duration-150",
-                    active
-                      ? "bg-sidebar-primary/10 text-sidebar-primary font-semibold border-r-[3px] border-sidebar-primary"
-                      : "text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
-                  )}
-                >
-                  {Icon && <Icon className="w-4 h-4 shrink-0" />}
-                  {item.label}
-                </Link>
-              );
-            })}
-          </div>
-        )}
         {navGroups.map((group, gi) => (
           <div key={gi}>
             {group.title && (
@@ -232,7 +221,7 @@ export function Sidebar() {
             )}
             {group.items.filter((item) => !item.adminOnly || isAdmin).map((item) => {
               const Icon = item.icon;
-              const active = isActive(item.href);
+              const active = isItemActive(item);
               return (
                 <Link
                   key={item.href}
@@ -294,18 +283,6 @@ export function Sidebar() {
             </>
           )}
         </button>
-        {/* 【決定】§1-6: visibleNavV2(isAdmin) が空でないときのみ新UI切替スイッチを表示 */}
-        {visibleV2Items.length > 0 && (
-          <button
-            onClick={() => setUiV2Enabled(!uiV2Enabled)}
-            className="flex items-center gap-2 w-full px-3 py-2 rounded-md text-sm text-muted-foreground hover:text-foreground hover:bg-sidebar-accent transition-colors"
-          >
-            <span className="inline-flex items-center w-4 h-4">
-              {uiV2Enabled ? "✓" : " "}
-            </span>
-            新UI
-          </button>
-        )}
         <button
           onClick={handleLogout}
           className="flex items-center gap-2 w-full px-3 py-2 rounded-md text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 transition-colors"

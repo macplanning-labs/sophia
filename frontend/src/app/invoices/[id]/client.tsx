@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { fetchInvoiceDetail, fetchInvoiceEmailPreview, approveInvoice, rejectInvoice, sendInvoiceMail, sendInvoicePeppol, downloadBlob, apiPut } from "@/lib/api";
+import { fetchInvoiceDetail, fetchInvoiceEmailPreview, approveInvoice, rejectInvoice, sendInvoiceMail, sendInvoicePeppol, fetchPeppolStatus, reviseInvoice, cancelInvoice, downloadBlob, apiPut } from "@/lib/api";
 import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { FormModal, FormField, FormInput, FormTextarea } from "@/components/ui/form-modal";
@@ -11,6 +11,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { getStatus } from "@/lib/status";
 import { Button } from "@/components/ui/button";
+import {
+  RevisionBadges,
+  RevisionBanners,
+  ReasonModal,
+  isCurrentRevision,
+  isLocked,
+  revisionLabel,
+  type RevisionView,
+} from "@/components/document-revision";
 import { FileText, Download, X, Send, Globe } from "lucide-react";
 import { toast } from "sonner";
 import { useDynamicId } from "@/lib/utils";
@@ -80,6 +89,9 @@ export default function InvoiceDetailPage({
     },
     onError: (e: Error) => toast.error(`差し戻しに失敗しました: ${e.message}`),
   });
+
+  const { data: peppolStatus } = useQuery({ queryKey: ["peppol-status"], queryFn: fetchPeppolStatus, staleTime: 60_000 });
+  const peppolConfigured = peppolStatus?.configured === true;
 
   const peppolSendMut = useMutation({
     mutationFn: () => sendInvoicePeppol(id),
@@ -177,29 +189,80 @@ export default function InvoiceDetailPage({
   const items = data?.items ?? [];
   const status = inv?.status;
 
+  // 版・取り消し(DEMO-000224)。生きている版(取り消し済みでも、差し替え済みでもない)だけが操作できる
+  const rev: RevisionView | null = inv
+    ? {
+        revision: inv.revision ?? 1,
+        supersedesId: inv.supersedes_invoice_id != null ? String(inv.supersedes_invoice_id) : null,
+        revisionReason: inv.revision_reason ?? null,
+        cancelledAt: inv.cancelled_at ?? null,
+        cancelReason: inv.cancel_reason ?? null,
+        supersededBy: data?.superseded_by
+          ? { id: String(data.superseded_by.id), sent: !!data.superseded_by.sent, reason: data.superseded_by.reason ?? null }
+          : null,
+      }
+    : null;
+  const current = rev ? isCurrentRevision(rev) : true;
+  const locked = isLocked(inv?.sent_at, inv?.client_accepted_at);
+  const canRevise = locked && current;
+  const canEdit = current && !inv?.client_accepted_at && !inv?.sent_at;
+  const canApprove = current && (status === "PENDING_APPROVAL" || status === "REJECTED");
+  const canReject = current && (status === "PENDING_APPROVAL" || status === "APPROVED");
+  const canSend = current && (status === "APPROVED" || status === "SENT");
+  const [reasonKind, setReasonKind] = useState<"revise" | "cancel" | null>(null);
+  const refreshAfterRevision = () => {
+    qc.invalidateQueries({ queryKey: ["invoices", id] });
+    qc.invalidateQueries({ queryKey: ["invoices"] });
+    qc.invalidateQueries({ queryKey: ["settlement"] });
+    qc.invalidateQueries({ queryKey: ["dashboard"] });
+  };
+  const reviseMut = useMutation({
+    mutationFn: (reason: string) => reviseInvoice(id, reason),
+    onSuccess: (res) => {
+      refreshAfterRevision();
+      setReasonKind(null);
+      toast.success("訂正版(下書き)を作りました。内容を確認して、承認 → 送信してください");
+      if (res.new_invoice_id != null && !embedded) router.push(`/invoices/${res.new_invoice_id}`);
+    },
+    onError: (e: Error) => toast.error(`訂正版を作れませんでした: ${e.message}`),
+  });
+  const cancelMut = useMutation({
+    mutationFn: (reason: string) => cancelInvoice(id, reason),
+    onSuccess: () => {
+      refreshAfterRevision();
+      setReasonKind(null);
+      toast.success("取り消しました。書類は消えずに残っています");
+    },
+    onError: (e: Error) => toast.error(`取り消せませんでした: ${e.message}`),
+  });
+
+  // アクションバー: 左 = 本線(編集 → 承認 → メール送信 → Peppol送信)、右 = 例外(差し戻し・削除)。
+  // ボタンは消さず、使えないときは非活性にする(押した印になり、位置も変わらない)
   const actions = (
     <div className="flex items-center gap-2 mb-4 p-3 bg-card border border-border rounded-lg flex-wrap">
       <Button variant="outline" size="sm" className="border-border text-foreground gap-1" onClick={() => setPdfOpen(true)}>
         <FileText className="w-3.5 h-3.5" /> PDF
       </Button>
-      {isAdmin && (status === "PENDING_APPROVAL" || status === "REJECTED") && (
+      {isAdmin && (
+        <Button
+          variant="outline" size="sm"
+          className="border-indigo-600/50 text-indigo-400 hover:text-indigo-300 gap-1"
+          onClick={openEditModal}
+          disabled={!canEdit}
+          title={!canEdit ? "送信済みのため、編集できません" : undefined}
+        >
+          ✏️ 編集
+        </Button>
+      )}
+      {isAdmin && (
         <Button
           variant="outline" size="sm"
           className="border-emerald-600/50 text-emerald-400 hover:text-emerald-300 gap-1"
           onClick={() => approveMut.mutate()}
-          disabled={approveMut.isPending}
+          disabled={approveMut.isPending || !canApprove}
+          title={status === "APPROVED" || status === "SENT" ? "承認済みです" : undefined}
         >
           ✅ 承認
-        </Button>
-      )}
-      {isAdmin && (status === "PENDING_APPROVAL" || status === "APPROVED") && (
-        <Button
-          variant="outline" size="sm"
-          className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
-          onClick={() => setConfirmTarget("reject")}
-          disabled={rejectMut.isPending}
-        >
-          ↩ 差し戻し
         </Button>
       )}
       {isAdmin && (
@@ -207,10 +270,10 @@ export default function InvoiceDetailPage({
           variant="outline" size="sm"
           className="border-blue-600/50 text-blue-400 hover:text-blue-300 gap-1"
           onClick={openSendModal}
-          disabled={status !== "APPROVED" && status !== "SENT"}
-          title={status !== "APPROVED" && status !== "SENT" ? "承認後に送信できます" : undefined}
+          disabled={!canSend}
+          title={!canSend ? "承認後に送信できます" : undefined}
         >
-          <Send className="w-3.5 h-3.5" /> {status === "SENT" ? "再送信" : "メール送信"}
+          <Send className="w-3.5 h-3.5" /> {inv?.client_accepted_at ? "リンクを再送" : status === "SENT" ? "再送信" : "メール送信"}
         </Button>
       )}
       {isAdmin && (
@@ -218,33 +281,55 @@ export default function InvoiceDetailPage({
           variant="outline" size="sm"
           className="border-indigo-600/50 text-indigo-400 hover:text-indigo-300 gap-1"
           onClick={() => peppolSendMut.mutate()}
-          disabled={peppolSendMut.isPending || (status !== "APPROVED" && status !== "SENT")}
+          disabled={peppolSendMut.isPending || !peppolConfigured || !canSend}
+          title={peppolConfigured ? undefined : "Peppol の接続設定が完了していないため、送信できません"}
         >
           <Globe className="w-3.5 h-3.5" /> Peppol送信
         </Button>
       )}
-      {isAdmin && !inv?.client_accepted_at && (
-        <Button
-          variant="outline" size="sm"
-          className="border-indigo-600/50 text-indigo-400 hover:text-indigo-300 gap-1"
-          onClick={openEditModal}
-        >
-          ✏️ 編集
-        </Button>
+      {isAdmin && (
+        <div className="flex items-center gap-2 ml-auto">
+          <Button
+            variant="outline" size="sm"
+            className="border-blue-600/50 text-blue-400 hover:text-blue-300 gap-1"
+            onClick={() => setReasonKind("revise")}
+            disabled={!canRevise || reviseMut.isPending}
+            title={!canRevise ? (locked ? "新しい版に差し替え済み、または取り消し済みです" : "まだ相手に送っていないので、そのまま編集できます") : "内容を直した新しい版(下書き)を作ります"}
+          >
+            訂正版を作る
+          </Button>
+          <Button
+            variant="outline" size="sm"
+            className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
+            onClick={() => setReasonKind("cancel")}
+            disabled={!canRevise || cancelMut.isPending}
+            title={!canRevise ? (locked ? "新しい版に差し替え済み、または取り消し済みです" : "まだ相手に送っていないので、削除できます") : "この書類をなかったことにします(書類は消えません)"}
+          >
+            取り消し
+          </Button>
+          <Button
+            variant="outline" size="sm"
+            className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
+            onClick={() => setConfirmTarget("reject")}
+            disabled={rejectMut.isPending || !canReject}
+            title={!canReject ? "この状態では差し戻せません" : undefined}
+          >
+            ↩ 差し戻し
+          </Button>
+          <Button
+            variant="outline" size="sm"
+            className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
+            onClick={() => setConfirmTarget("delete")}
+            disabled={deleteInvoice.isPending || !canEdit}
+            title={!canEdit ? "送信済みのため、削除できません" : undefined}
+          >
+            🗑 削除
+          </Button>
+        </div>
       )}
-      {isAdmin && !inv?.client_accepted_at && (
-        <Button
-          variant="outline" size="sm"
-          className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
-          onClick={() => setConfirmTarget("delete")}
-          disabled={deleteInvoice.isPending}
-        >
-          🗑 削除
-        </Button>
-      )}
-      {inv?.sent_at && (
-        <span className="text-xs text-muted-foreground ml-2">
-          送信済: {String(inv.sent_at).slice(0, 16).replace("T", " ")}
+      {inv?.sent_at && current && (
+        <span className="basis-full text-xs text-muted-foreground">
+          送信済: {String(inv.sent_at).slice(0, 16).replace("T", " ")}（送信済みのため、編集・削除はできません。内容を直すときは「訂正版を作る」、なかったことにするときは「取り消し」を使います）
         </span>
       )}
     </div>
@@ -254,7 +339,26 @@ export default function InvoiceDetailPage({
     <DetailLayout title={`請求書 #${id}`} icon="📑" backHref="/" backLabel="ダッシュボードに戻る" isLoading={isLoading} embedded={embedded}>
       {inv && (
         <>
+          {rev && (
+            <>
+              {(rev.revision > 1 || revisionLabel(rev)) && (
+                <div className="mb-2 flex items-center">
+                  <RevisionBadges revision={rev.revision} label={revisionLabel(rev)} />
+                </div>
+              )}
+              <RevisionBanners view={rev} hrefOf={(nid) => `/invoices/${nid}`} />
+            </>
+          )}
           {actions}
+          <ReasonModal
+            open={reasonKind !== null}
+            kind={reasonKind ?? "revise"}
+            docLabel="請求書"
+            docNo={inv.invoice_id}
+            loading={reviseMut.isPending || cancelMut.isPending}
+            onSubmit={(reason) => (reasonKind === "cancel" ? cancelMut.mutate(reason) : reviseMut.mutate(reason))}
+            onClose={() => setReasonKind(null)}
+          />
           {(() => {
             const g = getInvoiceStatusGuidance(status ?? "");
             return g ? (
@@ -436,10 +540,10 @@ export default function InvoiceDetailPage({
           {/* 送信メール確認・編集モーダル（背面でPDFプレビューを開いたまま） */}
           <FormModal
             open={sendOpen}
-            title={status === "SENT" ? "クライアントへ請求書を再送信" : "クライアントへ請求書を送信"}
+            title={inv?.client_accepted_at ? "承諾済みの請求書のリンクをクライアントへ再送" : status === "SENT" ? "クライアントへ請求書を再送信" : "クライアントへ請求書を送信"}
             size="lg"
             loading={sendMut.isPending}
-            submitLabel={status === "SENT" ? "🔁 再送信する" : "📧 送信する"}
+            submitLabel={inv?.client_accepted_at ? "🔁 リンクを再送する" : status === "SENT" ? "🔁 再送信する" : "📧 送信する"}
             onSubmit={() => {
               if (!sendMeta.to_email) {
                 toast.error("送信先メールアドレスが設定されていません");
@@ -451,7 +555,9 @@ export default function InvoiceDetailPage({
           >
             <p className="text-xs text-muted-foreground mb-3">
               {sendMeta.client_name} 宛に、請求書（発行元: 当社 → 宛先: クライアント、印影付き）の確認・ダウンロード用URLをメール送信します（PDF添付なし）。
-              {status === "SENT" && "再送信すると、ダウンロードURLの有効期限も送信日時を起点に更新されます。"}
+              {inv?.client_accepted_at
+                ? "承諾済みの請求書です。リンクを送り直すだけで、書類の内容と送信の記録は変わりません（承諾後のリンクは期限なしで開けます）。"
+                : status === "SENT" && "再送信すると、ダウンロードURLの有効期限も送信日時を起点に更新されます。"}
               詳細下部のPDFプレビューで内容を確認しながら送信できます。
             </p>
             <FormField label="宛先（クライアント請求先）">

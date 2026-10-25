@@ -16,7 +16,7 @@ use sqlx::PgPool;
 use super::checkpoint;
 use super::imap_util::{
     decode_mime_string, extract_attachment_filenames, extract_body_text_from_parts, fetch_since_blocking,
-    get_header_value, parse_email_date, parse_from_header, strip_nul, ImapConfig,
+    get_header_value, parse_email_date, parse_from_header, strip_nul, load_imap_config,
 };
 use super::ops_message;
 use crate::domain::models::mail_pipeline::{PipelineStatus, SourceType};
@@ -56,7 +56,7 @@ pub async fn run(pool: &PgPool) -> Result<Phase1Result, String> {
         return Ok(result);
     }
 
-    let config = ImapConfig::load(pool).await?;
+    let config = load_imap_config(pool).await?;
     let mailbox = config.mailbox_id().to_string();
 
     // バッチ実行「開始」時刻を記録する（完了時刻ではない）。
@@ -72,7 +72,7 @@ pub async fn run(pool: &PgPool) -> Result<Phase1Result, String> {
     );
 
     // IMAP通信(接続・検索・取得)は同期処理のため、Tokioのワーカースレッドをブロックしないよう
-    // spawn_blocking上でまとめて実行する（#073再発防止、開発標準書§2.3）。
+    // spawn_blocking上でまとめて実行する（#073再発防止、社内標準リポの開発標準書 §2.3）。
     // connect_and_examine自体のタイムアウトはimap_util::IMAP_TIMEOUT（30秒）で保護済み。
     let raw_messages = tokio::task::spawn_blocking(move || fetch_since_blocking(&config, &since_str))
         .await

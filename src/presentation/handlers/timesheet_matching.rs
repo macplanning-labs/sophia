@@ -27,7 +27,16 @@ pub struct BoardQuery {
 }
 
 /// GET /api/v1/timesheet-matching
-pub async fn api_board(State(pool): State<PgPool>, Query(q): Query<BoardQuery>) -> Response {
+pub async fn api_board(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Query(q): Query<BoardQuery>,
+) -> Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetView) {
+        return crate::presentation::http_util::forbidden();
+    }
     let month = match q.month.as_deref() {
         Some(m) => match NaiveDate::parse_from_str(&format!("{m}-01"), "%Y-%m-%d") {
             Ok(d) => d,
@@ -39,7 +48,7 @@ pub async fn api_board(State(pool): State<PgPool>, Query(q): Query<BoardQuery>) 
             today.with_day(1).unwrap_or(today)
         }
     };
-    match timesheet_matching::board(&pool, month).await {
+    match timesheet_matching::board(&pool, month, &auth_user.list_filter(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedView)).await {
         Ok(v) => axum::Json(serde_json::json!({ "success": true, "board": v })).into_response(),
         Err(msg) => {
             tracing::error!("api_board: {msg}");
@@ -53,7 +62,16 @@ pub async fn api_board(State(pool): State<PgPool>, Query(q): Query<BoardQuery>) 
 }
 
 /// GET /api/v1/timesheet-attachments/{id}/file
-pub async fn api_attachment_file(State(pool): State<PgPool>, Path(id): Path<i64>) -> Response {
+pub async fn api_attachment_file(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+) -> Response {
+    // 受信メールの添付は担当スタンプを持たない(メールの領域)。権限を持つ人だけが取れる。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetView) {
+        return crate::presentation::http_util::forbidden();
+    }
     match timesheet_matching::attachment_file(&pool, id).await {
         Ok((filename, bytes)) => {
             let content_type = if filename.to_lowercase().ends_with(".pdf") {
@@ -86,9 +104,15 @@ pub struct PreviewQuery {
 /// GET /api/v1/timesheet-attachments/{id}/preview?order_id=
 pub async fn api_attachment_preview(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
     Query(q): Query<PreviewQuery>,
 ) -> Response {
+    // 原本の取得(api_attachment_file)と同じ。添付は担当スタンプを持たず、権限を持つ人だけが見られる(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetView) {
+        return crate::presentation::http_util::forbidden();
+    }
     match timesheet_matching::preview_attachment(&pool, id, q.order_id).await {
         Ok(v) => axum::Json(serde_json::json!({ "success": true, "preview": v })).into_response(),
         Err(msg) => {
@@ -108,9 +132,29 @@ pub struct ImportBody {
 /// 画面で氏名・時間・結び付け先の受注を確認した上で押される。承認前の同月の稼働報告があれば置き換える。
 pub async fn api_attachment_import(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
     axum::Json(body): axum::Json<ImportBody>,
 ) -> Response {
+    // 入口の権限表に頼らず、ハンドラ自身で判定する(DEMO-000254)。添付は担当スタンプを持たないので、権限の有無を見る。
+    // 取り込み先の受注(担当スタンプを持つ)も、編集の権限と担当範囲の中であること。取り込み(書き込み)の前に確かめる
+    // 取り込み後に承認まで行うので、承認の権限も先に確かめる(取り込みだけ済んで承認が拒否される、を防ぐ)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetEdit)
+        || !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetApprove)
+    {
+        return crate::presentation::http_util::forbidden();
+    }
+    let order_stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, body.order_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetEdit, &order_stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     let timesheet_id = match timesheet_matching::import_attachment(&pool, id, body.order_id).await {
         Ok(tid) => tid,
         Err(msg) => {
@@ -119,7 +163,7 @@ pub async fn api_attachment_import(
         }
     };
     // 承認（承認通知メールなどの副作用は、稼働報告の承認APIと同じ処理を使う）
-    let approve_res = super::timesheets::approve(State(pool), Path(timesheet_id)).await.into_response();
+    let approve_res = super::timesheets::approve(State(pool.clone()), axum::Extension(auth_user.clone()), authz.clone(), Path(timesheet_id)).await.into_response();
     if !approve_res.status().is_success() {
         return (
             axum::http::StatusCode::CONFLICT,
@@ -131,7 +175,11 @@ pub async fn api_attachment_import(
         )
             .into_response();
     }
-    axum::Json(serde_json::json!({ "success": true, "timesheet_id": timesheet_id })).into_response()
+    let mut body = serde_json::json!({ "success": true, "timesheet_id": timesheet_id });
+    if let Some(h) = crate::domain::services::billing_hint::billing_hint_for_timesheet(&pool, timesheet_id).await {
+        body["billing_hint"] = serde_json::json!(h);
+    }
+    axum::Json(body).into_response()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -143,9 +191,15 @@ pub struct RejectBody {
 /// POST /api/v1/timesheet-attachments/{id}/reject — 勤務表を差し戻す（理由を記録。メールは送らない）
 pub async fn api_attachment_reject(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
     axum::Json(body): axum::Json<RejectBody>,
 ) -> Response {
+    // 担当スタンプを持たないデータ。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
     match timesheet_matching::reject_attachment(&pool, id, &body.reason).await {
         Ok(()) => axum::Json(serde_json::json!({ "success": true })).into_response(),
         Err(msg) => {
@@ -156,7 +210,16 @@ pub async fn api_attachment_reject(
 }
 
 /// POST /api/v1/timesheet-attachments/{id}/unreject — 差し戻しを取り消す
-pub async fn api_attachment_unreject(State(pool): State<PgPool>, Path(id): Path<i64>) -> Response {
+pub async fn api_attachment_unreject(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+) -> Response {
+    // 担当スタンプを持たないデータ。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
     match timesheet_matching::unreject_attachment(&pool, id).await {
         Ok(()) => axum::Json(serde_json::json!({ "success": true })).into_response(),
         Err(msg) => {

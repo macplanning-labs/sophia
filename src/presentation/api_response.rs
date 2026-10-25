@@ -2,6 +2,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Serialize;
 
+use crate::domain::authz::stamp::{is_no_owner, NO_OWNER_MESSAGE};
+
 /// `anyhow::Error` を JSON エラーレスポンス（500 + `ApiError`）に変換する共通ラッパー。
 ///
 /// ハンドラで `Result<impl IntoResponse, AppError>` を戻り値にし `?` でDBエラー等を
@@ -12,6 +14,11 @@ pub struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
+        // 担当が決まらない手動作成(DEMO-000173 PR 7a): 利用者が直せる入力の問題なので 400 と案内を返す
+        if is_no_owner(self.0.as_ref()) {
+            tracing::warn!("担当が決まらないため作成を拒否しました: {}", self.0);
+            return ApiError::bad_request(NO_OWNER_MESSAGE).into_response();
+        }
         // 詳細（SQLエラー文・外部APIレスポンス等）はサーバーログにのみ残し、
         // クライアントへはDB構造や連携先の内部情報を含みうる生メッセージを返さない
         tracing::error!(

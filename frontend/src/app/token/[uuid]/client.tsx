@@ -41,8 +41,44 @@ type TokenData = {
   };
   can_accept?: boolean;
   can_upload_timesheet?: boolean;
+  /** 版・取り消しの状態(請求書・支払通知書。DEMO-000224) */
+  revision_info?: {
+    revision: number;
+    document_state: "cancelled" | "superseded" | null;
+    /** 新しい版を、もう送っているときだけ入る(下書きは見せない) */
+    superseded_by: { uuid: string } | null;
+    /** 新しい版を作っているが、まだ送っていない */
+    superseded_pending: boolean;
+  };
   error?: string;
 };
+
+/** 差し替え済み・取り消し済みの案内(相手に見える。取り消しの理由は出さない) */
+function RevisionNotice({ info }: { info?: TokenData["revision_info"] }) {
+  if (!info || !info.document_state) return null;
+  if (info.document_state === "cancelled") {
+    return (
+      <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">
+        この書類は取り消されました。
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400 space-y-2">
+      <div>この書類は、新しい版に差し替えられました。</div>
+      {info.superseded_by ? (
+        <a
+          href={`/token/${info.superseded_by.uuid}`}
+          className="inline-flex px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium"
+        >
+          新しい版を見る
+        </a>
+      ) : (
+        <div>新しい版は、準備中です。届き次第、そちらをご確認ください。</div>
+      )}
+    </div>
+  );
+}
 
 function formatYen(n: number | undefined) {
   if (n == null) return "—";
@@ -200,7 +236,7 @@ export default function TokenPage() {
                       注文書PDFを見る
                     </a>
                   )}
-                  {data.pdf?.acceptance && (
+                  {data.pdf?.acceptance ? (
                     <a
                       href={data.pdf.acceptance}
                       target="_blank"
@@ -209,17 +245,24 @@ export default function TokenPage() {
                     >
                       請書PDFを見る
                     </a>
-                  )}
-                  {data.can_accept && (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={handleAccept}
-                      className="inline-flex px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50"
+                  ) : (
+                    <span
+                      aria-disabled="true"
+                      title="承諾すると、請書を見られます"
+                      className="inline-flex px-3 py-2 rounded-lg border border-border text-sm opacity-40 cursor-not-allowed"
                     >
-                      内容を確認し、承諾する
-                    </button>
+                      請書PDFを見る
+                    </span>
                   )}
+                  {/* 承諾のボタンは消さず、承諾済みのあとは非活性にする(押した印) */}
+                  <button
+                    type="button"
+                    disabled={busy || !data.can_accept}
+                    onClick={handleAccept}
+                    className="inline-flex px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50"
+                  >
+                    {data.accepted ? "承諾済み" : "内容を確認し、承諾する"}
+                  </button>
                 </div>
 
                 <section>
@@ -261,43 +304,48 @@ export default function TokenPage() {
                   </section>
                 )}
 
-                {data.can_upload_timesheet && (
+                {/* 稼働報告書の提出は消さず、承諾前・作業月の開始前は非活性にする */}
                   <section className="border border-border rounded-lg p-4 space-y-3">
                     <h2 className="text-sm font-semibold">稼働報告書の提出</h2>
                     <p className="text-muted-foreground text-xs">
-                      作業月分の稼働報告書（Excel/PDF）をアップロードしてください。
+                      {data.can_upload_timesheet
+                        ? "作業月分の稼働報告書（Excel/PDF）をアップロードしてください。"
+                        : "承諾後、作業月の開始日から、提出できます。"}
                     </p>
                     <form onSubmit={handleUpload} className="space-y-3">
                       <input
                         ref={fileRef}
                         type="file"
                         accept=".xlsx,.xls,.pdf"
+                        disabled={!data.can_upload_timesheet}
                         className="block w-full text-sm text-muted-foreground file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:bg-primary/10 file:text-primary"
                       />
                       <button
                         type="submit"
-                        disabled={busy}
+                        disabled={busy || !data.can_upload_timesheet}
                         className="px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50"
                       >
                         稼働報告書を提出する
                       </button>
                     </form>
                   </section>
-                )}
               </>
             )}
 
             {data.kind === "notice" && (
               <>
+                <RevisionNotice info={data.revision_info} />
                 {data.accepted ? (
                   <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-400">
                     この支払通知書・請求書は承諾済みです
                     {data.confirmed_at ? `（${data.confirmed_at}）` : ""}。
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400">
-                    まだ承諾されていません。支払通知書と請求書をご確認の上、承諾をお願いします。
-                  </div>
+                  !data.revision_info?.document_state && (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400">
+                      まだ承諾されていません。支払通知書と請求書をご確認の上、承諾をお願いします。
+                    </div>
+                  )
                 )}
 
                 <div className="flex flex-wrap gap-2">
@@ -321,16 +369,15 @@ export default function TokenPage() {
                       請求書PDFを見る
                     </a>
                   )}
-                  {data.can_accept && (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={handleAccept}
-                      className="inline-flex px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50"
-                    >
-                      内容を確認し、承諾する
-                    </button>
-                  )}
+                  {/* 承諾のボタンは消さず、使えないときは非活性にする(承諾済み・差し替え済み・取り消し済み) */}
+                  <button
+                    type="button"
+                    disabled={busy || !data.can_accept}
+                    onClick={handleAccept}
+                    className="inline-flex px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50"
+                  >
+                    {data.accepted ? "承諾済み" : "内容を確認し、承諾する"}
+                  </button>
                 </div>
 
                 <dl className="text-sm space-y-1.5 border border-border rounded-lg p-4">
@@ -348,15 +395,18 @@ export default function TokenPage() {
 
             {data.kind === "invoice" && (
               <>
+                <RevisionNotice info={data.revision_info} />
                 {data.accepted ? (
                   <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-400">
                     受領確認済みです
                     {data.confirmed_at ? `（${data.confirmed_at}）` : ""}。ご対応ありがとうございました。
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400">
-                    まだ受領のご確認をいただいておりません。内容をご確認の上、受領確認をお願いします。
-                  </div>
+                  !data.revision_info?.document_state && (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-400">
+                      まだ受領のご確認をいただいておりません。内容をご確認の上、受領確認をお願いします。
+                    </div>
+                  )
                 )}
 
                 <div className="flex flex-wrap gap-2">
@@ -370,16 +420,15 @@ export default function TokenPage() {
                       請求書PDFを見る
                     </a>
                   )}
-                  {data.can_accept && (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={handleAccept}
-                      className="inline-flex px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50"
-                    >
-                      内容を確認しました（受領確認）
-                    </button>
-                  )}
+                  {/* 受領確認のボタンは消さず、使えないときは非活性にする(確認済み・差し替え済み・取り消し済み) */}
+                  <button
+                    type="button"
+                    disabled={busy || !data.can_accept}
+                    onClick={handleAccept}
+                    className="inline-flex px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50"
+                  >
+                    {data.accepted ? "受領確認済み" : "内容を確認しました（受領確認）"}
+                  </button>
                 </div>
 
                 <dl className="text-sm space-y-1.5 border border-border rounded-lg p-4">

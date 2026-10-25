@@ -123,6 +123,7 @@ pub async fn create(
         // 受注書を作成
         let order_id = order_repo::insert_received_order_basic(
             &mut tx, &received_order_no, c.client_id, target_month, work_start, work_end, &c.project_name,
+            crate::domain::authz::stamp::StampMode::Manual,
         ).await?;
 
         // 明細を1件作成（契約の精算条件をスナップショット保存）
@@ -139,6 +140,27 @@ pub async fn create(
 
 /// POST /received-orders/{id}/status — ステータス更新
 pub async fn update_status(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+    Form(form): Form<StatusForm>,
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
+    update_status_inner(State(pool), Path(id), Form(form)).await.into_response()
+}
+
+async fn update_status_inner(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
     Form(form): Form<StatusForm>,
@@ -215,6 +237,26 @@ pub async fn update(
 
 /// POST /received-orders/{id}/delete — 削除（REGISTEREDのみ）
 pub async fn delete(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_received_order(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::OrderReceivedEdit, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
+    delete_inner(State(pool), Path(id)).await.into_response()
+}
+
+async fn delete_inner(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {

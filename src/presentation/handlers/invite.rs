@@ -27,6 +27,10 @@ use crate::infrastructure::repositories::{invite_repo, auth_repo};
 use crate::presentation::middleware::role::AuthUser;
 use axum_extra::extract::CookieJar;
 
+/// 使用済みの招待を開いたときの案内(セッションは発行しない)
+const USED_INVITE_MESSAGE: &str =
+    "この招待リンクは使用済みです。ログインは、ポータルのログインページでメールアドレスを入力し、届いたログインリンク(24時間有効)から行ってください。";
+
 // ── テンプレート ──
 
 
@@ -98,26 +102,20 @@ pub async fn api_invite_status(
 
     let invitation = invite_repo::find_invitation_by_token(&state.pool, token).await.log_err().ok().flatten();
     let Some(inv) = invitation else {
-        return Json(serde_json::json!({ "valid": false, "error": "招待が見つかりません" })).into_response();
+        // 存在しない招待は 404(本文は従来どおり)。無効なトークンの試行として数えるため、状態コードで区別する
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "valid": false, "error": "招待が見つかりません" })),
+        )
+            .into_response();
     };
 
+    // 使用済みの招待ではログインさせない(再ログインはポータルのログインリンクで行う)
     if inv.is_used {
-        let engineer = invite_repo::find_active_engineer_id(&state.pool, &inv.email, &inv.partner_id)
-            .await
-            .ok()
-            .flatten();
-        if engineer.is_some() {
-            return Json(serde_json::json!({
-                "valid": true,
-                "already_used": true,
-                "display_name": inv.display_name,
-                "message": "この招待は使用済みです。ログインを続行できます。"
-            }))
-            .into_response();
-        }
         return Json(serde_json::json!({
             "valid": false,
-            "error": "この招待は既に使用されています"
+            "already_used": true,
+            "error": USED_INVITE_MESSAGE
         }))
         .into_response();
     }
@@ -164,35 +162,35 @@ pub async fn api_invite_accept(
             .into_response();
     };
 
-    let engineer_id = if inv.is_used {
-        invite_repo::find_active_engineer_id(&state.pool, &inv.email, &inv.partner_id)
-            .await
-            .ok()
-            .flatten()
-    } else {
-        if Utc::now() > inv.expires_at {
-            return (
-                StatusCode::GONE,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": "招待リンクの有効期限が切れています"
-                })),
-            )
-                .into_response();
-        }
-        let eid = invite_repo::find_active_engineer_id(&state.pool, &inv.email, &inv.partner_id)
-            .await
-            .ok()
-            .flatten();
-        if eid.is_some() {
-            if let Err(e) = invite_repo::mark_invitation_used(&state.pool, inv.id).await {
-                tracing::error!("招待の使用済み更新に失敗: inv_id={} {:?}", inv.id, e);
-            }
-            tracing::info!("✅ 招待受諾: {} ({})", inv.display_name, inv.email);
-        }
-        eid
-    };
+    // 使用済みの招待ではセッションを発行しない(漏えいしたメールでの再ログインを防ぐ。DEMO-000167 項目1)
+    if inv.is_used {
+        return (
+            StatusCode::GONE,
+            Json(serde_json::json!({
+                "success": false,
+                "already_used": true,
+                "error": USED_INVITE_MESSAGE
+            })),
+        )
+            .into_response();
+    }
 
+    if Utc::now() > inv.expires_at {
+        return (
+            StatusCode::GONE,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "招待リンクの有効期限が切れています"
+            })),
+        )
+            .into_response();
+    }
+
+    let engineer_id = invite_repo::find_active_engineer_id(&state.pool, &inv.email, &inv.partner_id)
+        .await
+        .log_err()
+        .ok()
+        .flatten();
     let Some(engineer_id) = engineer_id else {
         return (
             StatusCode::NOT_FOUND,
@@ -203,6 +201,33 @@ pub async fn api_invite_accept(
         )
             .into_response();
     };
+
+    // 招待を消費できた1回だけがセッションを受け取る。消費に失敗したら発行しない(再利用を残さない)
+    match invite_repo::consume_invitation(&state.pool, inv.id).await {
+        Ok(true) => tracing::info!("✅ 招待受諾: {} ({})", inv.display_name, inv.email),
+        Ok(false) => {
+            return (
+                StatusCode::GONE,
+                Json(serde_json::json!({
+                    "success": false,
+                    "already_used": true,
+                    "error": USED_INVITE_MESSAGE
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("[招待受諾] 処理=招待の消費 結果=失敗 影響=ログインできない | inv_id={} {:?}", inv.id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "ログイン処理に失敗しました"
+                })),
+            )
+                .into_response();
+        }
+    }
 
     let session_id = Uuid::new_v4().to_string();
     if let Err(e) = invite_repo::insert_engineer_session(&state.pool, &session_id, engineer_id).await {
@@ -255,15 +280,11 @@ pub async fn accept_form(
     };
 
     if is_used {
-        // 使用済みでも、エンジニアが存在すればログインさせる
-        let engineer = invite_repo::find_active_engineer_id(&state.pool, &email, &partner_id).await.log_err().ok().flatten();
-
-        if let Some(engineer_id) = engineer {
-            return create_engineer_session_and_redirect(&state.pool, engineer_id).await;
-        }
-        return axum::response::Html(
-            "<h2>この招待は既に使用されています</h2><p><a href='/portal/login'>ログインページへ</a></p>".to_string()
-        ).into_response();
+        // 使用済みの招待ではログインさせない(再ログインはポータルのログインリンクで行う)
+        return axum::response::Html(format!(
+            "<h2>この招待は既に使用されています</h2><p>{}</p><p><a href='/portal/login'>ログインページへ</a></p>",
+            USED_INVITE_MESSAGE
+        )).into_response();
     }
 
     if Utc::now() > expires_at {
@@ -282,9 +303,21 @@ pub async fn accept_form(
         )).into_response();
     };
 
-    // 招待を使用済みに更新（失敗してもログインは継続する。再利用可能な招待が残るだけなので致命的ではない）
-    if let Err(e) = invite_repo::mark_invitation_used(&state.pool, inv_id).await {
-        tracing::error!("招待の使用済み更新に失敗: inv_id={} {:?}", inv_id, e);
+    // 招待を消費できた1回だけがセッションを受け取る。失敗したら発行しない(再利用を残さない)
+    match invite_repo::consume_invitation(&state.pool, inv_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return axum::response::Html(format!(
+                "<h2>この招待は既に使用されています</h2><p>{}</p><p><a href='/portal/login'>ログインページへ</a></p>",
+                USED_INVITE_MESSAGE
+            )).into_response();
+        }
+        Err(e) => {
+            tracing::error!("[招待受諾] 処理=招待の消費 結果=失敗 影響=ログインできない | inv_id={} {:?}", inv_id, e);
+            return axum::response::Html(
+                "<h2>ログイン処理に失敗しました</h2><p>時間をおいて再度お試しください。</p>".to_string()
+            ).into_response();
+        }
     }
 
     tracing::info!("✅ 招待受諾: {} ({})", display_name, email);

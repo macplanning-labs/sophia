@@ -276,7 +276,7 @@ async fn notify_manual_review(pool: &PgPool, result: &mut Phase4Result) {
         return;
     };
 
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = crate::domain::services::jst::format(chrono::Utc::now(), "%Y-%m-%d");
     let subject = format!(
         "【Sophia】メール自動取込: 要確認が{}件あります ({today})",
         rows.len()
@@ -294,12 +294,14 @@ async fn notify_manual_review(pool: &PgPool, result: &mut Phase4Result) {
     );
 
     // メールが自社SMTP(=IMAPと同じGmail認証情報)経由のため、その認証情報自体が原因で
-    // 取込に失敗しているケースでは通知メールも一緒に失敗しうる(同種の弱点)。
+    // 取込に失敗しているケースでは通知メールも一緒に失敗しうる(DEMO-000014と同種の弱点)。
     // Chatはこの認証情報と無関係な別チャネルのため併用する(未着手のまま気づけない、という
-    // 声への対策)。
-    crate::domain::services::chat_notifier::post(&format!(
-        "*【Sophia】メール自動取込: 要確認が{}件あります ({today})*\n{row_lines}",
-        rows.len()
+    // 声(DEMO-000007)への対策)。
+    crate::domain::services::chat_notifier::post(&crate::domain::services::chat_notifier::Incident::new(
+        integration_core::Level::Warning,
+        format!("メール自動取込で、要確認が{}件あります（{today}）", rows.len()),
+        format!("自動で処理できなかったメールが滞留しています。手で登録するまで業務に反映されません。\n{row_lines}"),
+        "ダッシュボードのメール取込一覧から内容を確認し、必要に応じて手動で登録してください",
     ))
     .await;
 

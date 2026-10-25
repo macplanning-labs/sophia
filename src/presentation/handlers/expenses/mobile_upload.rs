@@ -20,6 +20,7 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::domain::authz::Authz;
 use crate::infrastructure::repositories::{expense_repo, mobile_upload_repo};
 use crate::presentation::api_response::AppError;
 use crate::presentation::middleware::role::AuthUser;
@@ -31,20 +32,18 @@ use super::items::resolve_receipt_mime;
 /// 未認証リクエストを弾く以上の用途はない）
 pub async fn api_issue_mobile_token(
     State(pool): State<PgPool>,
-    Extension(_auth_user): Extension<AuthUser>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(item_id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    // 明細の存在確認＋申請中のみトークン発行（PENDING/DRAFT）
-    let item = expense_repo::find_item_by_id(&pool, item_id).await?;
-    if item.is_none() {
-        return Ok((StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"success": false, "error": "明細が見つかりません"}))).into_response());
-    }
-    if let Some((_header_id, status)) = expense_repo::find_item_owner_status(&pool, item_id).await? {
-        if !crate::domain::services::document_workflow::can_edit_content(&status) {
-            return Ok((StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"success": false, "error": "申請中の経費のみ領収書をアップロードできます"}))).into_response());
-        }
+    // 明細の持ち主（本人・全件権限者のみ）の確認＋申請中のみトークン発行（PENDING/DRAFT）
+    let (_header_id, status) = match super::items::check_item_access(&pool, &auth_user, authz.as_ref().map(|e| &e.0), item_id).await {
+        Ok(v) => v,
+        Err(resp) => return Ok(resp),
+    };
+    if !crate::domain::services::document_workflow::can_edit_content(&status) {
+        return Ok((StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"success": false, "error": "申請中の経費のみ領収書をアップロードできます"}))).into_response());
     }
 
     let token = mobile_upload_repo::issue_token(&pool, item_id).await?;

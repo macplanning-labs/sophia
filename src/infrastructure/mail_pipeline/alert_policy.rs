@@ -15,6 +15,9 @@
 ///
 /// 状態はプロセス内に持つ（DB に持たない）。再起動でリセットされ、最悪でも
 /// 「同じ障害の通知が1回重複する」「復旧のお知らせが1回届かない」程度で済むため許容する。
+use crate::domain::services::chat_notifier::Incident;
+use crate::domain::services::jst;
+use integration_core::Level;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -199,7 +202,8 @@ pub fn record_mail_errors(errors: &[String], cfg: &AlertConfig) -> Vec<String> {
 pub struct AlertMessage {
     pub subject: String,
     pub body: String,
-    pub chat: String,
+    /// Chat へ送る内容(開発標準 §3.7 の形)
+    pub chat: Incident,
 }
 
 const IMPACT_TEXT: &str = "新着メールの取込が遅れています。取込済みのメールへの影響はありません。\
@@ -221,11 +225,11 @@ pub fn build_fatal_alert(
     } else {
         "【対応不要（自動で再試行中）】"
     };
-    let now_str = now.format("%Y-%m-%d %H:%M");
+    let now_str = jst::format(now, "%Y-%m-%d %H:%M");
     let duration = if failed_runs > 1 {
         format!(
             "{} から、{}回の走査で続けて失敗しています。",
-            since.format("%m/%d %H:%M"),
+            jst::format(since, "%m/%d %H:%M"),
             failed_runs
         )
     } else {
@@ -250,12 +254,13 @@ pub fn build_fatal_alert(
         action = copy.action,
     );
     let last_error = attempts.last().map(|a| a.error.as_str()).unwrap_or(raw_error);
-    let chat = format!(
-        "*【Sophia】{title} ({now_str})*\n{tag}\n{summary}\n{duration}\n\n必要な対応: {action}\n\n詳細: {last_error}",
-        title = copy.title,
-        summary = copy.summary,
-        action = copy.action,
-    );
+    let chat = Incident::new(
+        Level::High,
+        format!("{}（{}）{} 詳細: {last_error}", copy.title, copy.summary, duration),
+        "新着メールの取込が遅れています。取込済みのメールへの影響はありません。復旧後、停止中に届いたメールも自動で取り込まれます",
+        format!("{tag}{}", copy.action),
+    )
+    .at(since.with_timezone(&chrono::Utc));
     AlertMessage {
         subject: format!("【Sophia】{tag}{} ({now_str})", copy.title),
         body,
@@ -265,25 +270,34 @@ pub fn build_fatal_alert(
 
 /// 通知済みの障害が復旧したときの文面
 pub fn build_recovery_notice(failed_runs: u32, since: DateTime<Local>, now: DateTime<Local>) -> AlertMessage {
-    let now_str = now.format("%Y-%m-%d %H:%M");
+    let now_str = jst::format(now, "%Y-%m-%d %H:%M");
     let minutes = (now - since).num_minutes();
     let text = format!(
         "メール自動取込が復旧しました。\n\
          停止していた期間: {} 〜 {}（約{minutes}分、{failed_runs}回の走査で失敗）\n\n\
          停止中に届いたメールは、毎回の走査で3日前までさかのぼって読み直すため、自動で取り込まれます。対応は不要です。",
-        since.format("%m/%d %H:%M"),
-        now.format("%m/%d %H:%M"),
+        jst::format(since, "%m/%d %H:%M"),
+        jst::format(now, "%m/%d %H:%M"),
     );
     AlertMessage {
         subject: format!("【Sophia】【復旧】メール自動取込が復旧しました ({now_str})"),
         body: format!("管理者各位\n\n{text}\n"),
-        chat: format!("*【Sophia】メール自動取込が復旧しました ({now_str})*\n{text}"),
+        chat: Incident::new(
+            Level::Recovered,
+            "メール自動取込が復旧しました",
+            format!(
+                "停止していた期間: {} 〜 {}（約{minutes}分、{failed_runs}回の走査で失敗）。停止中に届いたメールは、毎回の走査で3日前までさかのぼって読み直すため、自動で取り込まれます",
+                jst::format(since, "%m/%d %H:%M"),
+                jst::format(now, "%m/%d %H:%M"),
+            ),
+            "対応は不要です",
+        ),
     }
 }
 
 /// 特定のメールだけが取り込めない状態が続くときの文面
 pub fn build_mail_error_alert(error_line: &str, runs: u32, now: DateTime<Local>) -> AlertMessage {
-    let now_str = now.format("%Y-%m-%d %H:%M");
+    let now_str = jst::format(now, "%Y-%m-%d %H:%M");
     let text = format!(
         "【要対応】特定のメール1通が取り込めない状態が続いています（{runs}回の走査で続けて失敗）。\n\
          他のメールは正常に取り込まれています。このメールだけ、取込が止まっています。\n\
@@ -293,7 +307,12 @@ pub fn build_mail_error_alert(error_line: &str, runs: u32, now: DateTime<Local>)
     AlertMessage {
         subject: format!("【Sophia】【要対応】特定のメールが取り込めない状態が続いています ({now_str})"),
         body: format!("管理者各位\n\n{text}\n"),
-        chat: format!("*【Sophia】特定のメールが取り込めない状態が続いています ({now_str})*\n{text}"),
+        chat: Incident::new(
+            Level::Warning,
+            format!("特定のメール1通が取り込めない状態が続いています（{runs}回の走査で続けて失敗）詳細: {error_line}"),
+            "他のメールは正常に取り込まれています。このメールだけ、取込が止まっています",
+            "開発者に、詳細を連絡してください（同じ内容ではこれ以上通知しません）",
+        ),
     }
 }
 
@@ -411,7 +430,7 @@ mod tests {
         assert!(msg.body.contains("メール本文の取得"));
         assert!(msg.body.contains("2回目 16:46:05 IMAP取得エラー(FETCH): Connection Lost"));
         assert!(!msg.body.contains("決めつけ"));
-        assert!(msg.chat.contains("Connection Lost"));
+        assert!(msg.chat.plain_text().contains("Connection Lost"));
     }
 
     #[test]
@@ -433,8 +452,8 @@ mod tests {
     fn recovery_notice_says_mails_are_not_lost() {
         let t = t0();
         let msg = build_recovery_notice(3, t, t + Duration::minutes(45));
-        assert!(msg.chat.contains("自動で取り込まれます"));
+        assert!(msg.chat.plain_text().contains("自動で取り込まれます"));
         assert!(msg.body.contains("約45分"));
-        assert!(!msg.chat.contains("取り込まれません"));
+        assert!(!msg.chat.plain_text().contains("取り込まれません"));
     }
 }

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { fetchSecurity } from "@/lib/api";
 import { Key, Smartphone, AlertCircle } from "lucide-react";
+import { PageHeader } from "@/components/ui/page-header";
 
 interface PasskeyInfo {
   id: number;
@@ -124,6 +125,8 @@ export default function SecurityPage() {
 
   return (
     <div className="p-6 space-y-6">
+      <PageHeader />
+
       {data.mfa_setup_required && (
         <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-amber-200">
           <AlertCircle className="w-5 h-5 mt-0.5 shrink-0" />

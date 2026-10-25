@@ -7,6 +7,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { fetchTimesheets, fetchEngineerOptions } from "@/lib/api";
 import { useCurrentUser } from "@/lib/useCurrentUser";
 import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DetailModal } from "@/components/ui/detail-modal";
@@ -192,8 +193,9 @@ function TimesheetsPageContent() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-center justify-end">
-        <div className="flex items-center gap-2">
+      <PageHeader
+        actions={
+          <>
           {isAdmin && (
             <button
               onClick={() => setShowInvite(true)}
@@ -219,8 +221,9 @@ function TimesheetsPageContent() {
             アップロード
             {showUpload ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
           </button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {/* 招待モーダル */}
       {showInvite && (

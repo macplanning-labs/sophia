@@ -3,13 +3,16 @@
 import { Suspense, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCurrentMonth } from "@/lib/MonthContext";
-import { fetchBillingPreview, confirmBilling } from "@/lib/api";
+import { fetchBillingPreview, confirmBilling, fetchInvoices } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfirmSheet, type ConfirmFact } from "@/components/ui/confirm-sheet";
 import { FormModal, FormField, FormTextarea, FormSelect } from "@/components/ui/form-modal";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { toast } from "sonner";
 import type { BillingInvoicePreview, BillingConfirmRequest, ForceAction } from "@/lib/types";
 
@@ -64,6 +67,16 @@ function BillingPageContent() {
 
   const invoices = preview?.invoices ?? [];
 
+  // 確定済みの請求書(この月)。確定前のプレビューには出ないので、別に並べる
+  const { data: allInvoices } = useQuery({ queryKey: ["invoices"], queryFn: fetchInvoices });
+  const issued = useMemo(
+    () => (allInvoices ?? []).filter((i) => (i.target_month ?? "").startsWith(month)),
+    [allInvoices, month],
+  );
+  // 稼働報告の取り込みから来たとき(?key=c4 など)は、その取引先の確定済みの請求書を強調する
+  const focusKey = useSearchParams().get("key");
+  const focusClient = invoices.find((i) => i.key === focusKey)?.client_name;
+
   // Confirm mutation
   const confirmMutation = useMutation({
     mutationFn: async (req: BillingConfirmRequest) => {
@@ -72,6 +85,7 @@ function BillingPageContent() {
     onSuccess: (result) => {
       if (result.success) {
         queryClient.invalidateQueries({ queryKey: ["billing-preview", month] });
+        queryClient.invalidateQueries({ queryKey: ["invoices"] });
         setConfirmTarget(null);
         setForceConfirmTarget(null);
         setForceReason("");
@@ -173,6 +187,8 @@ function BillingPageContent() {
 
   return (
     <div className="space-y-6 p-6">
+      <PageHeader />
+
       {/* Info box about notices */}
       <div className="rounded-md bg-blue-500/10 border border-blue-500/30 p-3">
         <p className="text-xs text-blue-300">
@@ -248,10 +264,21 @@ function BillingPageContent() {
                       </span>
                     </TableCell>
                     <TableCell>
-                      {canConfirm && (
+                      {/* 左 = 本線(確定)、右端 = 例外(待たずに確定)。ボタンは消さず、使えないときは非活性にする(行ごとに位置がずれない) */}
+                      <div className="flex items-center justify-end gap-2">
                         <Button
                           size="sm"
                           variant="default"
+                          disabled={!canConfirm}
+                          title={
+                            invoice.edi_excluded
+                              ? "EDI連携のため、ここでは確定しません"
+                              : !canConfirm
+                                ? invoice.items.length === 0
+                                  ? "確定する明細がありません"
+                                  : "条件が揃うと、確定できます"
+                                : undefined
+                          }
                           onClick={(e) => {
                             e.stopPropagation();
                             handleConfirmClick(invoice);
@@ -260,11 +287,17 @@ function BillingPageContent() {
                         >
                           確定
                         </Button>
-                      )}
-                      {canForceConfirm && (
                         <Button
                           size="sm"
                           variant="outline"
+                          disabled={!canForceConfirm}
+                          title={
+                            !canForceConfirm
+                              ? canConfirm
+                                ? "条件が揃っているので、「確定」を使います"
+                                : "確定できる明細がありません"
+                              : "揃っていない分を待たずに、いまある明細だけで確定します"
+                          }
                           onClick={(e) => {
                             e.stopPropagation();
                             handleForceConfirmClick(invoice);
@@ -273,7 +306,7 @@ function BillingPageContent() {
                         >
                           待たずに確定
                         </Button>
-                      )}
+                      </div>
                     </TableCell>
                   </TableRow>
 
@@ -332,6 +365,43 @@ function BillingPageContent() {
             })}
           </TableBody>
         </Table>
+      )}
+
+      {/* 確定済みの請求書(この月)。請求書の詳細画面で、承認・送付・差し戻しを行う */}
+      {issued.length > 0 && (
+        <div className="space-y-2">
+          <h2 className="text-xs font-semibold text-muted-foreground">確定済みの請求書(この月)</h2>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>請求番号</TableHead>
+                <TableHead>取引先</TableHead>
+                <TableHead>案件</TableHead>
+                <TableHead className="text-right">明細</TableHead>
+                <TableHead className="text-right">合計(税込)</TableHead>
+                <TableHead>状況</TableHead>
+                <TableHead className="w-32">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {issued.map((i) => (
+                <TableRow key={i.id} className={focusClient && i.client_name === focusClient ? "bg-emerald-500/10" : undefined}>
+                  <TableCell>
+                    <Link href={`/invoices/${i.id}`} className="text-primary hover:underline">{i.invoice_id}</Link>
+                  </TableCell>
+                  <TableCell>{i.client_name}</TableCell>
+                  <TableCell>{i.project_name || "全案件"}</TableCell>
+                  <TableCell className="text-right">{i.item_count}</TableCell>
+                  <TableCell className="text-right">{formatPrice(i.total_amount ?? 0)}</TableCell>
+                  <TableCell><StatusBadge status={i.status} /></TableCell>
+                  <TableCell>
+                    <Link href={`/invoices/${i.id}`} className="text-xs text-primary hover:underline">請求書を開く →</Link>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
       )}
 
       {/* Confirm dialog */}

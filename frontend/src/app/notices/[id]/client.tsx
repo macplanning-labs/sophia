@@ -3,12 +3,21 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { fetchNoticeDetail, deleteNotice, approveNotice, rejectNotice, fetchNoticeEmailPreview, sendNoticeMail, sendNoticePeppol, downloadBlob, apiPut } from "@/lib/api";
+import { fetchNoticeDetail, deleteNotice, approveNotice, rejectNotice, fetchNoticeEmailPreview, sendNoticeMail, sendNoticePeppol, fetchPeppolStatus, reviseNotice, cancelNotice, downloadBlob, apiPut } from "@/lib/api";
 import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { FormModal, FormField, FormInput, FormTextarea } from "@/components/ui/form-modal";
 import { ConfirmSheet } from "@/components/ui/confirm-sheet";
 import { Button } from "@/components/ui/button";
+import {
+  RevisionBadges,
+  RevisionBanners,
+  ReasonModal,
+  isCurrentRevision,
+  isLocked,
+  revisionLabel,
+  type RevisionView,
+} from "@/components/document-revision";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { FileText, Receipt, Download, Send, X, Globe } from "lucide-react";
 import { useDynamicId, cn } from "@/lib/utils";
@@ -110,6 +119,49 @@ export default function NoticeDetailPage({
   const { isAdmin } = useCurrentUser();
   const approvalStatus: string | undefined = data?.notice?.approval_status ?? undefined;
   const notBeforeApproval = approvalStatus === "PENDING_APPROVAL" || approvalStatus === "REJECTED";
+  // 版・取り消し(DEMO-000224)。生きている版(取り消し済みでも、差し替え済みでもない)だけが操作できる
+  const rev: RevisionView | null = notice
+    ? {
+        revision: notice.revision ?? 1,
+        supersedesId: notice.supersedes_notice_id ?? null,
+        revisionReason: notice.revision_reason ?? null,
+        cancelledAt: notice.cancelled_at ?? null,
+        cancelReason: notice.cancel_reason ?? null,
+        supersededBy: data?.superseded_by
+          ? { id: String(data.superseded_by.id), sent: !!data.superseded_by.sent, reason: data.superseded_by.reason ?? null }
+          : null,
+      }
+    : null;
+  const current = rev ? isCurrentRevision(rev) : true;
+  const locked = isLocked(notice?.mail_sent_at, notice?.partner_accepted_at);
+  const canRevise = locked && current;
+  const canApprove = current && (approvalStatus === "PENDING_APPROVAL" || approvalStatus === "REJECTED");
+  const canEdit = current && !notice?.partner_accepted_at && !notice?.mail_sent_at;
+  // 送った書類は差し戻さない(直すときは、訂正版を作る)
+  const canReject =
+    current && (approvalStatus === "PENDING_APPROVAL" || approvalStatus === "APPROVED") && !notice?.partner_accepted_at && !notice?.mail_sent_at;
+  const [reasonKind, setReasonKind] = useState<"revise" | "cancel" | null>(null);
+  const reviseMut = useMutation({
+    mutationFn: (reason: string) => reviseNotice(id, reason),
+    onSuccess: (res) => {
+      refreshAfterApproval();
+      qc.invalidateQueries({ queryKey: ["settlement"] });
+      setReasonKind(null);
+      toast.success("訂正版(下書き)を作りました。内容を確認して、承認 → 送信してください");
+      if (res.new_notice_id && !embedded) router.push(`/notices/${res.new_notice_id}`);
+    },
+    onError: (e: Error) => toast.error(`訂正版を作れませんでした: ${e.message}`),
+  });
+  const cancelMut = useMutation({
+    mutationFn: (reason: string) => cancelNotice(id, reason),
+    onSuccess: () => {
+      refreshAfterApproval();
+      qc.invalidateQueries({ queryKey: ["settlement"] });
+      setReasonKind(null);
+      toast.success("取り消しました。書類は消えずに残っています");
+    },
+    onError: (e: Error) => toast.error(`取り消せませんでした: ${e.message}`),
+  });
   const refreshAfterApproval = () => {
     qc.invalidateQueries({ queryKey: ["notices", id] });
     qc.invalidateQueries({ queryKey: ["notices"] });
@@ -160,6 +212,9 @@ export default function NoticeDetailPage({
     },
   });
 
+  const { data: peppolStatus } = useQuery({ queryKey: ["peppol-status"], queryFn: fetchPeppolStatus, staleTime: 60_000 });
+  const peppolConfigured = peppolStatus?.configured === true;
+
   const peppolSendMut = useMutation({
     mutationFn: () => sendNoticePeppol(id),
     onSuccess: (res) => {
@@ -173,7 +228,19 @@ export default function NoticeDetailPage({
     <DetailLayout title={`支払通知書 ${id}`} icon="💳" backHref="/" backLabel="ダッシュボードに戻る" isLoading={isLoading} embedded={embedded}>
       {notice && (
         <>
-          {/* アクションバー */}
+          {rev && (
+            <>
+              {(rev.revision > 1 || revisionLabel(rev)) && (
+                <div className="mb-2 flex items-center">
+                  <RevisionBadges revision={rev.revision} label={revisionLabel(rev)} />
+                </div>
+              )}
+              <RevisionBanners view={rev} hrefOf={(nid) => `/notices/${nid}`} />
+            </>
+          )}
+
+          {/* アクションバー: 左 = 本線(編集 → 承認 → メール送信 → Peppol送信)、右 = 例外(差し戻し・削除)。
+              ボタンは消さず、使えないときは非活性にする(押した印になり、位置も変わらない) */}
           <div className="flex items-center gap-2 mb-4 p-3 bg-card border border-border rounded-lg flex-wrap">
             <Button
               variant="outline"
@@ -186,32 +253,33 @@ export default function NoticeDetailPage({
             >
               <FileText className="w-3.5 h-3.5" /> PDF
             </Button>
-            {isAdmin && (approvalStatus === "PENDING_APPROVAL" || approvalStatus === "REJECTED") && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="border-indigo-600/50 text-indigo-400 hover:text-indigo-300 gap-1"
+              onClick={openEditModal}
+              disabled={!canEdit}
+              title={!canEdit ? "送信済みのため、編集できません" : undefined}
+            >
+              ✏️ 編集
+            </Button>
+            {isAdmin && (
               <Button
                 variant="outline" size="sm"
                 className="border-emerald-600/50 text-emerald-400 hover:text-emerald-300 gap-1"
                 onClick={() => approveMut.mutate()}
-                disabled={approveMut.isPending}
+                disabled={approveMut.isPending || !canApprove}
+                title={approvalStatus === "APPROVED" ? "承認済みです" : undefined}
               >
                 ✅ 承認
-              </Button>
-            )}
-            {isAdmin && (approvalStatus === "PENDING_APPROVAL" || approvalStatus === "APPROVED") && !notice.confirmed && (
-              <Button
-                variant="outline" size="sm"
-                className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
-                onClick={() => setConfirmTarget("reject")}
-                disabled={rejectMut.isPending}
-              >
-                ↩ 差し戻し
               </Button>
             )}
             <Button
               variant="outline" size="sm"
               className="border-blue-600/50 text-blue-400 hover:text-blue-300 gap-1"
               onClick={openSendModal}
-              disabled={notBeforeApproval}
-              title={notBeforeApproval ? "承認後に送信できます" : undefined}
+              disabled={notBeforeApproval || !current}
+              title={!current ? "新しい版、または取り消し前の書類では送信できません" : notBeforeApproval ? "承認後に送信できます" : undefined}
             >
               <Send className="w-3.5 h-3.5" /> {notice.mail_sent_at ? "再送信" : "メール送信"}
             </Button>
@@ -219,34 +287,59 @@ export default function NoticeDetailPage({
               variant="outline" size="sm"
               className="border-indigo-600/50 text-indigo-400 hover:text-indigo-300 gap-1"
               onClick={() => peppolSendMut.mutate()}
-              disabled={peppolSendMut.isPending || notBeforeApproval}
+              disabled={peppolSendMut.isPending || !peppolConfigured || notBeforeApproval || !current}
+              title={peppolConfigured ? undefined : "Peppol の接続設定が完了していないため、送信できません"}
             >
               <Globe className="w-3.5 h-3.5" /> Peppol送信
             </Button>
-            {!notice.confirmed && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="border-indigo-600/50 text-indigo-400 hover:text-indigo-300 gap-1"
-                onClick={openEditModal}
-              >
-                ✏️ 編集
-              </Button>
-            )}
-            {!notice.confirmed && (
+            <div className="flex items-center gap-2 ml-auto">
+              {isAdmin && (
+                <Button
+                  variant="outline" size="sm"
+                  className="border-blue-600/50 text-blue-400 hover:text-blue-300 gap-1"
+                  onClick={() => setReasonKind("revise")}
+                  disabled={!canRevise || reviseMut.isPending}
+                  title={!canRevise ? (locked ? "新しい版に差し替え済み、または取り消し済みです" : "まだ相手に送っていないので、そのまま編集できます") : "内容を直した新しい版(下書き)を作ります"}
+                >
+                  訂正版を作る
+                </Button>
+              )}
+              {isAdmin && (
+                <Button
+                  variant="outline" size="sm"
+                  className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
+                  onClick={() => setReasonKind("cancel")}
+                  disabled={!canRevise || cancelMut.isPending}
+                  title={!canRevise ? (locked ? "新しい版に差し替え済み、または取り消し済みです" : "まだ相手に送っていないので、削除できます") : "この書類をなかったことにします(書類は消えません)"}
+                >
+                  取り消し
+                </Button>
+              )}
+              {isAdmin && (
+                <Button
+                  variant="outline" size="sm"
+                  className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
+                  onClick={() => setConfirmTarget("reject")}
+                  disabled={rejectMut.isPending || !canReject}
+                  title={!canReject ? "この状態では差し戻せません" : undefined}
+                >
+                  ↩ 差し戻し
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
                 className="border-red-600/50 text-red-400 hover:text-red-300 gap-1"
                 onClick={() => setConfirmTarget("delete")}
-                disabled={deleteMut.isPending}
+                disabled={deleteMut.isPending || !canEdit}
+                title={!canEdit ? "送信済みのため、削除できません" : undefined}
               >
                 🗑 削除
               </Button>
-            )}
-            {notice.mail_sent_at && (
-              <span className="text-xs text-muted-foreground ml-2">
-                送信済: {String(notice.mail_sent_at).slice(0, 16).replace("T", " ")}
+            </div>
+            {notice.mail_sent_at && current && (
+              <span className="basis-full text-xs text-muted-foreground">
+                送信済: {String(notice.mail_sent_at).slice(0, 16).replace("T", " ")}（送信済みのため、編集・削除はできません。内容を直すときは「訂正版を作る」、なかったことにするときは「取り消し」を使います）
               </span>
             )}
           </div>
@@ -256,7 +349,7 @@ export default function NoticeDetailPage({
             <Field label="対象月" value={data.target_month_display} />
             <Field label="通知日" value={notice.notice_date} />
             <Field label="確認状態" value={
-              <StatusBadge status={notice.confirmed_at || notice.confirmed ? "CONFIRMED" : "UNCONFIRMED"} />
+              <StatusBadge status={notice.partner_accepted_at ? "CONFIRMED" : "UNCONFIRMED"} />
             } />
           </FieldGrid>
 
@@ -381,6 +474,16 @@ export default function NoticeDetailPage({
               />
             </div>
           )}
+
+          <ReasonModal
+            open={reasonKind !== null}
+            kind={reasonKind ?? "revise"}
+            docLabel="支払通知書"
+            docNo={id}
+            loading={reviseMut.isPending || cancelMut.isPending}
+            onSubmit={(reason) => (reasonKind === "cancel" ? cancelMut.mutate(reason) : reviseMut.mutate(reason))}
+            onClose={() => setReasonKind(null)}
+          />
 
           {/* 編集モーダル */}
           <FormModal

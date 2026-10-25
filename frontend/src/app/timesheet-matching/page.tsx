@@ -180,7 +180,7 @@ function TimesheetMatchingContent() {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="p-6 space-y-4">
       <PageHeader
         subtitle="左の受注に、右の勤務表をドラッグして結び付けます。氏名（空白の違いは無視）と月が合うものは、最初から結び付いています"
         actions={

@@ -5,7 +5,7 @@ use crate::infrastructure::repositories::auth_repo;
 use crate::infrastructure::repositories::jwt_blacklist_repo::JwtBlacklistRepo;
 use crate::infrastructure::repositories::user_repo;
 use crate::presentation::cookie_util;
-use crate::presentation::auth_messages::{client_ip, LOGIN_FAIL_MSG};
+use crate::presentation::auth_messages::{client_ip, ClientPeer, LOGIN_FAIL_MSG};
 use crate::presentation::middleware::role::AuthUser;
 use auth_core::domain::jwt::TokenBlacklist;
 use auth_core::domain::password::verify_and_needs_rehash;
@@ -88,20 +88,20 @@ impl auth_core::domain::attempt_lock::LockKey for LoginForm {
 /// POST /api/auth/login
 ///
 /// 試行回数制限は`routes.rs`の`login_routes`に配線された
-/// `auth_core::infrastructure::rate_limit::attempt_lock_middleware`が
-/// ハンドラ実行前に判定済み（Step3 Phase5-3）。ハンドラ内でのロック判定は行わない
-/// （`portal_key`/`mfa_key`相当は`portal.rs`/`webauthn.rs`がそれぞれ独自の
-/// `AttemptStore`インスタンス経由で行う。旧`login_guard.rs`は削除済み）。
+/// `presentation::middleware::login_attempt::guard`が、ハンドラ実行前に判定済み
+/// （s_login_attempt に記録してから数える。DEMO-000233 S2-D）。ハンドラ内でのロック判定は行わない。
+/// ポータル・二要素認証は`portal.rs`/`webauthn.rs`が`PgAttemptStore`（同じ表）で判定する。
 pub async fn api_login(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    peer: ClientPeer,
     jar: axum_extra::extract::CookieJar,
     axum::Json(form): axum::Json<LoginForm>,
 ) -> impl IntoResponse {
     let pool = &state.pool;
     let email = form.email.as_str();
     let password = form.password.as_str();
-    let ip = client_ip(&headers);
+    let ip = client_ip(peer.0, &headers);
 
     let user = auth_repo::find_user_for_login(pool, email)
         .await
@@ -129,11 +129,11 @@ pub async fn api_login(
                         "password",
                     )
                     .await;
-                    // ロール判定: Admin > Employee > Partner > USER
+                    // ロール判定: Admin > Employee > Partner > USER(判定は login_role。SSO と共用)
                     let role = if is_staff {
                         "ADMIN"
                     } else {
-                        // プロフィールからロールを判定
+                        // プロフィールからロールを判定(DB エラーは従来どおり、ログに残して USER 扱い)
                         let profile = match auth_repo::find_user_profile_role_fields(pool, id).await
                         {
                             Ok(p) => p,
@@ -142,11 +142,7 @@ pub async fn api_login(
                                 None
                             }
                         };
-                        match profile {
-                            Some((_, Some(_))) => "EMPLOYEE",
-                            Some((Some(_), _)) => "PARTNER",
-                            _ => "USER",
-                        }
+                        crate::domain::services::login_role::role_for_login(false, &profile)
                     };
                     // 社員は MFA 未登録でもログイン成功させる。フロントは mfa_setup_required で誘導。
                     let mfa_setup_required =
@@ -224,9 +220,19 @@ pub async fn api_login(
                 }
             }
         }
-        None => fail_login(pool, &ip, email).await,
+        None => {
+            // 存在しないメールでも、同じ時間だけ検証する(応答の時間で、メールの存在を推測されないように)
+            if let Some(dummy) = DUMMY_HASH.as_ref() {
+                let _ = verify_and_needs_rehash(password, dummy, &[&BcryptVerifier]);
+            }
+            fail_login(pool, &ip, email).await
+        }
     }
 }
+
+/// 存在しないメールのときに照合する、ダミーのハッシュ(実際のパスワードとは無関係。起動後の最初の 1 回だけ作る)
+static DUMMY_HASH: std::sync::LazyLock<Option<String>> =
+    std::sync::LazyLock::new(|| auth_core::domain::password::hash_password("dummy-password-for-timing-only").ok());
 
 async fn fail_login(pool: &sqlx::PgPool, ip: &str, email: &str) -> axum::response::Response {
     tracing::warn!("login failure ip={} email={}", ip, email);
@@ -253,10 +259,11 @@ fn internal_error_response() -> axum::response::Response {
 pub async fn api_logout(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
+    peer: ClientPeer,
     jar: axum_extra::extract::CookieJar,
 ) -> impl IntoResponse {
     let pool = &state.pool;
-    let ip = client_ip(&headers);
+    let ip = client_ip(peer.0, &headers);
 
     if let Some(session_cookie) = jar.get("sophia_session") {
         let sid = session_cookie.value().to_string();

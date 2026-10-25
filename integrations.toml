@@ -1,0 +1,35 @@
+# Sophia が使う外部連携の一覧
+#
+# 起動時・毎朝・本番デプロイの前に、この一覧と実際の設定を照らし合わせ、欠けを見つける。
+#   起動時・毎朝: 止めずに知らせる。本番デプロイの前: 止める（段階4）。
+# 用途を消す・required を外すときは、PR に理由を書く。
+#
+# 項目: id（用途）/ capability（notify・file_store・mail_send・mail_receive・server_job）
+#       required（省略時 true）/ fallback（使えないときの代わり）/ check（サーバの仕事の点検）/ description
+
+[[use]]
+id = "ops_alert"
+capability = "notify"
+fallback = "mail_admin"
+description = "異常の通知（メール取込の障害・復旧、期限超過、怪しいアクセス、点検の異常）"
+
+[[use]]
+id = "issued_pdf_archive"
+capability = "file_store"
+description = "発行した注文書・支払通知書・請求書・注文請書の PDF の保存（送った瞬間の写し。正本は DB）"
+
+[[use]]
+id = "received_doc_archive"
+capability = "file_store"
+description = "受信メールの添付（注文書・勤務表など）の保存"
+
+[[use]]
+id = "mail_send"
+capability = "mail_send"
+description = "メール送信（注文書・請求書・支払通知の送付、リマインド、招待）"
+
+[[use]]
+id = "db_backup"
+capability = "server_job"
+check = "scripts/check_backup_age.sh"
+description = "本番DBのバックアップ（サーバの cron）"

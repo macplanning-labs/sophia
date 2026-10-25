@@ -188,6 +188,15 @@ export interface BillingInvoicePreview {
   edi_excluded: boolean;
 }
 
+/** 勤務表の承認APIの応答に付く、請求書の確認ヒント */
+export interface BillingHint {
+  client_id: number;
+  key: string;
+  month: string;
+  missing_count: number;
+  confirmable: boolean;
+}
+
 export interface BillingPreviewResponse {
   month: string;
   invoices: BillingInvoicePreview[];
@@ -294,10 +303,11 @@ export interface ProjectSummary {
   timesheet_approved_count: number;
   timesheet_total_count: number;
   pending_engineer_names: string[];
-  billing_total: number;
-  partner_cost_total: number;
-  internal_cost_total: number;
-  profit: number;
+  /** 単価・売上・仕入・利益の金額は、contract.price:view の無い人には null で返る */
+  billing_total: number | null;
+  partner_cost_total: number | null;
+  internal_cost_total: number | null;
+  profit: number | null;
   is_finalized: boolean;
   engineers: SettlementViewRow[];
 }
@@ -340,9 +350,17 @@ export interface NoticeRow {
   target_month: string;
   total: number;
   confirmed: boolean;
+  /** 相手にメールで送ったか。送ったあとは削除・書き換えできない */
+  sent?: boolean;
   notice_date: string;
   /** 元発注書ID（ダッシュボード帳票モーダルの紐付け用） */
   purchase_order_id?: string;
+  /** 版(訂正版を作るたびに増える) */
+  revision?: number;
+  /** 取り消し済み */
+  cancelled?: boolean;
+  /** 新しい版に差し替え済み */
+  superseded?: boolean;
 }
 
 // ── 受注契約 ──
@@ -444,6 +462,8 @@ export interface CompanyInfo {
   email_use_tls: boolean;
   email_host_user: string;
   default_from_email: string;
+  /** 「取引先のメール」として扱わないドメイン(1行に1つ) */
+  excluded_mail_domains?: string;
   notice_approval_threshold: number | null;
   token_expiry_days: number | null;
   target_margin_direct: number;
@@ -452,6 +472,19 @@ export interface CompanyInfo {
 }
 
 // ── 請求書 ──
+
+/** 帳票の横断検索の1件(GET /api/v1/documents/search) */
+export interface DocumentSearchHit {
+  /** "received_order" | "order" | "invoice" | "notice" */
+  type: string;
+  id: string;
+  number: string;
+  title: string;
+  counterparty: string;
+  status: string;
+  month: string | null;
+  url: string;
+}
 
 export interface InvoiceRow {
   id: number;
@@ -469,6 +502,12 @@ export interface InvoiceRow {
   received_order_id?: number | null;
   /** クライアント受領確認日時。未確認ならnull（削除可否の判定に使う） */
   client_accepted_at?: string | null;
+  /** 版(訂正版を作るたびに増える) */
+  revision?: number;
+  /** 取り消し済み */
+  cancelled?: boolean;
+  /** 新しい版に差し替え済み */
+  superseded?: boolean;
 }
 
 // ── 稼働報告 ──
@@ -534,7 +573,8 @@ export interface EmployeeRow {
   employment_type: string;
   hire_date: string | null;
   email: string;
-  base_salary: number;
+  /** 給与の金額を見られない人(人事など)には null で返る */
+  base_salary: number | null;
   is_active: boolean;
 }
 
@@ -780,4 +820,42 @@ export interface AssignmentCreateResult {
   engineer_id: number;
   client_contract_id: number;
   partner_contract_id: number | null;
+}
+
+// ── 月別状況(新UI 3-8) ──
+
+export type StatusTone = "ok" | "warn" | "bad" | "na";
+
+export interface StatusCell {
+  tone: StatusTone;
+  label: string;
+}
+
+export type StatusNextAction =
+  | "REGISTER_ORDER"
+  | "REVIEW_TIMESHEET"
+  | "REREQUEST_TIMESHEET"
+  | "SEND_PURCHASE_ORDER"
+  | "REVIEW_INVOICE"
+  | "CREATE_NOTICE";
+
+export interface StatusRow {
+  engineer_id: number;
+  engineer_name: string;
+  client_id: number;
+  client_name: string;
+  project_id: string;
+  project_name: string;
+  received_order: StatusCell;
+  purchase_order: StatusCell;
+  timesheet: StatusCell;
+  invoice: StatusCell;
+  notice: StatusCell;
+  next_action: StatusNextAction | null;
+}
+
+export interface StatusMatrix {
+  month: string;
+  summary: { total: number; needs_action: number; invoice_unconfirmed: number; timesheet_stalled: number };
+  rows: StatusRow[];
 }

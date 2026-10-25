@@ -20,7 +20,8 @@ import { PipelineTable, PO_DISPLAY_STEPS, RO_DISPLAY_STEPS } from "@/components/
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
 import { DocumentDetailModal, type DocumentModalTarget } from "@/components/dashboard/document-detail-modal";
 
-function formatYen(n: number): string {
+function formatYen(n: number | null): string {
+  if (n == null) return "—"; // 金額を見られない人には null で届く
   return `¥${n < 0 ? "-" : ""}${Math.abs(n).toLocaleString("ja-JP")}`;
 }
 

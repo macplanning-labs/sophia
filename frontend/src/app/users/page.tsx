@@ -4,8 +4,11 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
 import { fetchUsers, apiPost, fetchEmployeeOptions } from "@/lib/api";
+import { HandOverDialog } from "@/components/org-admin/hand-over-dialog";
+import { toggleUserWithTransfer, type OwnedCount, type TransferTo } from "@/lib/owner-transfer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
 import { FormModal, FormField, FormInput, FormSelect } from "@/components/ui/form-modal";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DetailModal } from "@/components/ui/detail-modal";
@@ -39,7 +42,7 @@ function UsersPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const qc = useQueryClient();
-  const { isAdmin, isLoading: userLoading } = useCurrentUser();
+  const { user: me, isAdmin, isLoading: userLoading } = useCurrentUser();
   const [editId, setEditId] = useState<string | null>(null);
 
   const { data: users, isLoading } = useQuery({
@@ -86,18 +89,26 @@ function UsersPageContent() {
   });
 
   // ── 有効/無効トグル ──
+  // 担当データのある社員に結びつくユーザーを無効にすると 409。引き継ぎ先を選ぶ画面を開く。
+  const [handOver, setHandOver] = useState<{ id: number; username: string; employeeId: number | null; owned: OwnedCount[] } | null>(null);
   const toggleMutation = useMutation({
-    mutationFn: (id: number) => apiPost(`/api/v1/users/${id}/toggle`, {}),
-    onSuccess: () => {
+    mutationFn: (args: { id: number; transferTo?: TransferTo }) => toggleUserWithTransfer(args.id, args.transferTo),
+    onSuccess: (res, args) => {
+      if (res.conflict) {
+        const row = (users ?? []).find((u) => u.id === args.id);
+        setHandOver({ id: args.id, username: row?.username ?? "", employeeId: row?.employee_id ?? null, owned: res.owned });
+        return;
+      }
+      setHandOver(null);
       qc.invalidateQueries({ queryKey: ["users"] });
       toast.success("ステータスを変更しました");
     },
     onError: (e: Error) => toast.error(e.message || "変更に失敗しました"),
   });
 
-  const handleToggle = (e: React.MouseEvent, id: number) => {
+  const handleToggle = (e: React.MouseEvent, u: { id: number }) => {
     e.stopPropagation();
-    toggleMutation.mutate(id);
+    toggleMutation.mutate({ id: u.id });
   };
 
   if (userLoading) return null;
@@ -105,11 +116,13 @@ function UsersPageContent() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-center justify-end">
-        <Button size="sm" onClick={() => setModalOpen(true)}>
-          <Plus className="w-4 h-4 mr-1" /> 新規作成
-        </Button>
-      </div>
+      <PageHeader
+        actions={
+          <Button size="sm" onClick={() => setModalOpen(true)}>
+            <Plus className="w-4 h-4 mr-1" /> 新規作成
+          </Button>
+        }
+      />
 
       <div className="bg-card border border-border rounded-lg overflow-hidden">
         {isLoading ? (
@@ -147,13 +160,20 @@ function UsersPageContent() {
                      : <Badge variant="outline" className="border-border text-muted-foreground text-[10px]">無効</Badge>}
                   </TableCell>
                   <TableCell className="text-center">
-                    <button onClick={(e) => handleToggle(e, u.id)} className="inline-flex items-center gap-1 group" title="クリックで切替">
-                      {u.is_active ? (
-                        <><ToggleRight className="w-5 h-5 text-emerald-400 group-hover:text-emerald-300" /><span className="text-[10px] text-emerald-400">有効</span></>
-                      ) : (
-                        <><ToggleLeft className="w-5 h-5 text-muted-foreground group-hover:text-foreground" /><span className="text-[10px] text-muted-foreground">無効</span></>
-                      )}
-                    </button>
+                    {u.id === me?.user_id ? (
+                      // 自分自身は無効にできない(ログアウトして操作できなくなるため。DEMO-000186)
+                      <button type="button" disabled className="inline-flex items-center gap-1 cursor-not-allowed" title="自分自身は切り替えできません">
+                        <ToggleRight className="w-5 h-5 text-emerald-400/50" /><span className="text-[10px] text-emerald-400/70">有効(自分)</span>
+                      </button>
+                    ) : (
+                      <button onClick={(e) => handleToggle(e, u)} className="inline-flex items-center gap-1 group" title="クリックで切替">
+                        {u.is_active ? (
+                          <><ToggleRight className="w-5 h-5 text-emerald-400 group-hover:text-emerald-300" /><span className="text-[10px] text-emerald-400">有効</span></>
+                        ) : (
+                          <><ToggleLeft className="w-5 h-5 text-muted-foreground group-hover:text-foreground" /><span className="text-[10px] text-muted-foreground">無効</span></>
+                        )}
+                      </button>
+                    )}
                   </TableCell>
                   <TableCell className="text-[11px] text-muted-foreground">{u.created_at?.slice(0, 10)}</TableCell>
                 </TableRow>
@@ -206,6 +226,18 @@ function UsersPageContent() {
           </p>
         </FormField>
       </FormModal>
+
+      {handOver && (
+        <HandOverDialog
+          subjectLabel={`ユーザー ${handOver.username}`}
+          owned={handOver.owned}
+          employeeId={handOver.employeeId}
+          submitLabel="引き継いで無効にする"
+          loading={toggleMutation.isPending}
+          onSubmit={(to) => toggleMutation.mutate({ id: handOver.id, transferTo: to })}
+          onClose={() => setHandOver(null)}
+        />
+      )}
 
       {editId && (
         <DetailModal

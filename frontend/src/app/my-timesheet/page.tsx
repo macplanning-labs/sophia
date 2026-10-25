@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { CalendarClock } from "lucide-react";
 import { toast } from "sonner";
@@ -187,14 +188,31 @@ export default function MyTimesheetPage() {
 
   return (
     <div className="p-6 space-y-6">
-      <div>
-        <h1 className="text-xl font-bold text-foreground flex items-center gap-2">
-          <CalendarClock className="w-5 h-5 text-sky-400" /> 稼働報告（自己申告）
-        </h1>
-        <p className="text-xs text-muted-foreground mt-1">
-          受注契約が無い社員向けの月次稼働報告です。見慣れた勤務表と同じ列構成で入力できます。
-        </p>
-      </div>
+      <PageHeader
+        start={
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline" size="sm"
+            onClick={() => {
+              const [y, m] = targetMonth.split("-").map(Number);
+              const d = new Date(y, m - 2, 1);
+              setTargetMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+            }}
+          >‹</Button>
+          <span className="text-sm font-semibold tabular-nums min-w-[100px] text-center">
+            {targetMonth.replace("-", "年")}月
+          </span>
+          <Button
+            variant="outline" size="sm"
+            onClick={() => {
+              const [y, m] = targetMonth.split("-").map(Number);
+              const d = new Date(y, m, 1);
+              setTargetMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+            }}
+          >›</Button>
+        </div>
+        }
+      />
 
       {isSubmitted && (
         <div className={`flex items-center gap-2 px-3 py-2 rounded-md text-xs font-medium border ${
@@ -208,28 +226,6 @@ export default function MyTimesheetPage() {
             : "提出済み（承認待ち）です。管理者が承認するまで給与計算には反映されません。"}
         </div>
       )}
-
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline" size="sm"
-          onClick={() => {
-            const [y, m] = targetMonth.split("-").map(Number);
-            const d = new Date(y, m - 2, 1);
-            setTargetMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
-          }}
-        >‹</Button>
-        <span className="text-sm font-semibold tabular-nums min-w-[100px] text-center">
-          {targetMonth.replace("-", "年")}月
-        </span>
-        <Button
-          variant="outline" size="sm"
-          onClick={() => {
-            const [y, m] = targetMonth.split("-").map(Number);
-            const d = new Date(y, m, 1);
-            setTargetMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
-          }}
-        >›</Button>
-      </div>
 
       <div className="flex gap-4 border-b border-border">
         <button

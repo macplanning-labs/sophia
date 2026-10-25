@@ -1,7 +1,7 @@
 //! domain/audit.rs — 認証監査ログ（方針ドキュメント5章）
 //!
-//! イベント定義はauth-core、永続化はアプリ側（Sophiaの`h_auth_event`、
-//! WIPの相当テーブル等）。auth-coreは適切なタイミングで`AuthAuditSink`を
+//! イベント定義はauth-core、永続化はアプリ側（監査イベント用テーブル等）。
+//! auth-coreは適切なタイミングで`AuthAuditSink`を
 //! 呼ぶだけで、テーブルスキーマは持たない。
 
 use chrono::{DateTime, Utc};

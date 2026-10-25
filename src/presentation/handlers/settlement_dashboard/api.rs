@@ -5,6 +5,8 @@ use axum::{
 use crate::infrastructure::db_tx::LogErr;
 use chrono::{NaiveDate, Datelike};
 use sqlx::PgPool;
+use crate::domain::authz::stamp::NO_OWNER_MESSAGE;
+use crate::domain::services::issue_error::IssueError;
 use crate::domain::services::settlement_dashboard::{
     self, SettlementFilter,
 };
@@ -17,6 +19,8 @@ use super::{
 /// GET /api/settlement?month=2026-05-01&client_id=&partner_id=&status=
 pub async fn api_index(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Query(filter): Query<DashboardFilter>,
 ) -> Result<Json<SettlementApiResponse>, AppError> {
     let today = chrono::Utc::now().date_naive();
@@ -27,16 +31,25 @@ pub async fn api_index(
         .or_else(|_| NaiveDate::parse_from_str(&format!("{}-01", target_month_str), "%Y-%m-%d"))
         .unwrap_or_else(|_| today.with_day(1).unwrap_or(today));
 
+    // partner_id の条件は、SQL ではなく、支払側を伏せた後の行に掛ける(見えないパートナーの所属を、条件で逆算させない)
     let sfilter = SettlementFilter {
         target_month: Some(target_month_str),
         client_id: filter.client_id,
-        partner_id: filter.partner_id.clone(),
+        partner_id: None,
         project_id: filter.project_id.clone(),
         status: filter.status.clone(),
     };
 
     let rows = settlement_dashboard::list_settlement_rows(&pool, target_month, &sfilter).await?;
-    let (mut view_rows, summary) = settlement_dashboard::calculate_preview(rows);
+    // 見える範囲の行だけにする(集計も、見える行だけで行う。入口の権限表に頼らない。DEMO-000254)
+    let (rows, visibility) = retain_visible_rows(&pool, &auth_user, authz.as_ref().map(|e| &e.0), rows).await?;
+    let (rows, visibility): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .zip(visibility)
+        .filter(|(r, _)| filter.partner_id.as_deref().filter(|p| !p.is_empty()).is_none_or(|p| r.partner_id.as_deref() == Some(p)))
+        .unzip();
+    let (mut view_rows, mut summary) = settlement_dashboard::calculate_preview(rows);
+    settlement_dashboard::finish_redacted_preview(&mut view_rows, &mut summary, &visibility);
 
     // ステータスフィルタ
     if let Some(ref status) = filter.status {
@@ -62,6 +75,18 @@ pub async fn api_index(
 
 /// GET /api/settlement/filters — フィルタ用マスタデータ
 pub async fn api_filters(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingInvoiceView) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_filters_inner(State(pool)).await)
+}
+
+async fn api_filters_inner(
     State(pool): State<PgPool>,
 ) -> Json<FiltersApiResponse> {
     let today = chrono::Utc::now().date_naive();
@@ -100,11 +125,90 @@ pub async fn api_filters(
     })
 }
 
+/// 精算の行のうち、見える範囲のものだけを残す。行は、請求側(受注契約)を請求書の閲覧権限で、
+/// 支払側(発注契約)を支払通知の閲覧権限で判定し、どちらかが見えれば残す。
+/// 片側しか見えない行は、見えない側の項目を伏せる(DEMO-000260)。返す `visibility` は、行と同じ順の `(請求側, 支払側)`。
+async fn retain_visible_rows(
+    pool: &PgPool,
+    auth_user: &crate::presentation::middleware::role::AuthUser,
+    authz: Option<&crate::domain::authz::Authz>,
+    rows: Vec<settlement_dashboard::SettlementRow>,
+) -> Result<(Vec<settlement_dashboard::SettlementRow>, Vec<(bool, bool)>), AppError> {
+    use crate::domain::authz::Permission;
+    use crate::infrastructure::repositories::stamp_repo;
+    let invoice_filter = auth_user.list_filter(authz, Permission::BillingInvoiceView);
+    let notice_filter = auth_user.list_filter(authz, Permission::BillingPaymentView);
+    let cc_ids: Vec<i64> = rows.iter().map(|r| r.client_contract_id).collect();
+    let pc_ids: Vec<i64> = rows.iter().filter_map(|r| r.partner_contract_id).collect();
+    let cc = stamp_repo::of_client_contracts(pool, &cc_ids).await?;
+    let pc = stamp_repo::of_partner_contracts(pool, &pc_ids).await?;
+    let mut out_rows = Vec::new();
+    let mut visibility = Vec::new();
+    for mut r in rows {
+        let inv = invoice_filter.allows_all() || cc.get(&r.client_contract_id).is_some_and(|s| invoice_filter.matches(s));
+        // 支払側が無い行(社員。発注契約なし)は、伏せる項目が無いので「見える」扱い。ただし行を残す理由にはしない
+        let pay_exists = r.partner_contract_id.is_some();
+        let pay = notice_filter.allows_all() || r.partner_contract_id.and_then(|id| pc.get(&id)).is_some_and(|s| notice_filter.matches(s));
+        if !inv && !(pay_exists && pay) {
+            continue;
+        }
+        let pay_shown = !pay_exists || pay;
+        settlement_dashboard::mask_hidden_sides(&mut r, inv, pay_shown);
+        out_rows.push(r);
+        visibility.push((inv, pay_shown));
+    }
+    Ok((out_rows, visibility))
+}
+
+/// 一括発行APIのエラー。担当が決まらないときだけ 400(本文は従来の発行結果と同じ `success`/`message` の形)、
+/// それ以外は共通の `AppError`(500)。
+pub enum IssueApiError {
+    /// 選んだ対象に、権限または担当範囲の外のものがある(何も発行しない)。
+    Forbidden,
+    /// 顧客・案件に担当が無く、請求書・支払通知書を作れない(全体を取り消している)。
+    NoOwner,
+    /// その他の内部エラー。
+    App(AppError),
+}
+
+impl<E: Into<anyhow::Error>> From<E> for IssueApiError {
+    fn from(e: E) -> Self {
+        IssueApiError::App(AppError::from(e))
+    }
+}
+
+impl IntoResponse for IssueApiError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            IssueApiError::Forbidden => crate::presentation::http_util::forbidden(),
+            IssueApiError::NoOwner => {
+                tracing::warn!("一括発行を拒否しました(担当が決まらない)");
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "success": false, "message": NO_OWNER_MESSAGE, "error": NO_OWNER_MESSAGE })),
+                )
+                    .into_response()
+            }
+            IssueApiError::App(e) => e.into_response(),
+        }
+    }
+}
+
 /// POST /api/settlement/issue-invoices — 請求書一括発行（JSON版）
 pub async fn api_issue_invoices(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Json(form): Json<ApiIssueForm>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<serde_json::Value>, IssueApiError> {
+    // 選んだ受注契約のすべてが、発行の権限と担当範囲の中であること(1件でも外なら、何も発行しない)。入口の権限表に頼らない(DEMO-000254)
+    let stamps = crate::infrastructure::repositories::stamp_repo::of_client_contracts(&pool, &form.selected_ids).await?;
+    for id in &form.selected_ids {
+        let stamp = stamps.get(id).cloned().unwrap_or_default();
+        if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingInvoiceIssue, &stamp) {
+            return Err(IssueApiError::Forbidden);
+        }
+    }
     let target_month = NaiveDate::parse_from_str(&form.target_month, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(&format!("{}-01", form.target_month), "%Y-%m-%d"))
         .unwrap_or_else(|_| chrono::Utc::now().date_naive());
@@ -171,6 +275,8 @@ pub async fn api_issue_invoices(
                 "created_invoices": results,
             })))
         }
+        // 担当が決まらない: 400 と案内(全体を取り消している)
+        Err(IssueError::NoOwner) => Err(IssueApiError::NoOwner),
         Err(e) => {
             Ok(Json(serde_json::json!({
                 "success": false,
@@ -183,8 +289,18 @@ pub async fn api_issue_invoices(
 /// POST /api/settlement/issue-notices — 支払通知書一括発行（JSON版）
 pub async fn api_issue_notices(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Json(form): Json<ApiIssueForm>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<Json<serde_json::Value>, IssueApiError> {
+    // 選んだ発注契約のすべてが、発行の権限と担当範囲の中であること(1件でも外なら、何も発行しない)。入口の権限表に頼らない(DEMO-000254)
+    let stamps = crate::infrastructure::repositories::stamp_repo::of_partner_contracts(&pool, &form.selected_ids).await?;
+    for id in &form.selected_ids {
+        let stamp = stamps.get(id).cloned().unwrap_or_default();
+        if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingPaymentIssue, &stamp) {
+            return Err(IssueApiError::Forbidden);
+        }
+    }
     let target_month = NaiveDate::parse_from_str(&form.target_month, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(&format!("{}-01", form.target_month), "%Y-%m-%d"))
         .unwrap_or_else(|_| chrono::Utc::now().date_naive());
@@ -241,6 +357,8 @@ pub async fn api_issue_notices(
                 "created_notices": results,
             })))
         }
+        // 担当が決まらない: 400 と案内(全体を取り消している)
+        Err(IssueError::NoOwner) => Err(IssueApiError::NoOwner),
         Err(e) => {
             Ok(Json(serde_json::json!({
                 "success": false,

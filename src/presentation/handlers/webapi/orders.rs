@@ -131,6 +131,8 @@ pub async fn submit_order(
         payload.work_start,
         payload.work_end,
         &project_name,
+        // API キー呼び出し(外部)は拒否しない: 親 → 受け皿 → 担当なし
+        crate::domain::authz::stamp::StampMode::AutoImport,
     ).await
         .map_err(|e| {
             tracing::error!("Failed to insert received order: {:?}", e);

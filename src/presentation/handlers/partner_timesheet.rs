@@ -92,6 +92,8 @@ pub async fn upload_submit(
         &result,
         &original_filename,
         "UPLOADED",
+        // 外部(パートナー)からの提出は拒否しない: 親 → 受け皿 → 担当なし
+        crate::domain::authz::stamp::StampMode::AutoImport,
     )
     .await
     {
@@ -111,7 +113,7 @@ pub async fn upload_submit(
         }
         Err(e) => {
             tracing::error!("パートナー稼働報告DB保存エラー: {:?}", e);
-            axum::Json(e.to_json()).into_response()
+            (e.status_code(), axum::Json(e.to_json())).into_response()
         }
     }
 }

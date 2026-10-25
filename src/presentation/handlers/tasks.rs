@@ -11,10 +11,11 @@
 use axum::{
     extract::{Path, Query, State},
     response::{IntoResponse, Redirect},
-    Form,
+    Form, Json,
 };
 use sqlx::PgPool;
 
+use crate::domain::authz::stamp::{is_no_owner, SKIPPED_NO_OWNER_NOTE};
 use crate::domain::models::task::{MonthlyTask, TaskType};
 use crate::domain::services::business_day::{calculate_deadline, resolve_report_deadline_settings};
 use crate::infrastructure::repositories::task_repo;
@@ -58,11 +59,17 @@ pub struct TaskFilter {
 /// POST /tasks/generate — 月次タスク一括生成
 pub async fn generate(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Form(form): Form<GenerateForm>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
     let work_month = match chrono::NaiveDate::parse_from_str(&form.work_month, "%Y-%m-%d") {
         Ok(d) => d,
-        Err(_) => return Redirect::to("/tasks"),
+        Err(_) => return Redirect::to("/tasks").into_response(),
     };
 
     use chrono::Datelike;
@@ -74,6 +81,7 @@ pub async fn generate(
 
     let all_types = TaskType::all();
     let mut created = 0i64;
+    let mut skipped_no_owner = 0i64;
 
     for target in &engineers {
         let eng_id = target.engineer_id;
@@ -121,6 +129,12 @@ pub async fn generate(
             };
 
             if let Err(e) = task_repo::insert_task(&pool, proj_id, eng_id, work_month, type_str, eng_name, deadline).await {
+                // 担当が決まらない案件: その行だけ作らずに続ける(件数を応答に載せる)
+                if is_no_owner(e.as_ref()) {
+                    skipped_no_owner += 1;
+                    tracing::warn!("月次タスク一括生成: 担当が決まらないため作りませんでした | table=t_monthly_task 案件ID={}", proj_id);
+                    continue;
+                }
                 tracing::error!("DB error: {:?}", e);
             }
 
@@ -129,11 +143,33 @@ pub async fn generate(
     }
 
     tracing::info!("月次タスク一括生成: {}件（{}分）", created, work_month);
-    Redirect::to("/tasks")
+    if skipped_no_owner > 0 {
+        return Json(serde_json::json!({
+            "success": true,
+            "created": created,
+            "skipped_no_owner": skipped_no_owner,
+            "message": SKIPPED_NO_OWNER_NOTE,
+        }))
+        .into_response();
+    }
+    Redirect::to("/tasks").into_response()
 }
 
 /// POST /tasks/{id}/complete — タスク完了
 pub async fn complete(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(complete_inner(State(pool), Path(id)).await)
+}
+
+async fn complete_inner(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
@@ -146,6 +182,19 @@ pub async fn complete(
 
 /// POST /tasks/{id}/skip — タスクスキップ
 pub async fn skip(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Path(id): Path<i64>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(skip_inner(State(pool), Path(id)).await)
+}
+
+async fn skip_inner(
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
@@ -171,6 +220,19 @@ pub struct TaskApiResponse {
 }
 
 pub async fn api_index(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    Query(filter): Query<TaskFilter>,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetView) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(api_index_inner(State(pool), Query(filter)).await)
+}
+
+async fn api_index_inner(
     State(pool): State<PgPool>,
     Query(filter): Query<TaskFilter>,
 ) -> axum::Json<TaskApiResponse> {

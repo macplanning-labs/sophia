@@ -338,7 +338,7 @@ pub async fn check_overdue_tasks(pool: &PgPool, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = super::jst::format(chrono::Utc::now(), "%Y-%m-%d");
 
     // 管理者にメール送信
     let admin_email = reminder_repo::find_admin_notification_email(pool).await?;
@@ -367,16 +367,12 @@ pub async fn check_overdue_tasks(pool: &PgPool, dry_run: bool) -> Result<()> {
 
 /// Google Chat Incoming Webhook へ警告一覧を投稿する(実体は`chat_notifier::post`に共通化)。
 async fn post_google_chat_webhook(warnings: &[String], today: &str) {
-    let text = format!(
-        "*【Sophia】毎朝チェック: {}件の警告 ({})*\n{}",
-        warnings.len(),
-        today,
-        warnings
-            .iter()
-            .map(|w| format!("• {}", w))
-            .collect::<Vec<_>>()
-            .join("\n")
+    let list = warnings.iter().map(|w| format!("・{w}")).collect::<Vec<_>>().join("\n");
+    let incident = super::chat_notifier::Incident::new(
+        integration_core::Level::Warning,
+        format!("毎朝チェックで、{}件の警告があります（{today}）", warnings.len()),
+        format!("期限超過・未対応の業務があります。\n{list}"),
+        "内容を確認し、期限超過・未対応のものに対応してください",
     );
-
-    super::chat_notifier::post(&text).await;
+    super::chat_notifier::post(&incident).await;
 }

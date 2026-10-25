@@ -9,7 +9,9 @@ use axum::http::{header, StatusCode};
 use axum::body::Body;
 use sqlx::PgPool;
 
+use crate::domain::authz::Authz;
 use crate::domain::models::expense::ExpenseRequestItemForm;
+use crate::domain::services::expense_access;
 use crate::infrastructure::repositories::{expense_repo, mobile_upload_repo};
 use crate::presentation::api_response::AppError;
 use crate::presentation::middleware::role::AuthUser;
@@ -35,41 +37,121 @@ pub(crate) fn resolve_receipt_mime(bytes: &[u8], reported: &str) -> Option<&'sta
     }
 }
 
+/// 経費を操作する権限が無いときの 403 応答
+pub(crate) fn expense_forbidden_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({"success": false, "error": "この経費を操作する権限がありません"})),
+    )
+        .into_response()
+}
+
+/// 経費ヘッダーを操作してよいか確認する（全件権限者、または申請者本人のみ）。
+/// 存在しなければ 404、権限が無ければ 403 の応答を `Err` で返す。
+pub(crate) async fn check_header_access(
+    pool: &PgPool,
+    auth_user: &AuthUser,
+    authz: Option<&Authz>,
+    expense_request_id: i64,
+) -> Result<(), Response> {
+    let exp = match expense_repo::find_by_id(pool, expense_request_id).await {
+        Ok(exp) => exp,
+        Err(e) => return Err(AppError::from(e).into_response()),
+    };
+    let Some(exp) = exp else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"success": false, "error": "経費申請が見つかりません"})),
+        )
+            .into_response());
+    };
+    if !expense_access::can_access(auth_user.can_see_all_expenses(authz), auth_user.employee_id(), exp.employee_id) {
+        return Err(expense_forbidden_response());
+    }
+    Ok(())
+}
+
+/// 明細を操作してよいか確認する（申請者本人、または全件権限者のみ）。
+/// 成功時は (親ヘッダーID, ステータス) を返す。存在しなければ 404、権限が無ければ 403 を `Err` で返す。
+pub(crate) async fn check_item_access(
+    pool: &PgPool,
+    auth_user: &AuthUser,
+    authz: Option<&Authz>,
+    item_id: i64,
+) -> Result<(i64, String), Response> {
+    let owner = match expense_repo::find_item_owner(pool, item_id).await {
+        Ok(owner) => owner,
+        Err(e) => return Err(AppError::from(e).into_response()),
+    };
+    let Some((header_id, owner_employee_id, status)) = owner else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"success": false, "error": "明細が見つかりません"})),
+        )
+            .into_response());
+    };
+    if !expense_access::can_access(auth_user.can_see_all_expenses(authz), auth_user.employee_id(), owner_employee_id) {
+        return Err(expense_forbidden_response());
+    }
+    Ok((header_id, status))
+}
+
 /// POST /api/expenses/{id}/items — 明細を追加する
 pub async fn api_add_item(
     State(pool): State<PgPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(expense_request_id): Path<i64>,
     Json(form): Json<ExpenseRequestItemForm>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
+    if let Err(resp) = check_header_access(&pool, &auth_user, authz.as_ref().map(|e| &e.0), expense_request_id).await {
+        return Ok(resp);
+    }
     let item_id = expense_repo::add_item(&pool, expense_request_id, &form).await?;
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "success": true, "id": item_id }))))
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "success": true, "id": item_id }))).into_response())
 }
 
 /// PUT /api/expenses/items/{item_id} — 明細を更新する
 pub async fn api_update_item(
     State(pool): State<PgPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(item_id): Path<i64>,
     Json(form): Json<ExpenseRequestItemForm>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
+    if let Err(resp) = check_item_access(&pool, &auth_user, authz.as_ref().map(|e| &e.0), item_id).await {
+        return Ok(resp);
+    }
     let rows = expense_repo::update_item(&pool, item_id, &form).await?;
-    Ok(Json(serde_json::json!({ "success": rows > 0 })))
+    Ok(Json(serde_json::json!({ "success": rows > 0 })).into_response())
 }
 
 /// DELETE /api/expenses/items/{item_id} — 明細を削除する
 pub async fn api_delete_item(
     State(pool): State<PgPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(item_id): Path<i64>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
+    if let Err(resp) = check_item_access(&pool, &auth_user, authz.as_ref().map(|e| &e.0), item_id).await {
+        return Ok(resp);
+    }
     let rows = expense_repo::delete_item(&pool, item_id).await?;
-    Ok(Json(serde_json::json!({ "success": rows > 0 })))
+    Ok(Json(serde_json::json!({ "success": rows > 0 })).into_response())
 }
 
 /// GET /api/expenses/items/{item_id}/receipt — 領収書画像を取得する
 pub async fn api_item_receipt(
     State(pool): State<PgPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(item_id): Path<i64>,
 ) -> Result<Response, AppError> {
     use crate::presentation::http_util;
+
+    if let Err(resp) = check_item_access(&pool, &auth_user, authz.as_ref().map(|e| &e.0), item_id).await {
+        return Ok(resp);
+    }
 
     let image = expense_repo::find_receipt_image(&pool, item_id).await?;
 
@@ -78,7 +160,8 @@ pub async fn api_item_receipt(
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime)
-                .header(header::CACHE_CONTROL, "private, max-age=3600"),
+                .header(header::CACHE_CONTROL, "private, max-age=3600")
+                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             Body::from(bytes)
         )),
         None => Ok((StatusCode::NOT_FOUND, "領収書画像が見つかりません").into_response()),
@@ -88,17 +171,13 @@ pub async fn api_item_receipt(
 /// POST /api/expenses/items/{item_id}/receipt — PC画面から領収書画像をアップロード（貼り付け/ファイル選択）
 pub async fn api_upload_item_receipt(
     State(pool): State<PgPool>,
-    Extension(_auth_user): Extension<AuthUser>,
+    Extension(auth_user): Extension<AuthUser>,
+    authz: Option<Extension<Authz>>,
     Path(item_id): Path<i64>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
-    let item = expense_repo::find_item_by_id(&pool, item_id).await?;
-    if item.is_none() {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"success": false, "error": "明細が見つかりません"})),
-        )
-            .into_response());
+    if let Err(resp) = check_item_access(&pool, &auth_user, authz.as_ref().map(|e| &e.0), item_id).await {
+        return Ok(resp);
     }
 
     let mut file_bytes: Option<Vec<u8>> = None;

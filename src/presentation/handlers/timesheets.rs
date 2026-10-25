@@ -45,8 +45,23 @@ pub struct TimesheetFilter {
 /// POST /api/timesheets/{id}/approve — 承認（JSON。旧SSR RedirectはSPAのfetch followで404になる）
 pub async fn approve(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_timesheet(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetApprove, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
+    // 確定通知の「確定者」は、操作した人(以前は "admin" で決め打ち。DEMO-000203)
+    let approver = auth_user.user.username.clone();
     match timesheet_repo::approve(&pool, id).await {
         Ok(0) => (
             StatusCode::CONFLICT,
@@ -70,6 +85,7 @@ pub async fn approve(
             if !is_self_report {
                 tokio::spawn({
                     let pool = pool.clone();
+                    let approver = approver.clone();
                     async move {
                         let info = timesheet_repo::find_report_info_for_notification(&pool, id)
                             .await
@@ -77,7 +93,8 @@ pub async fn approve(
                             .flatten();
 
                         if let Some(info) = info {
-                            let display_name = info.partner_name.unwrap_or_else(|| "不明".into());
+                            // 取引先が取れないときは、「不明」ではなく分かる言葉にする
+                            let display_name = info.partner_name.unwrap_or_else(|| "取引先未登録".into());
                             let month_display = info
                                 .work_month
                                 .map(|d| d.format("%Y年%m月").to_string())
@@ -95,7 +112,7 @@ pub async fn approve(
                             let ctx = crate::domain::services::email_service::compose_report_approved_email(
                                 &display_name,
                                 &month_display,
-                                "admin",
+                                &approver,
                                 &report_lines,
                             );
                             let email_svc =
@@ -117,7 +134,13 @@ pub async fn approve(
                 });
             }
 
-            axum::Json(serde_json::json!({ "success": true })).into_response()
+            // 承認した勤務表が入る請求書の「あと何名」。取れなければ付けない(承認の結果は変えない)
+            let hint = crate::domain::services::billing_hint::billing_hint_for_timesheet(&pool, id).await;
+            let mut body = serde_json::json!({ "success": true });
+            if let Some(h) = hint {
+                body["billing_hint"] = serde_json::json!(h);
+            }
+            axum::Json(body).into_response()
         }
         Err(e) => {
             tracing::error!("timesheet approve DB error: {:?}", e);
@@ -136,8 +159,21 @@ pub async fn approve(
 /// POST /api/timesheets/{id}/reject — 差戻し
 pub async fn reject(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_timesheet(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetApprove, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     match timesheet_repo::reject(&pool, id).await {
         Ok(()) => axum::Json(serde_json::json!({ "success": true })).into_response(),
         Err(e) => {
@@ -157,8 +193,21 @@ pub async fn reject(
 /// POST /api/timesheets/{id}/send — クライアント送付
 pub async fn send_to_client(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
+    // 入口の権限表に頼らず、ハンドラ自身で権限と担当範囲を判定する(DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_timesheet(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetApprove, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     match timesheet_repo::send_to_client(&pool, id).await {
         Ok(()) => axum::Json(serde_json::json!({ "success": true })).into_response(),
         Err(e) => {
@@ -180,6 +229,19 @@ pub async fn send_to_client(
 /// Excel / 勤務表PDFを解析し、結果をJSONで返す。フロントでプレビュー表示後、
 /// ユーザーが「登録」ボタンを押すと /timesheets/confirm で実際に保存する。
 pub async fn upload(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    multipart: axum::extract::Multipart,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(upload_inner(State(pool), multipart).await)
+}
+
+async fn upload_inner(
     State(pool): State<PgPool>,
     mut multipart: axum::extract::Multipart,
 ) -> impl IntoResponse {
@@ -214,6 +276,19 @@ pub async fn upload(
 /// 成功・失敗とも JSON（`status` / `error`）を返す（サイレント Redirect はしない）。
 /// 初期ステータスは PARSED（管理者解析済み）。
 pub async fn confirm_upload(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+    multipart: axum::extract::Multipart,
+) -> axum::response::Response {
+    // 担当スタンプを持たない操作(一覧・選択肢・新規作成)。権限を持つ人だけが扱える。入口の権限表に頼らない(DEMO-000254)
+    if !auth_user.can_access_unstamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetEdit) {
+        return crate::presentation::http_util::forbidden();
+    }
+    axum::response::IntoResponse::into_response(confirm_upload_inner(State(pool), multipart).await)
+}
+
+async fn confirm_upload_inner(
     State(pool): State<PgPool>,
     mut multipart: axum::extract::Multipart,
 ) -> impl IntoResponse {
@@ -265,6 +340,7 @@ pub async fn confirm_upload(
         &result,
         &original_filename,
         "PARSED",
+        crate::domain::authz::stamp::StampMode::Manual,
     )
     .await
     {
@@ -277,6 +353,11 @@ pub async fn confirm_upload(
                 result.worker_name
             );
             axum::Json(timesheet_upload_common::ok_confirm_response()).into_response()
+        }
+        // 担当が決まらない: 400 と案内(顧客の担当を設定する)
+        Err(e @ timesheet_upload_common::TimesheetUploadError::NoOwner) => {
+            tracing::warn!("稼働報告を登録できません(担当が決まらない): {:?}", e);
+            (e.status_code(), axum::Json(e.to_json())).into_response()
         }
         Err(e) => {
             tracing::error!("稼働報告DB保存エラー: {:?}", e);
@@ -296,8 +377,12 @@ pub struct TimesheetApiResponse {
     pub summary: TimesheetSummary,
 }
 
-pub async fn api_index(State(pool): State<PgPool>) -> axum::Json<TimesheetApiResponse> {
-    let timesheets = timesheet_repo::list_timesheet_rows(&pool)
+pub async fn api_index(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::Json<TimesheetApiResponse> {
+    let timesheets = timesheet_repo::list_timesheet_rows(&pool, &auth_user.list_filter(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetView))
         .await
         .unwrap_or_else(|e| { tracing::warn!("timesheets api: {:?}", e); vec![] });
 
@@ -314,8 +399,21 @@ pub async fn api_index(State(pool): State<PgPool>) -> axum::Json<TimesheetApiRes
 /// GET /api/timesheets/{id} — 詳細（JSON）
 pub async fn api_detail(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(AUTHZ_MODE が shadow でも拒否する。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_timesheet(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::TimesheetView, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     let sheet = timesheet_repo::find_by_id(&pool, id).await.log_err().ok().flatten();
 
     match sheet {

@@ -14,3 +14,9 @@ pub fn build_response(builder: Builder, body: Body) -> Response {
         fallback
     })
 }
+
+/// 権限がないときの応答(403)。ハンドラ自身の権限判定で使う。他人のデータの有無は伝えない。
+pub fn forbidden() -> Response {
+    use axum::response::IntoResponse;
+    (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({ "error": "この操作の権限がありません" }))).into_response()
+}

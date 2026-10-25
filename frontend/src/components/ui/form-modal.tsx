@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import { DateInput } from "@/components/ui/date-input";
 import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
+import { useEscapeKey } from "@/lib/useEscapeKey";
 
 interface FormModalProps {
   open: boolean;
@@ -15,8 +16,10 @@ interface FormModalProps {
   onSubmit: () => void;
   onClose: () => void;
   children: React.ReactNode;
-  /** フッター左側(削除ボタン等) */
+  /** フッター左側(補助のボタン。テスト送信など) */
   footerStart?: React.ReactNode;
+  /** フッター右端(例外の操作。削除など)。ボタンは消さず、使えないときは非活性にする。指定すると、キャンセル・保存は左に寄る */
+  footerEnd?: React.ReactNode;
 }
 
 const sizeMap = {
@@ -36,6 +39,7 @@ export function FormModal({
   onClose,
   children,
   footerStart,
+  footerEnd,
 }: FormModalProps) {
   const handleBackdrop = useCallback(
     (e: React.MouseEvent) => {
@@ -43,6 +47,7 @@ export function FormModal({
     },
     [loading, onClose]
   );
+  useEscapeKey(open && !loading, onClose);
 
   if (!open) return null;
 
@@ -72,9 +77,9 @@ export function FormModal({
         </div>
 
         {/* Footer */}
-        <div className={`flex gap-2 px-6 py-4 border-t border-border ${footerStart ? "justify-between" : "justify-end"}`}>
+        <div className={`flex items-center gap-2 px-6 py-4 border-t border-border ${footerStart && !footerEnd ? "justify-between" : footerEnd ? "" : "justify-end"}`}>
           {footerStart && <div>{footerStart}</div>}
-          <div className="flex gap-2 ml-auto">
+          <div className={`flex gap-2 ${footerEnd ? "" : "ml-auto"}`}>
             <Button
               variant="outline"
               size="sm"
@@ -93,6 +98,7 @@ export function FormModal({
               {loading ? "保存中..." : submitLabel}
             </Button>
           </div>
+          {footerEnd && <div className="ml-auto">{footerEnd}</div>}
         </div>
       </div>
     </div>
@@ -137,7 +143,8 @@ export function FormInput({ className, ...props }: FormInputProps) {
 }
 
 interface FormSelectProps extends React.SelectHTMLAttributes<HTMLSelectElement> {
-  options: { value: string; label: string }[];
+  /** disabled: 選べない選択肢(例: 準備中のつなぎ先) */
+  options: { value: string; label: string; disabled?: boolean }[];
   placeholder?: string;
 }
 
@@ -153,7 +160,7 @@ export function FormSelect({ options, placeholder, className, ...props }: FormSe
         </option>
       )}
       {options.map((o) => (
-        <option key={o.value} value={o.value}>
+        <option key={o.value} value={o.value} disabled={o.disabled}>
           {o.label}
         </option>
       ))}

@@ -1,7 +1,7 @@
 /// infrastructure/repositories/employee_repo.rs — 社員(m_employee) CRUD
 
 use anyhow::Result;
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 
 use crate::domain::models::payroll::{Employee, EmployeeForm};
 
@@ -85,10 +85,10 @@ pub async fn update(pool: &PgPool, id: i64, form: &EmployeeForm) -> Result<()> {
 }
 
 /// 社員を論理削除する（is_active = false）
-pub async fn deactivate(pool: &PgPool, id: i64) -> Result<()> {
+pub async fn deactivate<'e>(exec: impl PgExecutor<'e>, id: i64) -> Result<()> {
     sqlx::query("UPDATE m_employee SET is_active = false, updated_at = NOW() WHERE id = $1")
         .bind(id)
-        .execute(pool)
+        .execute(exec)
         .await?;
     Ok(())
 }

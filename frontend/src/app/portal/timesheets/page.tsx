@@ -152,9 +152,8 @@ export default function PortalTimesheetsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      {ts.status !== "submitted" && (
-                        <SubmitButton id={ts.id} />
-                      )}
+                      {/* 提出は消さず、提出済みの行では非活性にする(押した印) */}
+                      <SubmitButton id={ts.id} submitted={ts.status === "submitted"} />
                     </TableCell>
                   </TableRow>
                 ))}
@@ -193,7 +192,7 @@ function TabButton({ active, onClick, icon: Icon, label }: { active: boolean; on
   );
 }
 
-function SubmitButton({ id }: { id: number }) {
+function SubmitButton({ id, submitted }: { id: number; submitted: boolean }) {
   const queryClient = useQueryClient();
   const mutation = useMutation({
     mutationFn: () => submitPortalTimesheet(id.toString()),
@@ -207,8 +206,9 @@ function SubmitButton({ id }: { id: number }) {
   return (
     <button
       onClick={() => mutation.mutate()}
-      disabled={mutation.isPending}
-      className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-blue-400 hover:bg-blue-500/10 rounded transition-colors"
+      disabled={submitted || mutation.isPending}
+      title={submitted ? "提出済みです" : undefined}
+      className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-blue-400 hover:bg-blue-500/10 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
     >
       <Send className="w-3 h-3" />
       提出

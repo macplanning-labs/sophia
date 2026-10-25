@@ -6,6 +6,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { fetchPartnerContracts, fetchPartnerContractFormData, apiPost } from "@/lib/api";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
 import { FormModal, FormField, FormInput, FormSelect } from "@/components/ui/form-modal";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -54,7 +55,7 @@ const SETTLEMENT_TYPES = [
 
 export default function PartnerContractsPage() {
   return (
-    <Suspense fallback={<div className="p-8 text-sm text-muted-foreground">読み込み中...</div>}>
+    <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">読み込み中...</div>}>
       <PartnerContractsPageContent />
     </Suspense>
   );
@@ -204,11 +205,13 @@ function PartnerContractsPageContent() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="flex items-center justify-end">
-        <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-foreground gap-1" onClick={openCreate}>
-          <Plus className="w-4 h-4" /> 新規作成
-        </Button>
-      </div>
+      <PageHeader
+        actions={
+          <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-foreground gap-1" onClick={openCreate}>
+            <Plus className="w-4 h-4" /> 新規作成
+          </Button>
+        }
+      />
 
       <div className="bg-card border border-border rounded-lg overflow-hidden">
         {isLoading ? (

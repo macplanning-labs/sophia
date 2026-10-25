@@ -1,41 +1,12 @@
 /// infrastructure/repositories/received_email_repo.rs — 受信メール(t_received_email) CRUD
 ///
-/// GASのWebhook（稼働報告メール受信通知）と、受信メール一覧・取込画面で使用する。
+/// 受信メール一覧・取込画面で使用する（旧 GAS Webhook の書き込みは DEMO-000177 で撤去）。
 /// t_mail_scan_log（ダッシュボードのメールチェック一覧用）とは別テーブルなので mail_repo.rs とは分離している。
 
 use anyhow::Result;
 use sqlx::PgPool;
 
 use crate::domain::models::received_email::ReceivedEmail;
-
-/// Webhookで受信したメールを記録する（重複はmessage_idで無視）
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_received_email(
-    pool: &PgPool,
-    message_id: &str,
-    from_email: &str,
-    from_name: &str,
-    subject: &str,
-    body_text: &str,
-    attachment_filename: &str,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO t_received_email (message_id, from_email, from_name, subject, received_at, body_text, attachment_filename)
-        VALUES ($1, $2, $3, $4, NOW(), $5, $6)
-        ON CONFLICT (message_id) DO NOTHING
-        "#
-    )
-    .bind(message_id)
-    .bind(from_email)
-    .bind(from_name)
-    .bind(subject)
-    .bind(body_text)
-    .bind(attachment_filename)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
 
 /// 送信者ドメインが既知の取引先ドメインと一致するか判定
 ///
@@ -44,6 +15,10 @@ pub async fn insert_received_email(
 pub async fn sender_matches_known_domain(pool: &PgPool, from_email: &str) -> Result<bool> {
     let domain = from_email.split('@').nth(1).unwrap_or("").to_lowercase();
     if domain.is_empty() {
+        return Ok(false);
+    }
+    // 自社のドメインなど、「取引先のメール」として扱わないドメイン(自社情報の設定)
+    if super::company_info_repo::get_excluded_mail_domains(pool).await?.contains(&domain) {
         return Ok(false);
     }
 
@@ -80,12 +55,19 @@ pub async fn list_received_emails(
 ) -> Result<Vec<ReceivedEmail>> {
     let mut sql = String::from("SELECT * FROM t_received_email WHERE 1=1");
     let mut bind_idx = 1;
+    // 取引先ドメインのみ表示のときは、自社情報で除外に設定したドメイン(自社など)を外す
+    let excluded: Vec<String> = if known_domain_only {
+        super::company_info_repo::get_excluded_mail_domains(pool).await?
+    } else {
+        Vec::new()
+    };
     if !status.is_empty() {
         sql.push_str(&format!(" AND status = ${bind_idx}"));
         bind_idx += 1;
     }
     if needs_review.is_some() {
         sql.push_str(&format!(" AND needs_manual_review = ${bind_idx}"));
+        bind_idx += 1;
     }
     if known_domain_only {
         sql.push_str(
@@ -97,6 +79,9 @@ pub async fn list_received_emails(
                 UNION SELECT DISTINCT split_part(email, '@', 2) FROM m_partner WHERE email <> ''
             )"#,
         );
+        if !excluded.is_empty() {
+            sql.push_str(&format!(" AND LOWER(split_part(from_email, '@', 2)) <> ALL(${bind_idx})"));
+        }
     }
     sql.push_str(" ORDER BY received_at DESC LIMIT 100");
 
@@ -106,6 +91,9 @@ pub async fn list_received_emails(
     }
     if let Some(v) = needs_review {
         query = query.bind(v);
+    }
+    if known_domain_only && !excluded.is_empty() {
+        query = query.bind(excluded);
     }
     let mut rows = query.fetch_all(pool).await?;
     // 過去の不具合で生のMIMEのまま保存された本文は、表示時に復号して読める形にする

@@ -213,6 +213,22 @@ pub async fn find_item_owner_status(pool: &PgPool, item_id: i64) -> Result<Optio
     Ok(row)
 }
 
+/// 明細の (親ヘッダーID, 申請者の社員ID, ステータス) を取得する（所有者確認に使う）
+pub async fn find_item_owner(pool: &PgPool, item_id: i64) -> Result<Option<(i64, i64, String)>> {
+    let row: Option<(i64, i64, String)> = sqlx::query_as(
+        r#"
+        SELECT er.id, er.employee_id, er.status
+        FROM t_expense_request_item it
+        JOIN t_expense_request er ON er.id = it.expense_request_id
+        WHERE it.id = $1
+        "#,
+    )
+    .bind(item_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// 経費申請一覧（社員名JOIN済み・明細件数付き、最大100件）
 ///
 /// `own_employee_id`が`Some`の場合はその社員の申請のみに絞る

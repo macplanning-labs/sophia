@@ -17,7 +17,14 @@ export type LucideIconName =
   | "Users"
   | "Globe"
   | "Building2"
-  | "Receipt";
+  | "Receipt"
+  | "Send"
+  | "FileInput"
+  | "FileOutput"
+  | "Inbox"
+  | "Wallet"
+  | "Coins"
+  | "UserCog";
 
 export interface PageTitleMeta {
   /** pathname がこのプレフィックスで始まる（"/" は完全一致） */
@@ -26,20 +33,82 @@ export interface PageTitleMeta {
   subtitle?: string;
   /** Lucide アイコン名（PageHeader 由来の画面） */
   lucideIcon?: LucideIconName;
-  /** 絵文字アイコン（旧 h1 由来の画面） */
-  emoji?: string;
   /** アイコン色（Tailwind クラス） */
   iconColor?: string;
 }
 
 /** より具体的なパスを先に置く */
 const RULES: PageTitleMeta[] = [
+  // 一番上の帯にタイトルが出ていなかった画面(本文に二重に出していた)。DEMO-000197
+  {
+    prefix: "/home",
+    title: "ホーム",
+    subtitle: "いま手当てが必要なものを、種類ごとに数えて並べる。カードを選ぶと、下に一覧が出る",
+    lucideIcon: "Gauge",
+    iconColor: "text-sky-400",
+  },
+  {
+    prefix: "/status",
+    title: "月別状況",
+    subtitle: "アサイン(要員×案件)ごとに、受注書から支払通知までの進み具合を見る",
+    lucideIcon: "CalendarCheck",
+    iconColor: "text-sky-400",
+  },
+  {
+    prefix: "/my-timesheet",
+    title: "稼働報告（自己申告）",
+    subtitle: "受注契約が無い社員向けの月次稼働報告。見慣れた勤務表と同じ列構成で入力できる",
+    lucideIcon: "Clock",
+    iconColor: "text-sky-400",
+  },
+  {
+    prefix: "/tasks",
+    title: "タスク",
+    subtitle: "月次タスクの進捗管理",
+    lucideIcon: "FileCheck",
+    iconColor: "text-teal-400",
+  },
+  {
+    prefix: "/notices",
+    title: "支払通知",
+    subtitle: "パートナーへの支払通知書",
+    lucideIcon: "ReceiptText",
+    iconColor: "text-amber-400",
+  },
+  {
+    prefix: "/received-orders",
+    title: "受注書",
+    subtitle: "取引先から受けた注文書(受注)",
+    lucideIcon: "FileText",
+    iconColor: "text-emerald-400",
+  },
+  {
+    prefix: "/orders",
+    title: "発注書",
+    subtitle: "パートナーへの注文書(発注)",
+    lucideIcon: "FileText",
+    iconColor: "text-violet-400",
+  },
+  {
+    prefix: "/settings/integrations",
+    title: "外部連携",
+    subtitle: "通知の送り先、書類の保存先、メールなど、Sophia が外とつながる先を確かめて、変えられます",
+    lucideIcon: "Globe",
+    iconColor: "text-cyan-400",
+  },
   {
     prefix: "/settings/api-keys",
     title: "APIキー管理",
     subtitle: "取引先向け WebAPI キーの発行・失効",
     lucideIcon: "KeyRound",
     iconColor: "text-amber-400",
+  },
+  {
+    prefix: "/settings/org",
+    title: "組織・ロール",
+    subtitle: "組織の木・ロールと権限・ユーザーへの割り当てと変更履歴",
+    lucideIcon: "Building2",
+    iconColor: "text-indigo-400",
   },
   {
     prefix: "/settings/security/totp",
@@ -59,14 +128,14 @@ const RULES: PageTitleMeta[] = [
     prefix: "/partner-contracts",
     title: "発注契約",
     subtitle: "行をクリックして契約を編集",
-    emoji: "📄",
+    lucideIcon: "FileOutput",
     iconColor: "text-blue-400",
   },
   {
     prefix: "/client-contracts",
     title: "受注契約",
     subtitle: "行をクリックして契約を編集",
-    emoji: "📋",
+    lucideIcon: "FileInput",
     iconColor: "text-emerald-400",
   },
   {
@@ -74,6 +143,13 @@ const RULES: PageTitleMeta[] = [
     title: "受信メール",
     subtitle: "メール自動取込パイプラインで自動処理できなかったメールを確認する",
     lucideIcon: "Mail",
+    iconColor: "text-violet-400",
+  },
+  {
+    prefix: "/sent-emails",
+    title: "送信メール",
+    subtitle: "Sophia が送ったメールの記録(新しい順)",
+    lucideIcon: "Send",
     iconColor: "text-violet-400",
   },
   {
@@ -87,19 +163,19 @@ const RULES: PageTitleMeta[] = [
     prefix: "/timesheet-matching",
     title: "勤務表の取り込み",
     subtitle: "届いた勤務表を受注に結び付けて、稼働報告に取り込む",
-    emoji: "📥",
+    lucideIcon: "Inbox",
     iconColor: "text-sky-400",
   },
   {
     prefix: "/timesheets",
     title: "稼働報告",
     subtitle: "エンジニアの稼働時間報告一覧",
-    emoji: "⏱",
+    lucideIcon: "Clock",
     iconColor: "text-amber-400",
   },
   {
     prefix: "/billing",
-    title: "請求書・支払通知",
+    title: "請求書の確定",
     subtitle: "請求書の確認と確定",
     lucideIcon: "Receipt",
     iconColor: "text-blue-400",
@@ -115,42 +191,42 @@ const RULES: PageTitleMeta[] = [
     prefix: "/projects",
     title: "案件",
     subtitle: "行をクリックして案件詳細を開く。新規作成はウィザードから",
-    emoji: "📁",
+    lucideIcon: "Briefcase",
     iconColor: "text-emerald-400",
   },
   {
     prefix: "/payroll",
     title: "給与",
     subtitle: "月次給与計算結果一覧",
-    emoji: "💰",
+    lucideIcon: "Wallet",
     iconColor: "text-yellow-400",
   },
   {
     prefix: "/employees",
     title: "社員一覧",
     subtitle: "社員マスタ一覧",
-    emoji: "👤",
+    lucideIcon: "UserCircle",
     iconColor: "text-pink-400",
   },
   {
     prefix: "/members",
     title: "要員",
     subtitle: "自社社員とパートナー要員の管理",
-    emoji: "👥",
+    lucideIcon: "Users",
     iconColor: "text-blue-400",
   },
   {
     prefix: "/expenses",
     title: "経費",
     subtitle: "経費精算申請一覧",
-    emoji: "🧾",
+    lucideIcon: "Coins",
     iconColor: "text-rose-400",
   },
   {
     prefix: "/users",
     title: "ユーザー管理",
     subtitle: "システムユーザー一覧",
-    emoji: "👥",
+    lucideIcon: "UserCog",
     iconColor: "text-indigo-400",
   },
   {

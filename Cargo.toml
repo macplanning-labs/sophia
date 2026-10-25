@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/auth-core", "crates/google-auth", "crates/drive-core"]
+members = [".", "crates/auth-core", "crates/google-auth", "crates/mail-ingest", "crates/integration-core", "crates/store-gdrive", "crates/notify-gchat", "crates/cf-access-jwt", "crates/drive-core"]
 resolver = "2"
 
 [package]
@@ -66,7 +66,10 @@ bcrypt = "0.17"
 # HMAC認証（Webhook検証）
 hmac = "0.12"
 sha2 = "0.10"
+# トークンURLの {uuid} の復号(DEMO-000233 S2-E。Cargo.lock に既にある版と同じ)
+percent-encoding = "2.3"
 hex = "0.4"
+subtle = "2.6"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -104,21 +107,31 @@ rand = "0.8"
 openssl = { version = "0.10", features = ["vendored"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
-# Google Drive連携共通クレート（複数プロジェクトで共通化）
-drive-core = { path = "crates/drive-core" }
+# 外部連携の部品（社内共通リポジトリの backend/rust/。DEMO-000210/000213）
+#   integration-core: 保存する・知らせるの役割、必要な設定と点検、使う部品の一覧（integrations.toml）の照合
+#   store-gdrive: 保存する部品（Google Drive・共有ドライブ対応。旧 drive-core の後継）
+#   notify-gchat: 知らせる部品（Google Chat）
+integration-core = { path = "crates/integration-core" }
+store-gdrive = { path = "crates/store-gdrive" }
+notify-gchat = { path = "crates/notify-gchat" }
+# 社内 SSO（Cloudflare Access）の JWT 検証の部品（社内 SSO の共通リポジトリ company-sso の rust/cf-access-jwt。SOSSO / DEMO-000229）
+#   署名・iss・aud・期限・メールドメインの検証に加え、JWT の取り出し（ヘッダー優先・Cookie の代用は Origin 完全一致のときだけ）も
+#   部品が持つ（DEMO-000250）。アプリ側に Cookie や Origin の処理を書かない。
+#   rev は P0 を含む main のコミットに固定する。部品を直したら rev を上げ、staging で確かめる（hash の逆引きは company-sso の履歴）。
+cf-access-jwt = { path = "crates/cf-access-jwt" }
 
 # Excel解析（稼働報告書自動読取り — EDI_MP excel_parser.py 移植）
-calamine = "0.36"
+calamine = "0.37"
 
 # 正規表現
 regex = "1"
 
 # IMAP メール取得（受信メール自動取込 — EDI_MP email_receiver.py 移植）
-imap = "2"
-native-tls = "0.2"
 
 # メール解析（MIMEヘッダーデコード・添付ファイル名抽出）
 mailparse = "0.15"
+# メール取込の共通部品（IMAP の読み取りと MIME の解読。社内共通リポジトリの backend/rust/mail-ingest）
+mail-ingest = { path = "crates/mail-ingest" }
 
 # 定期実行スケジューラ（メール取得ジョブ）
 tokio-cron-scheduler = "0.13"
@@ -132,3 +145,4 @@ jpholiday = "0.2.0"
 [dev-dependencies]
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"

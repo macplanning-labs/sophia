@@ -1,18 +1,35 @@
 /// infrastructure/repositories/partner_repo.rs — パートナーCRUD
 ///
-/// list_all, find_by_id, count は base.rs マクロで自動生成。
-/// create, next_partner_id は業務固有のためここに残す。
+/// list_all, find_by_id は列を明示して読む(全列の指定を使わない)。口座番号は暗号化された列のため、
+/// ここでは読まない(画面用の取得は bank_account_repo 経由。DEMO-000233 S2-G2-3)。
+/// count は base.rs マクロで自動生成。create, next_partner_id は業務固有のためここに残す。
 
 use anyhow::Result;
 use sqlx::PgPool;
 
 use crate::domain::models::partner::Partner;
 
-// ── 共通CRUD（マクロ生成）──
-
-impl_list_all!(list_all, Partner, "m_partner", "partner_id DESC");
-impl_find_by_str_id!(find_by_id, Partner, "m_partner", "partner_id");
 impl_count!(count, "m_partner");
+
+/// パートナーの読み取り列。`Partner` の項目と同じ並び。暗号化された口座番号の列は含めない
+const PARTNER_SELECT: &str = "SELECT partner_id, name, name_kana, postal_code, address, tel, fax, email, \
+    report_email, cc, bcc, representative_name, representative_name_kana, representative_position, \
+    responsible_person, contact_person, registration_no, staff_contact_id, attachment_file, bank_name, \
+    bank_branch, account_type, account_name, peppol_participant_id FROM m_partner";
+
+/// パートナーの全件(partner_id の降順)。口座番号は読まない
+pub async fn list_all(pool: &PgPool) -> Result<Vec<Partner>> {
+    let sql = format!("{PARTNER_SELECT} ORDER BY partner_id DESC");
+    let rows = sqlx::query_as::<_, Partner>(&sql).fetch_all(pool).await?;
+    Ok(rows)
+}
+
+/// パートナー 1 件(partner_id で指定)。口座番号は読まない
+pub async fn find_by_id(pool: &PgPool, id: &str) -> Result<Option<Partner>> {
+    let sql = format!("{PARTNER_SELECT} WHERE partner_id = $1");
+    let row = sqlx::query_as::<_, Partner>(&sql).bind(id).fetch_optional(pool).await?;
+    Ok(row)
+}
 
 // ── 業務固有 ──
 

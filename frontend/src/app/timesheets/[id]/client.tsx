@@ -62,35 +62,37 @@ export default function TimesheetDetailPage({ id: idProp, embedded = false }: Pr
   const sheet = data?.sheet;
   const status = sheet?.status;
 
+  // 左 = 本線(承認 → クライアント送信)、右端 = 例外(差し戻し)。
+  // ボタンは、状態で消さず、使えないときは非活性にする(押した印になり、位置も変わらない)
+  const canApprove = status === "UPLOADED" || status === "PARSED";
   const actions = (
-    <div className="flex items-center gap-2">
-      {(status === "UPLOADED" || status === "PARSED") && (
-        <>
-          <button
-            onClick={() => approveMut.mutate()}
-            disabled={approveMut.isPending}
-            className="px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
-          >
-            ✅ 承認
-          </button>
-          <button
-            onClick={() => setConfirmTarget("reject")}
-            disabled={rejectMut.isPending}
-            className="px-3 py-1.5 text-xs font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors disabled:opacity-50"
-          >
-            ↩ 差し戻し
-          </button>
-        </>
-      )}
-      {status === "APPROVED" && (
+    <div className="flex flex-1 items-center gap-2">
+      <button
+        onClick={() => approveMut.mutate()}
+        disabled={!canApprove || approveMut.isPending}
+        title={status === "APPROVED" || status === "SENT" ? "承認済みです" : !canApprove ? "アップロードされた稼働報告だけ、承認できます" : undefined}
+        className="px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+      >
+        ✅ 承認
+      </button>
+      <button
+        onClick={() => sendMut.mutate()}
+        disabled={status !== "APPROVED" || sendMut.isPending}
+        title={status === "SENT" ? "送信済みです" : status !== "APPROVED" ? "承認後に、クライアントへ送信できます" : undefined}
+        className="px-3 py-1.5 text-xs font-medium rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/30 hover:bg-blue-500/20 transition-colors disabled:opacity-50"
+      >
+        📧 クライアント送信
+      </button>
+      <div className="flex items-center gap-2 ml-auto">
         <button
-          onClick={() => sendMut.mutate()}
-          disabled={sendMut.isPending}
-          className="px-3 py-1.5 text-xs font-medium rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/30 hover:bg-blue-500/20 transition-colors disabled:opacity-50"
+          onClick={() => setConfirmTarget("reject")}
+          disabled={!canApprove || rejectMut.isPending}
+          title={!canApprove ? "アップロードされた稼働報告だけ、差し戻せます" : undefined}
+          className="px-3 py-1.5 text-xs font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors disabled:opacity-50"
         >
-          📧 クライアント送信
+          ↩ 差し戻し
         </button>
-      )}
+      </div>
     </div>
   );
 

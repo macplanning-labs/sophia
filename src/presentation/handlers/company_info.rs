@@ -6,8 +6,9 @@
 use axum::{extract::{Extension, State}, response::IntoResponse, Json};
 use sqlx::PgPool;
 
+use crate::domain::value_objects::account_number::AccountNumber;
 use crate::infrastructure::repositories::company_info_repo::{self, CompanyInfoUpdate};
-use crate::infrastructure::mail_pipeline::{circuit_breaker, imap_util::ImapConfig};
+use crate::infrastructure::mail_pipeline::{circuit_breaker, imap_util::load_imap_config};
 use crate::presentation::middleware::role::AuthUser;
 
 /// GET /api/company-info
@@ -43,7 +44,14 @@ pub async fn api_update(
         }))).into_response();
     }
 
-    let existing = match company_info_repo::get_company_info(&pool).await {
+    // 口座番号の形式が違えば、保存せず 400 で返す(拒否を DB 層の 500 にしない。DEMO-000233 S2-G2-2)
+    if let Some(msg) = account_number_input_error(&form.account_number) {
+        return (axum::http::StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false, "error": msg
+        }))).into_response();
+    }
+
+    let existing = match company_info_repo::get_company_info_basic(&pool).await {
         Ok(Some(info)) => info,
         Ok(None) => return (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({
             "success": false, "error": "自社情報が登録されていません"
@@ -59,15 +67,8 @@ pub async fn api_update(
     match company_info_repo::update_company_info(&pool, existing.id, &form).await {
         Ok(_) => {
             // SMTPパスワードが更新された場合、IMAPロックを自動解除
-            if form.email_host_password.is_some() {
-                if let Ok(config) = ImapConfig::load(&pool).await {
-                    let mailbox = config.mailbox_id().to_string();
-                    if let Err(e) = circuit_breaker::unlock(&pool, &mailbox).await {
-                        tracing::warn!("[CompanyInfo] IMAPロック自動解除失敗: {}", e);
-                    } else {
-                        tracing::info!("[CompanyInfo] パスワード更新に伴いIMAPロックを自動解除しました");
-                    }
-                }
+            if form.email_host_password.as_deref().is_some_and(|p| !p.is_empty()) {
+                unlock_imap_after_password_change(&pool).await;
             }
             Json(serde_json::json!({ "success": true })).into_response()
         }
@@ -76,6 +77,27 @@ pub async fn api_update(
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
                 "success": false, "error": "更新に失敗しました"
             }))).into_response()
+        }
+    }
+}
+
+/// 口座番号の入力を保存の前に確かめる。形式が違えば利用者向けの文言を返す(値は返さない)。
+/// 検証の規則は `AccountNumber::parse_input` に集約している(S2-G2-4)。ここは拒否を 400 にするだけ。
+pub(crate) fn account_number_input_error(value: &str) -> Option<&'static str> {
+    match AccountNumber::parse_input(value) {
+        Ok(_) => None,
+        Err(e) => Some(e.message()),
+    }
+}
+
+/// SMTPパスワード(受信の取り込みにも使う)を変えたあと、連続失敗で掛かった IMAP のロックを解除する
+pub(crate) async fn unlock_imap_after_password_change(pool: &PgPool) {
+    if let Ok(config) = load_imap_config(pool).await {
+        let mailbox = config.mailbox_id().to_string();
+        if let Err(e) = circuit_breaker::unlock(pool, &mailbox).await {
+            tracing::warn!("[CompanyInfo] IMAPロック自動解除失敗: {}", e);
+        } else {
+            tracing::info!("[CompanyInfo] パスワード更新に伴いIMAPロックを自動解除しました");
         }
     }
 }
@@ -107,5 +129,23 @@ pub async fn api_test_email(
                 "success": false, "error": e.to_string()
             }))).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::account_number_input_error;
+
+    #[test]
+    fn encrypted_looking_account_number_is_refused_with_400_message() {
+        // enc1: で始まる値は平文として拒否する(以前は DB 層の Err が 500 になっていた)
+        assert_eq!(account_number_input_error("enc1:k1:AAAA"), Some("口座番号の形式が正しくありません"));
+        assert!(!account_number_input_error("enc1:k1:AAAA").unwrap_or("").contains("enc1:"));
+    }
+
+    #[test]
+    fn ordinary_account_number_is_accepted() {
+        assert_eq!(account_number_input_error("0012345"), None);
+        assert_eq!(account_number_input_error(""), None, "空は未登録");
     }
 }

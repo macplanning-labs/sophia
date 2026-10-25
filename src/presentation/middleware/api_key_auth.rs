@@ -67,15 +67,19 @@ pub async fn api_key_auth(
     hasher.update(&api_key_str);
     let api_key_hash = format!("{:x}", hasher.finalize());
 
-    // t_company_api_key を検索
-    let api_key = sqlx::query_as::<_, (Uuid, String, String, String)>(
-        "SELECT id, party_type, party_id, scope FROM t_company_api_key \
+    // 失敗の記録に使う。キー・ハッシュは出さない
+    let ip = crate::presentation::auth_messages::client_ip(crate::presentation::auth_messages::peer_of(&req), req.headers());
+
+    // t_company_api_key を検索（期限は取得後に判定する。期限切れと不明なキーをログで区別するため）
+    let api_key = sqlx::query_as::<_, (Uuid, String, String, String, Option<chrono::DateTime<chrono::Utc>>)>(
+        "SELECT id, party_type, party_id, scope, expires_at FROM t_company_api_key \
          WHERE api_key_hash = $1 AND is_active = true AND revoked_at IS NULL"
     )
     .bind(&api_key_hash)
     .fetch_optional(&pool)
     .await
-    .map_err(|_| {
+    .map_err(|e| {
+        tracing::error!("[APIキー認証] 処理=キー検索 結果=失敗 影響=500で返却 | {:?}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "database_error" })),
@@ -83,12 +87,33 @@ pub async fn api_key_auth(
     })?;
 
     let (id, party_type, party_id, scope) = match api_key {
-        Some(key) => key,
+        Some((id, party_type, party_id, scope, expires_at)) => {
+            // 期限切れは、存在しないキーと同じ 401（応答で理由を教えない）。ログには理由を残す
+            if crate::domain::services::api_key_policy::is_expired(expires_at, chrono::Utc::now()) {
+                tracing::warn!(
+                    "[APIキー認証] 処理=認証 結果=失敗(期限切れ) 影響=401で返却 | key_id={} ip={}",
+                    id, ip
+                );
+                // 連続したら知らせる(ブロックはしない。DEMO-000181 項目6)
+                crate::presentation::middleware::probe_log::record_api_key_failure(&ip);
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({ "error": "invalid_api_key" })),
+                ));
+            }
+            (id, party_type, party_id, scope)
+        }
         None => {
+            tracing::warn!(
+                "[APIキー認証] 処理=認証 結果=失敗(不明・無効・失効) 影響=401で返却 | ip={}",
+                ip
+            );
+            // 連続したら知らせる(ブロックはしない。DEMO-000181 項目6)
+            crate::presentation::middleware::probe_log::record_api_key_failure(&ip);
             return Err((
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "invalid_api_key" })),
-            ))
+            ));
         }
     };
 

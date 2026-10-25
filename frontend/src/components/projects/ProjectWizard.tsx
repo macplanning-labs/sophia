@@ -22,6 +22,7 @@ import {
   type SelectOrCreateValue, type NewFieldDef,
 } from "@/components/ui/select-or-create";
 import { Plus, Trash2 } from "lucide-react";
+import { clientOwnerProblem, type WizardClientOption } from "@/lib/project-wizard";
 
 const SETTLEMENT_TYPES = [
   { value: "上下割", label: "上下割" },
@@ -188,7 +189,7 @@ export function ProjectWizard() {
   const engineerOptions = formData?.engineers ?? [];
   const partnerOptions = formData?.partners ?? [];
   const workLocationOptions = formData?.work_locations ?? [];
-  const clientOptions = formData?.clients ?? [];
+  const clientOptions: WizardClientOption[] = formData?.clients ?? [];
 
   const createMutation = useMutation({
     mutationFn: (skipPartners: boolean) => {
@@ -227,7 +228,11 @@ export function ProjectWizard() {
     onError: (e: Error) => toast.error(`作成エラー: ${e.message}`),
   });
 
-  const canProceedStep1 = clientId !== "" && name.trim() !== "";
+  // 担当の無い顧客は、選んだ時点で知らせて先へ進ませない(作成ボタンまで進んでから断られないように)
+  const clientProblem = clientOwnerProblem(clientOptions, clientId);
+  const canProceedStep1 = clientId !== "" && !clientProblem && name.trim() !== "";
+  // 画面を移る・顧客を選び直すときは、前回の作成エラーを消す(直したあとも古いエラーが残らないように)
+  const goToStep = (next: 1 | 2 | 3) => { createMutation.reset(); setStep(next); };
   const canProceedStep2 = (
     clientRows.length > 0 && clientRows.every((r) =>
       (r.engineer.kind === "existing" ? r.engineer.id !== "" : (r.engineer.fields.name ?? "").trim() !== "")
@@ -285,8 +290,8 @@ export function ProjectWizard() {
       <div className="bg-card border border-border rounded-lg p-6 space-y-4">
         {step === 1 && (
           <>
-            <FormField label="クライアント" required>
-              <FormSelect options={clientOptions.map((c: { value: number; label: string }) => ({ value: String(c.value), label: c.label }))} placeholder="選択..." value={clientId} onChange={(e) => setClientId(e.target.value)} />
+            <FormField label="クライアント" required error={clientProblem}>
+              <FormSelect options={clientOptions.map((c) => ({ value: String(c.value), label: c.label }))} placeholder="選択..." value={clientId} onChange={(e) => { createMutation.reset(); setClientId(e.target.value); }} />
             </FormField>
             <FormField label="案件名" required>
               <FormInput value={name} onChange={(e) => setName(e.target.value)} placeholder="○○社基幹システム刷新" />
@@ -408,13 +413,13 @@ export function ProjectWizard() {
           variant="outline"
           className="border-border"
           disabled={step === 1}
-          onClick={() => { setSkipClientContract(false); setStep((s) => (s - 1) as 1 | 2 | 3); }}
+          onClick={() => { setSkipClientContract(false); goToStep((step - 1) as 1 | 2 | 3); }}
         >
           戻る
         </Button>
         <div className="flex gap-2">
           {step === 2 && (
-            <Button variant="outline" className="border-border" onClick={() => { setSkipClientContract(true); setStep(3); }}>
+            <Button variant="outline" className="border-border" onClick={() => { setSkipClientContract(true); goToStep(3); }}>
               スキップ
             </Button>
           )}
@@ -427,7 +432,7 @@ export function ProjectWizard() {
             <Button
               className="bg-blue-600 hover:bg-blue-700"
               disabled={(step === 1 && !canProceedStep1) || (step === 2 && !canProceedStep2)}
-              onClick={() => { setSkipClientContract(false); setStep((s) => (s + 1) as 1 | 2 | 3); }}
+              onClick={() => { setSkipClientContract(false); goToStep((step + 1) as 1 | 2 | 3); }}
             >
               次へ
             </Button>

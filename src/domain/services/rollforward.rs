@@ -115,17 +115,32 @@ pub async fn rollforward_order(pool: &PgPool, source_order_id: i64) -> Result<i6
     Ok(new_id)
 }
 
-/// 継続注文（is_recurring=true）の一括ロールフォワード
-pub async fn rollforward_all_recurring(pool: &PgPool) -> Result<Vec<(i64, i64)>> {
+/// 一括ロールフォワードの結果。
+#[derive(Debug, Default)]
+pub struct RollforwardAllResult {
+    /// 作成できた (元の受注ID, 新しい受注ID)
+    pub created: Vec<(i64, i64)>,
+    /// 担当が決まらないため作らなかった件数(取引先の担当を設定すれば作れる)
+    pub skipped_no_owner: usize,
+}
+
+/// 継続注文（is_recurring=true）の一括ロールフォワード。
+/// 担当が決まらない受注は、その行だけ作らずに続ける(警告ログと件数を残す)。
+pub async fn rollforward_all_recurring(pool: &PgPool) -> Result<RollforwardAllResult> {
     use crate::infrastructure::repositories::order_repo;
 
     // クライアント×プロジェクトごとに最新のものだけ処理
     let recurring_orders = order_repo::list_recurring_received_orders(pool).await?;
 
-    let mut results = Vec::new();
+    let mut results = RollforwardAllResult::default();
     for order in &recurring_orders {
         match rollforward_order(pool, order.id).await {
-            Ok(new_id) => results.push((order.id, new_id)),
+            Ok(new_id) => results.created.push((order.id, new_id)),
+            // 担当が決まらない受注は、その行だけ作らずに続ける
+            Err(e) if crate::domain::authz::stamp::is_no_owner(e.as_ref()) => {
+                results.skipped_no_owner += 1;
+                tracing::warn!("一括ロールフォワード: 担当が決まらないため作りませんでした | table=t_received_order 元の受注ID={}", order.id);
+            }
             Err(e) => info!("スキップ: {}", e),
         }
     }

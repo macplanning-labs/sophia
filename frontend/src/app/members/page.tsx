@@ -7,6 +7,7 @@ import { fetchMembers, fetchClientContracts, fetchPartnerContracts } from "@/lib
 import { AddMemberModal } from "@/components/members/add-member-modal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
 import { Plus } from "lucide-react";
@@ -77,24 +78,22 @@ function MembersPageContent() {
 
   return (
     <div className="space-y-6 p-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">要員</h1>
-          <p className="text-sm text-muted-foreground">自社社員とパートナー要員の管理</p>
-        </div>
-        {showAdmin && (
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setAddKind("EMPLOYEE")} className="gap-2">
-              <Plus className="h-4 w-4" />
-              自社社員追加
-            </Button>
-            <Button onClick={() => setAddKind("PARTNER")} className="gap-2">
-              <Plus className="h-4 w-4" />
-              パートナー要員追加
-            </Button>
-          </div>
-        )}
-      </div>
+      <PageHeader
+        actions={
+          showAdmin && (
+            <>
+              <Button variant="outline" onClick={() => setAddKind("EMPLOYEE")} className="gap-2">
+                <Plus className="h-4 w-4" />
+                自社社員追加
+              </Button>
+              <Button onClick={() => setAddKind("PARTNER")} className="gap-2">
+                <Plus className="h-4 w-4" />
+                パートナー要員追加
+              </Button>
+            </>
+          )
+        }
+      />
 
       <div className="rounded-lg border">
         <Table>

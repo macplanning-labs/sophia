@@ -1,0 +1,13 @@
+[package]
+name = "mail-ingest"
+version = "0.1.0"
+edition = "2021"
+description = "メール取込の共通部品（IMAP の読み取りと MIME の解読）"
+license = "MIT"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+imap = "2"
+mailparse = "0.15"
+native-tls = "0.2"

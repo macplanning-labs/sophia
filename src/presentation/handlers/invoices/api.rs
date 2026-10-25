@@ -16,8 +16,12 @@ pub struct InvoiceFilter {
 }
 
 /// GET /api/invoices — 一覧（JSON）
-pub async fn api_index(State(pool): State<PgPool>) -> axum::Json<Vec<InvoiceRow>> {
-    let rows = billing_repo::list_invoice_rows(&pool).await
+pub async fn api_index(
+    State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
+) -> axum::Json<Vec<InvoiceRow>> {
+    let rows = billing_repo::list_invoice_rows(&pool, &auth_user.list_filter(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingInvoiceView)).await
         .unwrap_or_else(|e| { tracing::warn!("invoices api: {:?}", e); vec![] });
     axum::Json(rows)
 }
@@ -25,8 +29,21 @@ pub async fn api_index(State(pool): State<PgPool>) -> axum::Json<Vec<InvoiceRow>
 /// GET /api/invoices/{id} — 詳細（JSON）
 pub async fn api_detail(
     State(pool): State<PgPool>,
+    axum::Extension(auth_user): axum::Extension<crate::presentation::middleware::role::AuthUser>,
+    authz: Option<axum::Extension<crate::domain::authz::Authz>>,
     Path(id): Path<i64>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // 入口の権限表に頼らず、ハンドラ自身で担当範囲を判定する(AUTHZ_MODE が shadow でも拒否する。DEMO-000254)
+    let stamp = match crate::infrastructure::repositories::stamp_repo::of_invoice(&pool, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("担当スタンプの取得に失敗: {e:#}");
+            return crate::presentation::http_util::forbidden();
+        }
+    };
+    if !auth_user.can_access_stamped(authz.as_ref().map(|e| &e.0), crate::domain::authz::Permission::BillingInvoiceView, &stamp) {
+        return crate::presentation::http_util::forbidden();
+    }
     match billing_repo::find_invoice(&pool, id).await {
         Ok(Some(inv)) => {
             let items = billing_repo::list_invoice_items(&pool, id).await.log_err().unwrap_or_default();
@@ -67,8 +84,13 @@ pub async fn api_detail(
                 &pool, inv.client_id, inv.received_order_id,
             ).await.unwrap_or((None, None));
 
+            // 新しい版に差し替えられていれば、その版(DEMO-000224)
+            let superseded_by = billing_repo::find_superseding_invoice(&pool, id).await.log_err().ok().flatten()
+                .map(|(nid, _, sent, reason)| serde_json::json!({ "id": nid, "sent": sent, "reason": reason }));
+
             axum::Json(serde_json::json!({
                 "invoice": inv,
+                "superseded_by": superseded_by,
                 "items": items,
                 "client_name": client_name,
                 "project_name": project_name,

@@ -41,6 +41,19 @@ pub struct BillingInvoice {
     pub sent_at: Option<DateTime<Utc>>,
     pub sent_subject: String,
     pub sent_body: String,
+    // 訂正版・取り消し(マイグレーション 081。DEMO-000224)
+    #[sqlx(default)]
+    pub revision: i32,
+    #[sqlx(default)]
+    pub supersedes_invoice_id: Option<i64>,
+    #[sqlx(default)]
+    pub revision_reason: Option<String>,
+    #[sqlx(default)]
+    pub cancelled_at: Option<DateTime<Utc>>,
+    #[sqlx(default)]
+    pub cancelled_by_id: Option<i64>,
+    #[sqlx(default)]
+    pub cancel_reason: Option<String>,
 }
 
 /// 請求明細（t_billing_invoice_item に対応）

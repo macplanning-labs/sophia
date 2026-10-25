@@ -63,7 +63,7 @@ mod tests {
     #[ignore = "DB（DATABASE_URL）が必要"]
     async fn commit_checked_rejects_a_transaction_that_has_already_failed() {
         let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://sophia:sophia@localhost:5432/sophia".to_string());
+            .expect("DATABASE_URL が必要です(使い捨てのDB。手元のPostgreSQLには既定でつながない)");
         let pool = sqlx::PgPool::connect(&url).await.expect("DB に接続できません");
 
         // 1. 素の commit() は、失敗状態のトランザクションでも Ok を返す（取り消されたのに成功に見える）

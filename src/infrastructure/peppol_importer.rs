@@ -165,6 +165,8 @@ pub async fn import_inbound_order(
     let order_id = order_repo::insert_received_order_basic(
         &mut tx, &received_order_no, client_id, target_month,
         payload.work_start, payload.work_end, &payload.project_name,
+        // Peppol 受信は自動取込: 担当を決められなくても取込を止めない(受け皿 → 担当なし)
+        crate::domain::authz::stamp::StampMode::AutoImport,
     ).await.map_err(|e| format!("t_received_order作成失敗: {e}"))?;
 
     for line in &payload.lines {

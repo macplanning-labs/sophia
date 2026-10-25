@@ -2,6 +2,8 @@
 
 use serde_json::json;
 
+mod org_admin;
+
 pub fn build_v1_api() -> serde_json::Value {
     json!({
         "openapi": "3.0.0",
@@ -617,7 +619,8 @@ pub fn build_internal_v1_api() -> serde_json::Value {
                                                 "name": {"type": "string"},
                                                 "is_active": {"type": "boolean"},
                                                 "created_at": {"type": "string", "format": "date-time"},
-                                                "revoked_at": {"type": "string", "format": "date-time", "nullable": true}
+                                                "revoked_at": {"type": "string", "format": "date-time", "nullable": true},
+                                                "expires_at": {"type": "string", "format": "date-time", "nullable": true, "description": "有効期限。null=無期限"}
                                             }
                                         }
                                     }
@@ -645,7 +648,8 @@ pub fn build_internal_v1_api() -> serde_json::Value {
                                         "client_id": {"type": "integer", "format": "int64"},
                                         "name": {"type": "string", "description": "キー名（管理用）"},
                                         "scope": {"type": "string", "enum": ["READ", "READ_WRITE"]},
-                                        "environment": {"type": "string", "enum": ["test", "live"]}
+                                        "environment": {"type": "string", "enum": ["test", "live"]},
+                                        "expires_in_days": {"type": "integer", "minimum": 1, "maximum": 3650, "description": "有効日数。省略=無期限"}
                                     }
                                 }
                             }
@@ -876,16 +880,41 @@ pub fn build_internal_v1_api() -> serde_json::Value {
         ]
     });
     // json! マクロの再帰上限を超えるため、請求書の確定まわりは別に組み立てて差し込む
+    api["paths"]["/status/matrix"] = status_matrix_path();
     api["paths"]["/billing/preview"] = billing_preview_path();
     api["paths"]["/billing/confirm"] = billing_confirm_path();
     api["paths"]["/assignments"] = assignments_create_path();
     api["paths"]["/assignments/preview"] = assignments_preview_path();
     api["paths"]["/assignments/overview"] = assignments_overview_path();
+    for (path, def) in org_admin::paths() {
+        api["paths"][path] = def;
+    }
     if let Some(tags) = api["tags"].as_array_mut() {
         tags.push(json!({"name": "billing", "description": "請求書のプレビューと確定 API"}));
+        tags.push(json!({"name": "org-admin", "description": "組織・ロール・割り当ての管理 API(管理者専用)"}));
         tags.push(json!({"name": "assignments", "description": "アサイン(受注契約+発注契約)の作成と利益試算 API"}));
     }
     api
+}
+
+fn status_matrix_path() -> serde_json::Value {
+    json!({
+                "get": {
+                    "tags": ["assignments"],
+                    "summary": "月別状況(アサインごとの進み具合と次の操作)",
+                    "description": "月次確定の集計を元に、アサイン(要員×案件)ごとに受注書・発注書・勤務表・請求書・支払通知の状態(tone: ok/warn/bad/na)と、いまできる次の操作を1つ返す。読み取りのみ。管理者専用。",
+                    "operationId": "status_matrix",
+                    "security": [{"CookieAuth": []}],
+                    "parameters": [
+                        {"name": "month", "in": "query", "required": true, "description": "対象月(YYYY-MM)", "schema": {"type": "string"}}
+                    ],
+                    "responses": {
+                        "200": {"description": "{month, summary{total, needs_action, invoice_unconfirmed, timesheet_stalled}, rows[{engineer_id, engineer_name, client_id, client_name, project_id, project_name, received_order, purchase_order, timesheet, invoice, notice, next_action}]}"},
+                        "400": {"description": "month が不正"},
+                        "403": {"description": "権限不足(管理者専用)"}
+                    }
+                }
+            })
 }
 
 fn billing_preview_path() -> serde_json::Value {

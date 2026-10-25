@@ -46,7 +46,7 @@ pub async fn get_last_processed_at(pool: &PgPool, mailbox: &str) -> DateTime<Utc
 
 /// IMAP SINCE 検索に使う日付（安全マージンを引いたもの）を算出する
 pub fn search_since_date(last_processed_at: DateTime<Utc>) -> DateTime<Utc> {
-    last_processed_at - Duration::days(SAFETY_MARGIN_DAYS)
+    mail_ingest::since_with_margin(last_processed_at, SAFETY_MARGIN_DAYS)
 }
 
 /// チェックポイントを更新する（UPSERT）

@@ -1,0 +1,19 @@
+[package]
+name = "store-gdrive"
+version = "0.1.0"
+edition = "2021"
+description = "保存する部品: Google Drive(共有ドライブ対応、サービスアカウント認証)"
+license = "MIT"
+
+[dependencies]
+integration-core = { path = "../integration-core" }
+# Sophia と同じ rev に合わせる(rev が違うと別のクレートとして二重に入る)
+google-auth = { path = "../google-auth" }
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"

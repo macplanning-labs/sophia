@@ -6,12 +6,13 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::Serialize;
 use sqlx::PgPool;
 
+use crate::domain::authz::stamp::{is_no_owner, NO_OWNER_MESSAGE};
 use crate::infrastructure::repositories::master_repo::{self, ColDef};
 
 /// メタデータをJSON化してフロントに渡す
@@ -160,22 +161,15 @@ pub async fn api_get(
     Path((table_key, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let def = master_repo::find_table(&table_key).ok_or(StatusCode::NOT_FOUND)?;
-    let pk_col = def.columns.iter().find(|c| c.is_pk).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let all_cols: Vec<&str> = def.columns.iter()
-        .filter(|c| c.in_form || c.is_pk)
-        .map(|c| c.name)
-        .collect();
-
-    let row = master_repo::fetch_detail(&pool, def, &id, pk_col, &all_cols)
+    // 暗号化された列(口座番号)は、画面用に復号して入る。復号できなければ 500(空で代用しない)
+    let obj = master_repo::fetch_detail_values(&pool, def, &id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            tracing::error!("masters detail error: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
-
-    let mut obj = serde_json::Map::new();
-    for col_name in &all_cols {
-        obj.insert(col_name.to_string(), master_repo::try_get_value(&row, col_name));
-    }
 
     Ok(Json(serde_json::Value::Object(obj)))
 }
@@ -197,12 +191,16 @@ pub async fn api_update(
     State(pool): State<PgPool>,
     Path((table_key, id)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<Response, StatusCode> {
     let def = master_repo::find_table(&table_key).ok_or(StatusCode::NOT_FOUND)?;
     let pk_col: &ColDef = def.columns.iter().find(|c| c.is_pk).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if let Err(msg) = validate_registration_no(&body) {
-        return Ok(Json(serde_json::json!({"ok": false, "error": msg})));
+        return Ok(Json(serde_json::json!({"ok": false, "error": msg})).into_response());
+    }
+    // 口座番号の形式の誤り(enc1: や数値)は、新規作成と同じく 400 で断る(保存しない)
+    if let Err(msg) = master_repo::check_encrypted_values(def, &body) {
+        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": msg}))).into_response());
     }
 
     master_repo::execute_update(&pool, def, &id, pk_col, &body).await.map_err(|e| {
@@ -210,7 +208,7 @@ pub async fn api_update(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(Json(serde_json::json!({"ok": true})).into_response())
 }
 
 // ── API: 新規作成 ──
@@ -219,20 +217,35 @@ pub async fn api_create(
     State(pool): State<PgPool>,
     Path(table_key): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<Response, StatusCode> {
     let def = master_repo::find_table(&table_key).ok_or(StatusCode::NOT_FOUND)?;
 
-    if let Err(msg) = validate_registration_no(&body) {
-        return Ok(Json(serde_json::json!({"ok": false, "error": msg})));
+    // 担当の指定が要る表(顧客)は、マスタ画面では作らせない(400)
+    if let Some(msg) = master_repo::create_rejection(def) {
+        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": msg}))).into_response());
     }
 
-    let created_id = master_repo::execute_create(&pool, def, body).await.map_err(|e| {
-        tracing::error!("masters create error: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    if let Err(msg) = validate_registration_no(&body) {
+        return Ok(Json(serde_json::json!({"ok": false, "error": msg})).into_response());
+    }
+    if let Err(msg) = master_repo::check_encrypted_values(def, &body) {
+        return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": msg}))).into_response());
+    }
+
+    let created_id = match master_repo::execute_create(&pool, def, body).await {
+        Ok(id) => id,
+        // 案件・発注契約を、担当が決まらない顧客の下に作ろうとした(400)
+        Err(e) if is_no_owner(&e) => {
+            return Ok((StatusCode::BAD_REQUEST, Json(serde_json::json!({"ok": false, "error": NO_OWNER_MESSAGE}))).into_response());
+        }
+        Err(e) => {
+            tracing::error!("masters create error: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
     // 自動採番のIDがある表(パートナーなど)は、作ったIDも返す(従来の ok は変えない)
-    Ok(Json(serde_json::json!({"ok": true, "id": created_id})))
+    Ok(Json(serde_json::json!({"ok": true, "id": created_id})).into_response())
 }
 
 // ── API: 削除 ──

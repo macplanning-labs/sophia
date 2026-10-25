@@ -14,6 +14,7 @@ use axum::{
 use serde::Deserialize;
 use sqlx::PgPool;
 
+use crate::domain::authz::stamp::NO_OWNER_MESSAGE;
 use crate::domain::services::billing_confirm::{
     confirm_invoices, load_previews, parse_month, ConfirmError, ConfirmOutcome, ConfirmRequest,
 };
@@ -82,6 +83,7 @@ pub async fn api_confirm(
         }
         Ok(outcome) => Json(outcome_body(true, None, &outcome)).into_response(),
         Err(ConfirmError::BadRequest(m)) => error_response(StatusCode::BAD_REQUEST, m),
+        Err(ConfirmError::NoOwner) => error_response(StatusCode::BAD_REQUEST, NO_OWNER_MESSAGE),
         Err(ConfirmError::Internal(m)) => {
             tracing::error!("billing confirm failed: {m}");
             error_response(

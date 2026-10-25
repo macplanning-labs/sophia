@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { approveInvoice, rejectInvoice, sendInvoiceMail } from "@/lib/api";
+import { apiDelete, apiPost, approveInvoice, rejectInvoice, revokeApiKey, sendInvoiceMail } from "@/lib/api";
 import { SessionExpiredError, subscribeSessionExpired } from "@/lib/session-expired";
 
 function mockFetchOnce(response: Partial<Response> & { jsonBody?: unknown }) {
@@ -131,5 +131,44 @@ describe("invoice approval workflow API (誤送信防止ガード・承認フロ
     expect(notified).not.toHaveBeenCalled();
 
     unsubscribe();
+  });
+});
+
+describe("本文なしの成功応答(204)を、エラーにしない(DEMO-000180)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // 実物の Response を使う(本文なしを .json() で読むと、実際に例外になることを含めて確かめる)
+  function stubFetch(status: number, body: string | null) {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(body, { status }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("APIキーの失効: サーバーが 204 を返しても成功として終わる", async () => {
+    const fetchMock = stubFetch(204, null);
+    await expect(revokeApiKey("abc")).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/settings/api-keys/abc/revoke",
+      expect.objectContaining({ method: "POST" })
+    );
+  });
+
+  it("共通の apiPost / apiDelete も、204 と 205 を undefined で返す", async () => {
+    stubFetch(204, null);
+    await expect(apiDelete("/api/v1/x")).resolves.toBeUndefined();
+    stubFetch(205, null);
+    await expect(apiPost("/api/v1/x", {})).resolves.toBeUndefined();
+  });
+
+  it("本文がある成功応答は、従来どおり JSON として返す", async () => {
+    stubFetch(200, JSON.stringify({ success: true }));
+    await expect(apiPost("/api/v1/x", {})).resolves.toEqual({ success: true });
+  });
+
+  it("失敗応答(404)は、従来どおりエラーにする", async () => {
+    stubFetch(404, JSON.stringify({ error: "見つかりません" }));
+    await expect(revokeApiKey("missing")).rejects.toThrow("見つかりません");
   });
 });

@@ -19,12 +19,18 @@ import {
   Users,
   Globe,
   Building2,
+  Send,
+  FileInput,
+  FileOutput,
+  Inbox,
+  Wallet,
+  Coins,
+  UserCog,
   type LucideIcon,
 } from "lucide-react";
 import { NotificationBell } from "@/components/layout/notification-bell";
 import { MonthSwitcher } from "@/components/layout/month-switcher";
 import { CommandButton } from "@/components/layout/command-button";
-import { AccountMenu } from "@/components/layout/account-menu";
 import { resolvePageMeta, type LucideIconName } from "@/lib/page-titles";
 import { isChromeHidden } from "@/lib/layout-paths";
 
@@ -46,9 +52,16 @@ const LUCIDE_MAP: Record<LucideIconName, LucideIcon> = {
   Users,
   Globe,
   Building2,
+  Send,
+  FileInput,
+  FileOutput,
+  Inbox,
+  Wallet,
+  Coins,
+  UserCog,
 };
 
-/** 全ページ共通ヘッダー。左にルート連動タイトル（アイコン・説明付き）、右に月切替・⌘K・通知ベル・アカウントメニュー。 */
+/** 全ページ共通ヘッダー。左にルート連動タイトル（アイコン・説明付き）、右に月切替・⌘K・通知ベル(アカウント・テーマ・ログアウトはサイドバーの下部)。 */
 export function AppHeader() {
   const pathname = usePathname();
   if (isChromeHidden(pathname)) return null;
@@ -73,8 +86,6 @@ export function AppHeader() {
             <h1 className="text-xl font-bold text-foreground flex items-center gap-2 truncate">
               {Lucide ? (
                 <Lucide className={`w-5 h-5 shrink-0 ${iconColor}`} />
-              ) : meta.emoji ? (
-                <span className={`shrink-0 ${iconColor}`}>{meta.emoji}</span>
               ) : null}
               <span className="truncate">{meta.title}</span>
             </h1>
@@ -95,8 +106,6 @@ export function AppHeader() {
         <div className="hidden sm:block">
           <CommandButton />
         </div>
-        {/* アカウントメニュー */}
-        <AccountMenu />
       </div>
     </header>
   );

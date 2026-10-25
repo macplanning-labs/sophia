@@ -3,7 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { fetchEmployeeDetail, apiPut, apiDelete } from "@/lib/api";
+import { fetchEmployeeDetail, apiPut } from "@/lib/api";
+import { HandOverDialog } from "@/components/org-admin/hand-over-dialog";
+import { deleteEmployeeWithTransfer, type OwnedCount, type TransferTo } from "@/lib/owner-transfer";
 import { useDynamicId } from "@/lib/utils";
 import { DetailLayout, Field, FieldGrid } from "@/components/detail-layout";
 import { Badge } from "@/components/ui/badge";
@@ -65,9 +67,17 @@ export default function EmployeeDetailPage({ id: idProp, embedded = false, onDel
 
   // ── 削除 ──
   const [deleteOpen, setDeleteOpen] = useState(false);
+  // 担当データがあると 409。引き継ぎ先を選ぶ画面(HandOverDialog)を開く。件数はその 409 の内容。
+  const [handOver, setHandOver] = useState<OwnedCount[] | null>(null);
   const deleteMutation = useMutation({
-    mutationFn: () => apiDelete(`/api/v1/employees/${id}`),
-    onSuccess: () => {
+    mutationFn: (transferTo?: TransferTo) => deleteEmployeeWithTransfer(Number(id), transferTo),
+    onSuccess: (res) => {
+      if (res.conflict) {
+        setDeleteOpen(false);
+        setHandOver(res.owned);
+        return;
+      }
+      setHandOver(null);
       qc.invalidateQueries({ queryKey: ["employees"] });
       if (embedded) {
         onDeleted?.();
@@ -166,13 +176,13 @@ export default function EmployeeDetailPage({ id: idProp, embedded = false, onDel
             <Field label="生年月日" value={data.birth_date || "—"} />
           </FieldGrid>
           <FieldGrid>
-            <Field label="基本給" value={`¥${Number(data.base_salary ?? 0).toLocaleString()}`} />
-            <Field label="役職手当" value={`¥${Number(data.position_allowance ?? 0).toLocaleString()}`} />
-            <Field label="住宅手当" value={`¥${Number(data.housing_allowance ?? 0).toLocaleString()}`} />
-            <Field label="通勤手当" value={`¥${Number(data.commuting_allowance ?? 0).toLocaleString()}`} />
+            <Field label="基本給" value={data.base_salary == null ? "—" : `¥${Number(data.base_salary).toLocaleString()}`} />
+            <Field label="役職手当" value={data.position_allowance == null ? "—" : `¥${Number(data.position_allowance).toLocaleString()}`} />
+            <Field label="住宅手当" value={data.housing_allowance == null ? "—" : `¥${Number(data.housing_allowance).toLocaleString()}`} />
+            <Field label="通勤手当" value={data.commuting_allowance == null ? "—" : `¥${Number(data.commuting_allowance).toLocaleString()}`} />
           </FieldGrid>
           <FieldGrid>
-            <Field label="標準月額報酬" value={`¥${Number(data.standard_remuneration ?? 0).toLocaleString()}`} />
+            <Field label="標準月額報酬" value={data.standard_remuneration == null ? "—" : `¥${Number(data.standard_remuneration).toLocaleString()}`} />
             <Field label="標準月間時間" value={`${data.standard_monthly_hours ?? 160}h`} />
             <Field label="扶養人数" value={`${data.dependents_count ?? 0}人`} />
           </FieldGrid>
@@ -260,8 +270,21 @@ export default function EmployeeDetailPage({ id: idProp, embedded = false, onDel
               confirmLabel="削除する"
               variant="danger"
               loading={deleteMutation.isPending}
-              onConfirm={() => deleteMutation.mutate()}
+              onConfirm={() => deleteMutation.mutate(undefined)}
               onCancel={() => setDeleteOpen(false)}
+            />
+          )}
+
+          {/* 担当データの引き継ぎ（409 のとき） */}
+          {showAdmin && handOver && (
+            <HandOverDialog
+              subjectLabel={`社員 ${data.last_name} ${data.first_name}`}
+              owned={handOver}
+              employeeId={Number(id)}
+              submitLabel="引き継いで削除する"
+              loading={deleteMutation.isPending}
+              onSubmit={(to) => deleteMutation.mutate(to)}
+              onClose={() => setHandOver(null)}
             />
           )}
         </>

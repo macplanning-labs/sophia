@@ -3,7 +3,7 @@ name = "auth-core"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "認証共通ライブラリ（JWT / パスワード / TOTP / WebAuthn / レート制限・試行ロック） — WIP・Sophia・将来の他システム共通基盤"
+description = "認証共通ライブラリ（JWT / パスワード / TOTP / WebAuthn / レート制限・試行ロック）"
 
 [dependencies]
 # Web フレームワーク連携（Extractor / ミドルウェア）
@@ -19,7 +19,7 @@ jsonwebtoken = "9"
 # パスワードハッシュ
 argon2 = "0.5"
 
-# レガシーハッシュ移行（WIP: Django PBKDF2）
+# レガシーハッシュ移行（Django PBKDF2）
 pbkdf2 = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
@@ -39,6 +39,8 @@ url = "2"
 # シリアライズ
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# ログイン画面のフォーム(application/x-www-form-urlencoded)からロックの識別子を読む(axum の Form と同じ部品)
+serde_urlencoded = "0.7"
 
 # 日時
 chrono = { version = "0.4", features = ["serde"] }

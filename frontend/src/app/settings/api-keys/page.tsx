@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { formatExpiry } from "@/lib/api-key-expiry";
 import { Key } from "lucide-react";
 import { fetchApiKeys, generateApiKey, revokeApiKey, fetchMastersData, type ApiKeyItem, type GeneratedApiKey } from "@/lib/api";
-import { FormField, FormSelect } from "@/components/ui/form-modal";
+import { FormField, FormInput, FormSelect } from "@/components/ui/form-modal";
 import { ConfirmSheet } from "@/components/ui/confirm-sheet";
+import { PageHeader } from "@/components/ui/page-header";
 
 export default function ApiKeysPage() {
   const [clientId, setClientId] = useState<string>("");
@@ -16,6 +18,8 @@ export default function ApiKeysPage() {
   const [keyName, setKeyName] = useState("");
   const [keyScope, setKeyScope] = useState("READ");
   const [keyEnv, setKeyEnv] = useState("test");
+  // 有効期限(日数)。空文字=無期限
+  const [keyExpiryDays, setKeyExpiryDays] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [revokeKeyId, setRevokeKeyId] = useState<string | null>(null);
 
@@ -71,6 +75,7 @@ export default function ApiKeysPage() {
         name: keyName,
         scope: keyScope,
         environment: keyEnv,
+        ...(keyExpiryDays ? { expires_in_days: Number(keyExpiryDays) } : {}),
       });
       setGeneratedKey(result);
       setKeyName("");
@@ -93,6 +98,8 @@ export default function ApiKeysPage() {
     setLoading(true);
     try {
       await revokeApiKey(id);
+      // 今表示中の生成キーを失効した場合は、「今回のみ表示」の欄も消す
+      setGeneratedKey((prev) => (prev && prev.id === id ? null : prev));
       await loadKeys();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error revoking key");
@@ -102,103 +109,118 @@ export default function ApiKeysPage() {
   };
 
   return (
-    <div className="p-8 max-w-4xl">
-      <div className="flex items-center gap-3 mb-8">
-        <Key className="w-8 h-8" />
-        <h1 className="text-3xl font-bold">APIキー管理</h1>
-      </div>
+    <div className="p-6 space-y-6 max-w-4xl">
+      <PageHeader />
 
       {error && (
-        <div className="mb-4 p-4 bg-red-50 text-red-700 rounded-lg">
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">
           {error}
         </div>
       )}
 
-      <div className="mb-8 p-4 bg-gray-50 rounded-lg">
-        <div className="mb-4">
-          <FormField label="クライアント" required>
+      {/* 発行 */}
+      <div className="bg-card border border-border rounded-lg p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <Key className="w-4 h-4 text-amber-400" />
+          <h2 className="text-sm text-muted-foreground">APIキーの発行</h2>
+        </div>
+
+        <FormField label="クライアント" required>
+          <FormSelect
+            options={clientOptions.map((c) => ({ value: String(c.value), label: c.label }))}
+            placeholder="選択..."
+            value={clientId}
+            onChange={(e) => setClientId(e.target.value)}
+            disabled={loadingClients}
+          />
+        </FormField>
+
+        <div className="grid grid-cols-2 gap-4">
+          <FormField label="キー名">
+            <FormInput
+              type="text"
+              value={keyName}
+              onChange={(e) => setKeyName(e.target.value)}
+              placeholder="本番API連携"
+            />
+          </FormField>
+          <FormField label="スコープ">
             <FormSelect
-              options={clientOptions.map((c) => ({ value: String(c.value), label: c.label }))}
-              placeholder="選択..."
-              value={clientId}
-              onChange={(e) => setClientId(e.target.value)}
-              disabled={loadingClients}
+              options={[
+                { value: "READ", label: "READ" },
+                { value: "READ_WRITE", label: "READ_WRITE" },
+              ]}
+              value={keyScope}
+              onChange={(e) => setKeyScope(e.target.value)}
             />
           </FormField>
         </div>
 
-        <div className="grid grid-cols-2 gap-4 mb-4">
-          <div>
-            <label className="block text-sm font-medium mb-2">キー名</label>
-            <input
-              type="text"
-              value={keyName}
-              onChange={(e) => setKeyName(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg"
-              placeholder="本番API連携"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-2">スコープ</label>
-            <select
-              value={keyScope}
-              onChange={(e) => setKeyScope(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg"
-            >
-              <option value="READ">READ</option>
-              <option value="READ_WRITE">READ_WRITE</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="mb-4">
-          <label className="block text-sm font-medium mb-2">環境</label>
-          <select
+        <FormField label="環境">
+          <FormSelect
+            options={[
+              { value: "live", label: "本番 (sk_live_)" },
+              { value: "test", label: "テスト (sk_test_)" },
+            ]}
             value={keyEnv}
             onChange={(e) => setKeyEnv(e.target.value)}
-            className="w-full px-3 py-2 border rounded-lg"
-          >
-            <option value="live">本番 (sk_live_)</option>
-            <option value="test">テスト (sk_test_)</option>
-          </select>
-        </div>
+          />
+        </FormField>
+
+        <FormField label="有効期限">
+          <FormSelect
+            options={[
+              { value: "90", label: "90日" },
+              { value: "180", label: "180日" },
+              { value: "365", label: "365日" },
+            ]}
+            placeholder="無期限"
+            value={keyExpiryDays}
+            onChange={(e) => setKeyExpiryDays(e.target.value)}
+            data-testid="api-key-expiry-select"
+          />
+          <p className="text-xs text-muted-foreground">
+            期限を過ぎたキーは使えなくなります。期限の前に、新しいキーを発行して取引先に渡してください。
+          </p>
+        </FormField>
 
         <button
+          type="button"
           onClick={handleGenerateKey}
           disabled={loading || !clientId}
           data-testid="generate-api-key-btn"
-          className="w-full px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50"
+          className="w-full px-4 py-2 bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50 rounded-md text-sm transition-colors"
         >
           {loading ? "生成中..." : "APIキーを生成"}
         </button>
       </div>
 
       {generatedKey && (
-        <div className="mb-8 p-4 bg-green-50 border-2 border-green-200 rounded-lg">
-          <p className="text-sm text-gray-600 mb-2">
-            生成されたAPIキー（今回のみ表示）：
-          </p>
+        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-5 space-y-3">
+          <p className="text-sm text-emerald-200">生成されたAPIキー（今回のみ表示）：</p>
           <div
             data-testid="generated-api-key-value"
-            className="mb-4 p-3 bg-green-100 font-mono text-sm break-all"
+            className="p-3 bg-muted border border-border rounded-md font-mono text-sm text-foreground break-all"
           >
             {generatedKey.api_key}
           </div>
           <button
+            type="button"
             onClick={() => {
               navigator.clipboard.writeText(generatedKey.api_key);
             }}
-            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-md text-sm text-white transition-colors"
           >
             コピー
           </button>
         </div>
       )}
 
-      <div>
-        <h2 className="text-xl font-bold mb-4">アクティブなキー</h2>
+      {/* 一覧 */}
+      <div className="bg-card border border-border rounded-lg p-5">
+        <h2 className="text-sm text-muted-foreground mb-3">アクティブなキー</h2>
         {keys.length === 0 ? (
-          <p className="text-gray-500">キーがありません</p>
+          <p className="text-sm text-muted-foreground">キーがありません</p>
         ) : (
           <div
             data-testid="api-key-list"
@@ -209,19 +231,20 @@ export default function ApiKeysPage() {
               .map((key) => (
                 <div
                   key={key.id}
-                  className="flex justify-between items-center p-4 border rounded-lg"
+                  className="flex justify-between items-center p-4 border border-border rounded-lg"
                 >
                   <div>
                     <p className="font-medium">{key.name}</p>
-                    <p className="text-sm text-gray-500">
-                      {key.key_prefix}... | {key.scope}
+                    <p className="text-sm text-muted-foreground">
+                      {key.key_prefix}... | {key.scope} | {formatExpiry(key.expires_at)}
                     </p>
                   </div>
                   <button
+                    type="button"
                     onClick={() => handleRevokeKey(key.id)}
                     disabled={loading}
                     data-testid="revoke-api-key-btn"
-                    className="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 disabled:opacity-50"
+                    className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 rounded-md text-sm text-white transition-colors"
                   >
                     失効
                   </button>
@@ -232,18 +255,18 @@ export default function ApiKeysPage() {
 
         {keys.some((k) => !k.is_active) && (
           <>
-            <h2 className="text-xl font-bold mt-8 mb-4">失効済みキー</h2>
+            <h2 className="text-sm text-muted-foreground mt-6 mb-3">失効済みキー</h2>
             <div className="space-y-2">
               {keys
                 .filter((k) => !k.is_active)
                 .map((key) => (
                   <div
                     key={key.id}
-                    className="flex justify-between items-center p-4 border border-gray-300 rounded-lg opacity-60"
+                    className="flex justify-between items-center p-4 border border-border rounded-lg opacity-60"
                   >
                     <div>
                       <p className="font-medium line-through">{key.name}</p>
-                      <p className="text-sm text-gray-500">
+                      <p className="text-sm text-muted-foreground">
                         {key.key_prefix}... | {key.scope}
                       </p>
                     </div>

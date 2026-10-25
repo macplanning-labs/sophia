@@ -7,7 +7,8 @@ import { fetchReceivedEmails, apiPost, apiDelete } from "@/lib/api";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ExternalLink, CheckCircle2, X, Trash2, FileSpreadsheet } from "lucide-react";
+import { ExternalLink, CheckCircle2, X, Trash2, FileSpreadsheet, Settings } from "lucide-react";
+import { ReceiveSettingsDialog } from "@/components/mail/receive-settings-dialog";
 import { PageHeader } from "@/components/ui/page-header";
 import { DataTableWrapper } from "@/components/ui/data-table-wrapper";
 import { SearchableColumnHeader } from "@/components/ui/searchable-column-header";
@@ -61,6 +62,7 @@ function ReceivedEmailsContent() {
   const [knownDomainOnly, setKnownDomainOnly] = useState(!initialFrom);
   const [previewEmail, setPreviewEmail] = useState<ReceivedEmailRow | null>(null);
   const [openedFromUrl, setOpenedFromUrl] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [sourceFilter, setSourceFilter] = useState("");
   const [fromFilter, setFromFilter] = useState(initialFrom);
@@ -190,20 +192,27 @@ function ReceivedEmailsContent() {
             >
               取引先ドメインのみ
             </Button>
-            {selectedIds.size > 0 && (
-              <>
-                <span className="w-px h-5 bg-border mx-1" />
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="border-red-700/50 text-red-400 hover:text-red-300 hover:border-red-600 gap-1"
-                  onClick={() => deleteMutation.mutate(Array.from(selectedIds))}
-                  disabled={deleteMutation.isPending}
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> {selectedIds.size}件を削除
-                </Button>
-              </>
-            )}
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-border text-foreground gap-1"
+              onClick={() => setSettingsOpen(true)}
+              title="受信の設定(取引先として扱わないドメイン)"
+            >
+              <Settings className="w-3.5 h-3.5" /> 設定
+            </Button>
+            {/* 一括削除は消さず、選択が0件のときは非活性にする(バーが出入りしない) */}
+            <span className="w-px h-5 bg-border mx-1" />
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-red-700/50 text-red-400 hover:text-red-300 hover:border-red-600 gap-1"
+              onClick={() => deleteMutation.mutate(Array.from(selectedIds))}
+              disabled={selectedIds.size === 0 || deleteMutation.isPending}
+              title={selectedIds.size === 0 ? "削除するメールを、左のチェックで選んでください" : undefined}
+            >
+              <Trash2 className="w-3.5 h-3.5" /> {selectedIds.size}件を削除
+            </Button>
           </div>
         }
       />
@@ -297,8 +306,10 @@ function ReceivedEmailsContent() {
                   {e.needs_manual_review && <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30 text-[10px]">要確認</Badge>}
                 </TableCell>
                 <TableCell className="text-right">
+                  {/* 左 = 本線(Driveで開く → 勤務表を取り込む → 確認済みにする)、右端 = 例外(削除)。
+                      ボタンは消さず、使えないときは非活性にする(行ごとに位置がずれない) */}
                   <div className="flex items-center justify-end gap-1.5" onClick={(ev) => ev.stopPropagation()}>
-                    {e.drive_link && (
+                    {e.drive_link ? (
                       <a
                         href={e.drive_link}
                         target="_blank"
@@ -308,18 +319,16 @@ function ReceivedEmailsContent() {
                       >
                         <ExternalLink className="w-3.5 h-3.5" />
                       </a>
-                    )}
-                    {e.needs_manual_review && (
-                      <button
-                        onClick={() => resolveMutation.mutate(e.id)}
-                        disabled={resolveMutation.isPending}
-                        className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
-                        title="手動で対応済みにする（既存の受注書・請求書等への反映は別途手動で行ってください）"
+                    ) : (
+                      <span
+                        aria-disabled="true"
+                        className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors opacity-40 cursor-not-allowed pointer-events-none"
+                        title="Driveに保存されていません"
                       >
-                        <CheckCircle2 className="w-3.5 h-3.5" /> 確認済みにする
-                      </button>
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </span>
                     )}
-                    {isTimesheetMail(e) && (
+                    {isTimesheetMail(e) ? (
                       <Link
                         href="/timesheet-matching"
                         className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-sky-500/10 text-sky-400 border border-sky-500/30 hover:bg-sky-500/20 transition-colors"
@@ -327,11 +336,27 @@ function ReceivedEmailsContent() {
                       >
                         <FileSpreadsheet className="w-3.5 h-3.5" /> 勤務表を取り込む
                       </Link>
+                    ) : (
+                      <span
+                        aria-disabled="true"
+                        className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-sky-500/10 text-sky-400 border border-sky-500/30 hover:bg-sky-500/20 transition-colors opacity-40 cursor-not-allowed pointer-events-none"
+                        title="勤務表のメールだけ、取り込めます"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5" /> 勤務表を取り込む
+                      </span>
                     )}
+                    <button
+                      onClick={() => resolveMutation.mutate(e.id)}
+                      disabled={!e.needs_manual_review || resolveMutation.isPending}
+                      className="flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+                      title={e.needs_manual_review ? "手動で対応済みにする（既存の受注書・請求書等への反映は別途手動で行ってください）" : "要確認のメールだけ、確認済みにできます"}
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" /> 確認済みにする
+                    </button>
                     <button
                       onClick={() => deleteMutation.mutate([e.id])}
                       disabled={deleteMutation.isPending}
-                      className="p-1.5 rounded-md text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                      className="p-1.5 rounded-md text-muted-foreground hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50 ml-3"
                       title="このメールを削除（不要と判断した場合）"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -422,37 +447,55 @@ function ReceivedEmailsContent() {
                 >
                   <ExternalLink className="w-3.5 h-3.5" /> Driveで開く
                 </a>
-              ) : <span />}
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => deleteMutation.mutate([previewEmail.id])}
-                  disabled={deleteMutation.isPending}
-                  className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+              ) : (
+                <span
+                  aria-disabled="true"
+                  className="flex items-center gap-1 text-xs text-muted-foreground opacity-40 cursor-not-allowed"
+                  title="Driveに保存されていません"
                 >
-                  <Trash2 className="w-3.5 h-3.5" /> 削除
-                </button>
-                {isTimesheetMail(previewEmail) && (
+                  <ExternalLink className="w-3.5 h-3.5" /> Driveで開く
+                </span>
+              )}
+              {/* 左から右へ: 勤務表を取り込む → 確認済みにする。例外の「削除」は右端。ボタンは消さず、使えないときは非活性にする */}
+              <div className="flex items-center gap-2">
+                {isTimesheetMail(previewEmail) ? (
                   <Link
                     href="/timesheet-matching"
                     className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-sky-500/10 text-sky-400 border border-sky-500/30 hover:bg-sky-500/20 transition-colors"
                   >
                     <FileSpreadsheet className="w-3.5 h-3.5" /> 勤務表を取り込む
                   </Link>
-                )}
-                {previewEmail.needs_manual_review && (
-                  <button
-                    onClick={() => { resolveMutation.mutate(previewEmail.id); setPreviewEmail(null); }}
-                    disabled={resolveMutation.isPending}
-                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+                ) : (
+                  <span
+                    aria-disabled="true"
+                    className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-sky-500/10 text-sky-400 border border-sky-500/30 hover:bg-sky-500/20 transition-colors opacity-40 cursor-not-allowed pointer-events-none"
+                    title="勤務表のメールだけ、取り込めます"
                   >
-                    <CheckCircle2 className="w-3.5 h-3.5" /> 確認済みにする
-                  </button>
+                    <FileSpreadsheet className="w-3.5 h-3.5" /> 勤務表を取り込む
+                  </span>
                 )}
+                <button
+                  onClick={() => { resolveMutation.mutate(previewEmail.id); setPreviewEmail(null); }}
+                  disabled={!previewEmail.needs_manual_review || resolveMutation.isPending}
+                  className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/20 transition-colors disabled:opacity-50"
+                  title={!previewEmail.needs_manual_review ? "要確認のメールだけ、確認済みにできます" : undefined}
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" /> 確認済みにする
+                </button>
+                <button
+                  onClick={() => deleteMutation.mutate([previewEmail.id])}
+                  disabled={deleteMutation.isPending}
+                  className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors disabled:opacity-50 ml-3"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> 削除
+                </button>
               </div>
             </div>
           </div>
         </div>
       )}
+
+      <ReceiveSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

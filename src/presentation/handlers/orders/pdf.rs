@@ -120,3 +120,59 @@ pub async fn build_purchase_order_pdf_data(
         ..Default::default()
     })
 }
+
+/// 注文書の PDF を作る(送るとき・相手が開くとき共通)
+pub async fn purchase_order_pdf_bytes(pool: &PgPool, order: &PurchaseOrder) -> Result<Vec<u8>, String> {
+    let data = build_purchase_order_pdf_data(pool, order).await.map_err(|e| format!("PDFデータ構築エラー: {e}"))?;
+    crate::domain::services::pdf_generator::PdfGenerator::new()
+        .generate_purchase_order_pdf(&data)
+        .map_err(|e| format!("注文書PDF生成エラー: {e}"))
+}
+
+/// 注文書を送った: 送った瞬間の PDF を残す(DEMO-000214)。失敗しても送信は成功のまま
+pub async fn record_purchase_order_sent(pool: &PgPool, order: &PurchaseOrder, partner_name: &str) {
+    use crate::domain::services::issued_document::{record_sent, DocType, Issued};
+    match purchase_order_pdf_bytes(pool, order).await {
+        Ok(pdf) => {
+            record_sent(pool, Issued {
+                doc_type: DocType::PurchaseOrder,
+                doc_ref: &order.order_id,
+                party_name: partner_name,
+                target_month: chrono::Datelike::with_day(&order.work_start, 1),
+                amount: None,
+                pdf: &pdf,
+            })
+            .await
+        }
+        Err(e) => tracing::error!("[発行した書類] 注文書 {} の PDF を作れず、残せませんでした: {e}", order.order_id),
+    }
+}
+
+/// 注文書が承諾された: 承諾の瞬間の注文請書 PDF を残す(DEMO-000214)。失敗しても承諾は成功のまま
+/// (ポータルの承諾は partner_portal/order.rs で、照合値と一緒に残す。こちらはメールのリンクからの承諾用)
+pub async fn record_purchase_order_accepted(pool: &PgPool, order: &PurchaseOrder) {
+    use crate::domain::services::issued_document::{record_sent, DocType, Issued};
+    let partner_name = crate::infrastructure::repositories::order_repo::find_partner_name(pool, &order.partner_id)
+        .await
+        .unwrap_or_default();
+    let pdf = match build_purchase_order_pdf_data(pool, order).await {
+        Ok(data) => crate::domain::services::pdf_generator::PdfGenerator::new()
+            .generate_acceptance_pdf(&data)
+            .map_err(|e| format!("注文請書PDF生成エラー: {e}")),
+        Err(e) => Err(format!("PDFデータ構築エラー: {e}")),
+    };
+    match pdf {
+        Ok(pdf) => {
+            record_sent(pool, Issued {
+                doc_type: DocType::Acceptance,
+                doc_ref: &order.order_id,
+                party_name: &partner_name,
+                target_month: chrono::Datelike::with_day(&order.work_start, 1),
+                amount: None,
+                pdf: &pdf,
+            })
+            .await
+        }
+        Err(e) => tracing::error!("[発行した書類] 注文請書 {} の PDF を作れず、残せませんでした: {e}", order.order_id),
+    }
+}

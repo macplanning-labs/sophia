@@ -1,218 +1,96 @@
-/// infrastructure/repositories/attempt_lock_store.rs — auth_core::domain::attempt_lock::AttemptStore のインメモリ実装
+/// infrastructure/repositories/attempt_lock_store.rs — auth_core::domain::attempt_lock::AttemptStore の DB 実装
 ///
-/// 旧 src/presentation/login_guard.rs（login_key/portal_key/mfa_key の独自実装）から
-/// このトレイト形状へ移行済み。login_guard.rs は完全に不要になったため削除した。
-/// 社員/管理者ログイン(`routes.rs`)・ポータルログイン(`portal.rs`)・MFA検証(`webauthn.rs`)の
-/// 3箇所がそれぞれ独立した `InMemoryAttemptStore` インスタンスを使う（名前空間の混線防止）。
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Instant;
-
+/// 以前は `InMemoryAttemptStore`(プロセス内のメモリ)で数えていたため、再起動で全部消え、複数台でも共有されなかった。
+/// 今は `s_login_attempt`(`login_attempt_repo`)に記録する(DEMO-000233 S2-D / 項目6-1)。
+/// 使うのは、ポータルのマジックリンク(`kind = portal`)と、二要素認証の確認(`kind = mfa`)。
+/// パスワードログインは、アカウント単位と IP 単位の 2 つを数えるため `login_attempt_repo::reserve_password_attempt` を直接使う。
+///
+/// キーは「IP:識別子」の文字列をそのまま SHA-256 にして保存する(メールアドレスを平文で残さない)。
+/// 数える窓(`window`)と上限(`max_attempts`)は、生成時の `AttemptLockConfig` を使う
+/// (トレイトの `cfg` 引数は、呼び出し側が同じ設定を渡している前提で、ここでは使わない)。
 use auth_core::domain::attempt_lock::{AttemptLockConfig, AttemptStore};
 use auth_core::error::AuthError;
+use sqlx::PgPool;
 
-#[derive(Debug, Clone)]
-struct Bucket {
-    failures: u32,
-    window_start: Instant,
-    locked_until: Option<Instant>,
+use crate::infrastructure::repositories::login_attempt_repo as repo;
+
+pub struct PgAttemptStore {
+    pool: PgPool,
+    kind: &'static str,
+    cfg: AttemptLockConfig,
 }
 
-/// インメモリ試行回数制限ストア
-#[derive(Debug)]
-pub struct InMemoryAttemptStore {
-    store: Mutex<HashMap<String, Bucket>>,
-}
+impl PgAttemptStore {
+    pub fn new(pool: PgPool, kind: &'static str, cfg: AttemptLockConfig) -> Self {
+        Self { pool, kind, cfg }
+    }
 
-impl InMemoryAttemptStore {
-    pub fn new() -> Self {
-        Self {
-            store: Mutex::new(HashMap::new()),
+    fn window_secs(&self) -> i64 {
+        self.cfg.window.as_secs() as i64
+    }
+
+    fn max(&self) -> i64 {
+        i64::from(self.cfg.max_attempts)
+    }
+
+    /// 試行を 1 件記録してから数える(判定の前に記録する。DEMO-000233 S2-D / 項目6-1 の修正)。
+    /// 確認→記録→再確認の 3 手だと、同時に送られた試行が全部「まだ記録されていない」ものとして通ってしまう。
+    /// 記録してから数えれば、先に記録された行は後の数えから必ず見えるので、上限を超えて通らない
+    /// (読み取り時点の行は、INSERT が文ごとにコミット済みのため)。
+    ///
+    /// - `Ok(None)`: 試行してよい(記録した 1 件は残す。失敗なら数えとして残り、成功なら `reset` で消す)。
+    /// - `Ok(Some(秒))`: ロック中。記録した 1 件は消す(ロック中の試行は記録しない)。`秒` のあと再試行できる。
+    pub async fn reserve(&self, key: &str) -> Result<Option<u64>, AuthError> {
+        let key_hash = repo::hash_key(key);
+        let id = repo::insert_attempt(&self.pool, self.kind, &key_hash, None)
+            .await
+            .map_err(db_error)?;
+        let count = repo::count_failures(&self.pool, self.kind, &key_hash, None, self.window_secs())
+            .await
+            .map_err(db_error)?;
+        if count <= self.max() {
+            return Ok(None);
         }
-    }
-
-    fn now() -> Instant {
-        Instant::now()
+        repo::delete_attempt(&self.pool, id).await.map_err(db_error)?;
+        let secs = repo::lock_remaining_secs(&self.pool, self.kind, &key_hash, None, self.window_secs(), self.max())
+            .await
+            .map_err(db_error)?;
+        Ok(Some(secs.unwrap_or(1).max(1) as u64))
     }
 }
 
-impl Default for InMemoryAttemptStore {
-    fn default() -> Self {
-        Self::new()
-    }
+fn db_error(e: sqlx::Error) -> AuthError {
+    tracing::error!("試行回数の保存に失敗: {:?}", e);
+    AuthError::Internal("試行回数の保存に失敗しました".to_string())
 }
 
 #[async_trait::async_trait]
-impl AttemptStore for InMemoryAttemptStore {
-    async fn record_failure(&self, key: &str, cfg: &AttemptLockConfig) -> Result<(), AuthError> {
-        let mut map = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        let t = Self::now();
-
-        let bucket = map.entry(key.to_string()).or_insert_with(|| Bucket {
-            failures: 0,
-            window_start: t,
-            locked_until: None,
-        });
-
-        // チェック: 現在ロック中か
-        if let Some(until) = bucket.locked_until {
-            if t < until {
-                // まだロック中 — 何もしない
-                return Ok(());
-            }
-            // ロック期限が切れた → リセット
-            bucket.locked_until = None;
-            bucket.failures = 0;
-            bucket.window_start = t;
-        }
-
-        // ウィンドウ期限が切れたか
-        if t.duration_since(bucket.window_start) > cfg.window {
-            bucket.failures = 0;
-            bucket.window_start = t;
-        }
-
-        // 失敗回数を増加
-        bucket.failures = bucket.failures.saturating_add(1);
-
-        // max_attempts に達したかチェック
-        if bucket.failures >= cfg.max_attempts {
-            bucket.locked_until = Some(t + cfg.lock_duration);
-            bucket.failures = 0;
-            bucket.window_start = t;
-        }
-
-        Ok(())
+impl AttemptStore for PgAttemptStore {
+    async fn record_failure(&self, key: &str, _cfg: &AttemptLockConfig) -> Result<(), AuthError> {
+        repo::insert_attempt(&self.pool, self.kind, &repo::hash_key(key), None)
+            .await
+            .map(|_| ())
+            .map_err(db_error)
     }
 
     async fn reset(&self, key: &str) -> Result<(), AuthError> {
-        let mut map = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        map.remove(key);
-        Ok(())
+        repo::invalidate_failures(&self.pool, self.kind, &repo::hash_key(key), None)
+            .await
+            .map(|_| ())
+            .map_err(db_error)
     }
 
     async fn locked_retry_after_seconds(&self, key: &str) -> Result<Option<u64>, AuthError> {
-        let mut map = self.store.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(bucket) = map.get_mut(key) else {
+        let key_hash = repo::hash_key(key);
+        let count = repo::count_failures(&self.pool, self.kind, &key_hash, None, self.window_secs())
+            .await
+            .map_err(db_error)?;
+        if count < self.max() {
             return Ok(None);
-        };
-
-        let t = Self::now();
-
-        // ロック中かチェック
-        if let Some(until) = bucket.locked_until {
-            if t < until {
-                let remaining = until.saturating_duration_since(t).as_secs().max(1);
-                return Ok(Some(remaining));
-            }
-            // ロック期限が切れた → 表面上はロックなし
-            bucket.locked_until = None;
-            bucket.failures = 0;
-            bucket.window_start = t;
         }
-
-        // ウィンドウ期限が切れたか
-        // （これは locked_retry_after_seconds 呼び出し時に確認する必要がないが、
-        // record_failure 側との一貫性のため確認してからカウンターをリセット）
-        // ただし、この関数は呼び出し側で lock status を確認するだけなので、
-        // ウィンドウ期限切れ時にカウンターをリセットする必要はない
-        // （record_failure が次に呼ばれる時にリセットされる）
-        // ここはシンプルに、ロックしていなければ None を返す
-
-        Ok(None)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn locks_after_five_failures() {
-        let store = InMemoryAttemptStore::new();
-        let cfg = AttemptLockConfig::default();
-        let key = "test:login:user@example.com";
-
-        // 4回失敗 — ロックなし
-        for _ in 0..4 {
-            store.record_failure(key, &cfg).await.unwrap();
-            let status = store.locked_retry_after_seconds(key).await.unwrap();
-            assert_eq!(status, None, "should not be locked yet");
-        }
-
-        // 5回目の失敗
-        store.record_failure(key, &cfg).await.unwrap();
-        let status = store.locked_retry_after_seconds(key).await.unwrap();
-        assert!(status.is_some(), "should be locked after 5 failures");
-        assert!(status.unwrap() > 0, "retry_after_secs should be > 0");
-    }
-
-    #[tokio::test]
-    async fn success_resets_failures() {
-        let store = InMemoryAttemptStore::new();
-        let cfg = AttemptLockConfig::default();
-        let key = "test:login:ok@example.com";
-
-        // 3回失敗
-        for _ in 0..3 {
-            store.record_failure(key, &cfg).await.unwrap();
-        }
-
-        // リセット
-        store.reset(key).await.unwrap();
-
-        // ロック状態じゃない
-        let status = store.locked_retry_after_seconds(key).await.unwrap();
-        assert_eq!(status, None);
-
-        // 新しいラウンドで4回失敗 — まだロックしない
-        for _ in 0..4 {
-            store.record_failure(key, &cfg).await.unwrap();
-        }
-        let status = store.locked_retry_after_seconds(key).await.unwrap();
-        assert_eq!(
-            status, None,
-            "should not be locked after reset + 4 failures"
-        );
-
-        // 5回目でロック
-        store.record_failure(key, &cfg).await.unwrap();
-        let status = store.locked_retry_after_seconds(key).await.unwrap();
-        assert!(status.is_some(), "should be locked after 5 failures");
-    }
-
-    #[tokio::test]
-    async fn lock_expires_after_duration() {
-        let store = InMemoryAttemptStore::new();
-        let cfg = AttemptLockConfig {
-            window: Duration::from_millis(50),
-            max_attempts: 5,
-            lock_duration: Duration::from_millis(50),
-            max_body_bytes: 32 * 1024,
-        };
-        let key = "test:lock:expiry";
-
-        // 5回失敗してロック
-        for _ in 0..5 {
-            store.record_failure(key, &cfg).await.unwrap();
-        }
-
-        // ロック中であることを確認
-        let status = store.locked_retry_after_seconds(key).await.unwrap();
-        assert!(
-            status.is_some(),
-            "should be locked immediately after reaching max_attempts"
-        );
-
-        // ロック期限が切れるまで待つ
-        tokio::time::sleep(Duration::from_millis(80)).await;
-
-        // ロックが解除されたことを確認
-        let status = store.locked_retry_after_seconds(key).await.unwrap();
-        assert_eq!(
-            status, None,
-            "should not be locked after lock_duration expires"
-        );
+        let secs = repo::lock_remaining_secs(&self.pool, self.kind, &key_hash, None, self.window_secs(), self.max())
+            .await
+            .map_err(db_error)?;
+        Ok(Some(secs.unwrap_or(1).max(1) as u64))
     }
 }
